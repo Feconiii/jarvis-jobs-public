@@ -46,8 +46,15 @@ you open.
 
 ## Getting started
 
-See **[SETUP.md](SETUP.md)** — about 20 minutes to a working dashboard, longer
-to write your CV and preferences well (which is the part that matters).
+**The easy way:** open this folder in [Claude Code](https://claude.com/claude-code)
+and say *"set this up"* (or type `/jarvis-setup`). Claude checks what is
+missing, interviews you — what you are looking for, your work authorization,
+your CV, your application answers, the companies to track — writes each file
+as you go, and finishes with the first scan and the browser extension.
+
+**By hand:** see **[SETUP.md](SETUP.md)** — about 20 minutes to a working
+dashboard, longer to write your CV and preferences well (which is the part
+that matters). `npm run jarvis:setup-check` shows what is left.
 
 ```bash
 npm install

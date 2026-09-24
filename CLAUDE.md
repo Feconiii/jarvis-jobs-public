@@ -5,6 +5,17 @@ ATS APIs, triage that flags instead of dropping, fit scoring against the
 user's own rules, a dashboard, tailored resumes, and a browser apply engine
 that fills forms but never presses Submit. See README.md and SETUP.md.
 
+## First run — set the user up before anything else
+
+At the start of a session on this repo, run `node jarvis/setup-check.mjs`
+(built-ins only; works before `npm install`). If it reports anything missing
+or still holding the examples' values, tell the user in one line and offer to
+set it up now, following **`.claude/skills/jarvis-setup/SKILL.md`** (the user
+can also type `/jarvis-setup`). That skill is the interview: what to ask, in
+what order, which file each answer goes into, and the rule that nothing is
+written they did not say. Do not scan, build resumes or fill forms for a user
+whose `cv.md` and `data/jarvis/apply-profile.yml` are not theirs yet.
+
 ## Layout
 
 | Path | What it is |

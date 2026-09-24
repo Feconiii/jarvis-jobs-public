@@ -1,5 +1,10 @@
 # Setting up your own Jarvis Jobs
 
+> **Faster with Claude Code:** open the folder in Claude Code and say *"set this
+> up"* or type `/jarvis-setup`. It runs the steps below as an interview and
+> writes each file with you. `npm run jarvis:setup-check` shows what is left at
+> any point.
+
 About 20 minutes to a working dashboard. The files you write about yourself
 (steps 3–5) are what make it good; give them the time.
 

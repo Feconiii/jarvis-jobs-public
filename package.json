@@ -64,7 +64,8 @@
     "jarvis:lca": "node jarvis/lca-import.mjs",
     "jarvis:unanswered": "node jarvis/unanswered.mjs",
     "jarvis:curate": "node jarvis/curate.mjs",
-    "jarvis:test:personal": "node jarvis/apply-cli.test.mjs && node jarvis/resume-variants.test.mjs && node jarvis/dashboard.test.mjs && node --test jarvis/panel-api.test.mjs && node jarvis/apply-plan.test.mjs && node jarvis/resume-tailor.test.mjs && node --test jarvis/tailor-llm.test.mjs && node jarvis/resume-for-job.test.mjs && node jarvis/resume.test.mjs && node jarvis/fit.test.mjs && node --test jarvis/apply-page.test.mjs && node --test jarvis/resume-plan.test.mjs && node --test jarvis/essay.test.mjs && node --test jarvis/reuse-api.test.mjs && node jarvis/earns-its-keep.test.mjs && node jarvis/proofread.test.mjs && node jarvis/corpus.test.mjs && node jarvis/unanswered.test.mjs"
+    "jarvis:test:personal": "node jarvis/apply-cli.test.mjs && node jarvis/resume-variants.test.mjs && node jarvis/dashboard.test.mjs && node --test jarvis/panel-api.test.mjs && node jarvis/apply-plan.test.mjs && node jarvis/resume-tailor.test.mjs && node --test jarvis/tailor-llm.test.mjs && node jarvis/resume-for-job.test.mjs && node jarvis/resume.test.mjs && node jarvis/fit.test.mjs && node --test jarvis/apply-page.test.mjs && node --test jarvis/resume-plan.test.mjs && node --test jarvis/essay.test.mjs && node --test jarvis/reuse-api.test.mjs && node jarvis/earns-its-keep.test.mjs && node jarvis/proofread.test.mjs && node jarvis/corpus.test.mjs && node jarvis/unanswered.test.mjs",
+    "jarvis:setup-check": "node jarvis/setup-check.mjs"
   },
   "keywords": [
     "job-search",
