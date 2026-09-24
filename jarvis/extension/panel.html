@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2230; --line:#2a3240; --line2:#39424f;
+    --text:#e6edf3; --dim:#9aa7b4; --dim2:#7d8b99;
+    --accent:#5aa2ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --chip:#232b38;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { padding: 10px 12px 24px; min-width: 300px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+  header .brand { font-weight: 700; font-size: 14px; letter-spacing: .2px; }
+  header .ver { color: var(--dim2); font-size: 11px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; margin-bottom: 10px; }
+  .card h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--dim); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+
+  /* THE JOB, IN ONE COMPACT BLOCK (2026-09-23). The logo, the title and the
+     fit score share a row; the reasons are one line under them; the skills
+     fold away. The fit ring and the skill chips used to take a third of the
+     panel's height above the Fill button. */
+  .job { display: grid; grid-template-columns: 38px 1fr auto; gap: 10px; align-items: start; }
+  .logo { width: 38px; height: 38px; border-radius: 8px; background: var(--chip); display: grid; place-items: center; font-weight: 700; font-size: 14px; color: var(--dim); overflow: hidden; }
+  .logo img { width: 100%; height: 100%; object-fit: contain; background: #fff; }
+  .job .title { font-weight: 700; font-size: 14px; line-height: 1.25; }
+  .job .sub { color: var(--dim); margin-top: 2px; font-size: 12.5px; }
+  .job .pay { color: var(--text); margin-top: 2px; font-size: 12px; }
+  .ring { --p: 0; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+    background: conic-gradient(var(--ring) calc(var(--p) * 1%), var(--chip) 0); }
+  .ring > div { width: 31px; height: 31px; border-radius: 50%; background: var(--panel); display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+  .fitline { margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .fitline .band { color: var(--text); font-weight: 600; }
+  .fold { margin-top: 6px; font-size: 12px; color: var(--dim2); }
+  .fold > summary { cursor: pointer; list-style: none; }
+  .fold > summary::-webkit-details-marker { display: none; }
+  .fold > summary::after { content: ' \25BE'; color: var(--accent); }
+  .fold[open] > summary::after { content: ' \25B4'; }
+  .fold > summary:hover { color: var(--dim); }
+  .skills { margin-top: 6px; font-size: 12px; color: var(--dim); }
+  .skills b { color: var(--text); font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .chip { background: var(--chip); border: 1px solid var(--line2); border-radius: 999px; padding: 1px 8px; font-size: 11.5px; color: var(--text); }
+  .chip.miss { color: var(--dim); border-style: dashed; }
+
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line2); background: var(--panel2); color: var(--text); padding: 8px 12px; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary { width: 100%; background: linear-gradient(135deg, #3b7ddd, #5aa2ff); border: 0; color: #fff; font-weight: 700; font-size: 14px; padding: 10px; }
+  button.small { padding: 4px 9px; font-size: 12px; }
+  a.btn-a { display: inline-block; text-decoration: none; border-radius: 8px; border: 1px solid var(--line2);
+            background: var(--panel2); color: var(--text); padding: 4px 9px; font-size: 12px; cursor: pointer; }
+  a.btn-a:hover { border-color: var(--accent); }
+
+  /* FILL, AND WHAT IT IS DOING RIGHT NOW. The progress line the page used to
+     draw in the corner of the form lives here, under the button (2026-09-23). */
+  #live { margin-top: 7px; padding: 5px 8px; border-radius: 6px; background: #1b2027; color: #79c0ff; font-size: 12.5px; }
+  .status { margin-top: 7px; font-size: 12.5px; color: var(--dim); }
+  .status .n { color: var(--text); font-weight: 600; }
+  .status .left { color: var(--warn); }
+  .status .submit { margin-top: 3px; font-size: 11.5px; color: var(--dim2); }
+
+  .phase { margin-top: 8px; }
+  .phase .bar { height: 4px; border-radius: 3px; background: var(--chip); overflow: hidden; }
+  .phase .bar i { display: block; height: 100%; background: linear-gradient(90deg, #3b7ddd, #5aa2ff); transition: width .4s ease; }
+  .phase .what { margin-top: 5px; font-size: 12px; color: var(--dim); }
+
+  /* THREE TABS, ONE CARD AT A TIME. Answers holds what the fill did and every
+     "ask Claude"; Resume holds the PDF and the note that changes it; Cover
+     letter holds the letter. Sticky, so a long answer never scrolls the way
+     back out of reach. */
+  .tabs { display: flex; gap: 6px; margin: 12px 0 10px; position: sticky; top: 0; z-index: 3; background: var(--bg); padding: 4px 0; }
+  .tabs button { flex: 1; padding: 6px 4px; font-size: 12px; font-weight: 600; background: var(--panel); color: var(--dim); }
+  .tabs button.on { background: var(--chip); color: var(--text); border-color: var(--accent); }
+  .tabs button:disabled { opacity: .45; }
+  .tabs .count { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 4px; border-radius: 999px; background: #3b2a0a; color: #e3b341; font-size: 11px; line-height: 16px; }
+
+  #applied { margin: 0 0 10px; padding: 8px 10px; border-radius: 7px; font-size: 12.5px; line-height: 1.45; }
+  #applied.this { background: #14301c; border: 1px solid #2ea043; color: #7ee787; }
+  #applied.role { background: #2b2411; border: 1px solid #9e6a03; color: #e3b341; }
+  #applied b { font-weight: 600; }
+
+  .pdf { width: 100%; height: 520px; border: 1px solid var(--line); border-radius: 8px; background: #fff; display: block; }
+  .muted { color: var(--dim); }
+  .note { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  .empty { color: var(--dim); padding: 24px 6px; text-align: center; }
+  .empty b { color: var(--text); }
+  .audit { margin-top: 8px; font-size: 12px; }
+  .audit summary { cursor: pointer; color: var(--dim); }
+  .how { margin-top: 8px; font-size: 12px; color: var(--dim2); }
+  .how summary { cursor: pointer; list-style: none; }
+  .how summary::-webkit-details-marker { display: none; }
+  .how summary::after { content: ' \25BE'; color: var(--accent); font-size: 14px; line-height: 1; vertical-align: -1px; }
+  .how[open] summary::after { content: ' \25B4'; }
+  .how summary:hover { color: var(--dim); }
+  .how p { margin: 6px 0 0; color: var(--dim); line-height: 1.5; }
+  .audit .row { margin: 6px 0; padding: 6px 8px; background: var(--panel2); border-radius: 6px; }
+  .audit .was { color: var(--dim2); text-decoration: line-through; }
+  .audit .now { color: var(--text); }
+  .row-btns { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+  .change { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
+  .change > summary { font-weight: 600; color: var(--dim); }
+  textarea { width: 100%; font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line2); border-radius: 8px; padding: 8px; resize: vertical; }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  input[type="text"], input:not([type]) { width: 100%; font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 8px; margin-top: 8px; }
+  input:focus { outline: none; border-color: var(--accent); }
+  .letter-text { white-space: pre-wrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 6px; font-size: 12.5px; line-height: 1.5; max-height: 420px; overflow: auto; }
+  /* The report's own markup (report.js) carries its colours inline; this only
+     gives its lists room in a 320px column. */
+  #answers-body ul { margin: 4px 0 0 16px; padding: 0; }
+  #answers-body li { margin: 4px 0; }
+  #answers-body details > summary::-webkit-details-marker { display: none; }
+  .err { color: var(--bad); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <header><span class="brand">Jarvis</span><span class="ver" id="ver"></span></header>
+
+  <div class="empty" id="empty">Open a job posting or its application form.</div>
+
+  <div id="main" hidden>
+    <div class="card">
+      <div class="job">
+        <div class="logo" id="logo"></div>
+        <div>
+          <div class="title" id="title"></div>
+          <div class="sub" id="sub"></div>
+          <div class="pay" id="pay"></div>
+        </div>
+        <div class="ring" id="ring" title="Fit score"><div id="score">–</div></div>
+      </div>
+      <div class="fitline"><span class="band" id="band"></span> <span id="why"></span></div>
+      <details class="fold" id="skills-fold"><summary>Skills it asks for</summary><div class="skills" id="skills"></div></details>
+    </div>
+
+    <div id="applied" hidden></div>
+    <button class="primary" id="fill">Fill this page</button>
+    <div id="live" hidden></div>
+    <div class="status" id="status"></div>
+
+    <div class="tabs" id="tabs" role="tablist">
+      <button id="tab-answers" data-tab="answers" role="tab" aria-selected="false">Answers<span class="count" id="answers-count" hidden></span></button>
+      <button class="on" id="tab-resume" data-tab="resume" role="tab" aria-selected="true">Resume</button>
+      <button id="tab-letter" data-tab="letter" role="tab" aria-selected="false">Cover letter</button>
+    </div>
+
+    <div class="card" id="answers" hidden>
+      <div id="answers-body" class="muted">Nothing filled on this page yet. Press <b>Fill this page</b>, and what it filled, what it wrote for you and what is left for you show here, each with an "ask Claude" beside it.</div>
+    </div>
+
+    <div class="card" id="resume">
+      <h2>Resume <span class="muted" id="family"></span></h2>
+      <div id="resume-body" class="muted">Looking for the resume written for this posting…</div>
+      <iframe class="pdf" id="pdf" hidden title="Tailored resume"></iframe>
+      <div class="note" id="qa" hidden></div>
+      <details class="audit" id="audit" hidden><summary>What was tailored</summary><div id="audit-body"></div></details>
+      <div class="row-btns">
+        <a class="small btn-a" id="download-pdf" hidden download="Alex Rivera Resume.pdf">Download</a>
+        <button class="small" id="attach-pdf" hidden>Put it in the slot</button>
+        <button class="small" id="open-pdf" hidden>Open in a tab</button>
+        <button class="small" id="rebuild" hidden>Build it again</button>
+        <span class="note" id="save-note"></span>
+      </div>
+      <details class="how"><summary>What these buttons do</summary>
+        <p>It saves and opens under its own name: <b>Alex Rivera - Company - Role.pdf</b>. <b>Put it in the slot</b> attaches it to an empty file slot on the page you are on — a slot that already holds a file is left alone.</p></details>
+      <!-- CHANGE IT lives with the resume it changes, folded (2026-09-23). It
+           was a third tab of its own, for one text box. -->
+      <details class="fold change" id="change-fold"><summary id="change-open">Change the resume</summary>
+        <div id="change">
+          <div class="note" id="request-shown" hidden></div>
+          <textarea id="request" rows="3" maxlength="600" placeholder="e.g. lead with the fixture work and keep the robotics; shorter Acme Steel; drop SAE"></textarea>
+          <div class="row-btns">
+            <button class="small" id="retailor">Rewrite with this note</button>
+            <span class="note" id="retailor-note"></span>
+          </div>
+          <details class="how"><summary>What a note can and cannot change</summary>
+            <p>Only what is already true of you goes on the page. A note can pick, order, emphasise and shorten; it cannot add a tool, a number or a claim.</p></details>
+        </div>
+      </details>
+    </div>
+
+    <div class="card" id="letter" hidden>
+      <h2>Cover letter <span class="muted" id="letter-when"></span></h2>
+      <div class="muted" id="letter-status">None written for this posting yet.</div>
+      <div class="letter-text" id="letter-text" hidden></div>
+      <div class="err" id="letter-problems" hidden></div>
+      <input id="letter-request" maxlength="600" placeholder="optional note, e.g. mention the cobot install">
+      <div class="row-btns">
+        <button class="small" id="letter-write">Write one</button>
+        <button class="small" id="letter-copy" hidden>Copy</button>
+        <button class="small" id="letter-fill" hidden>Put it in the box</button>
+        <button class="small" id="letter-attach" hidden>Attach it as a PDF</button>
+        <a class="small btn-a" id="letter-download" hidden>Download</a>
+        <span class="note" id="letter-note"></span>
+      </div>
+      <details class="how"><summary>Where the letter comes from, and where it goes</summary>
+        <p>Written from your CV and profile, in your voice, against this posting, on your letterhead with the company's address from the posting. A form with a cover-letter slot gets the PDF by itself; a form with a text box gets the text on your click. Read it before it goes anywhere: every figure and name is checked against cv.md and the posting.</p></details>
+    </div>
+  </div>
+
+  <script src="report.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

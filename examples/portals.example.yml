@@ -1,0 +1,62 @@
+# Jarvis Jobs — the companies you track
+#
+# Copy to portals.yml in the repo root (gitignored). The scanner reads every
+# enabled company's ATS board directly; nothing is scraped from job aggregators.
+#
+# You rarely write entries by hand: `npm run jarvis:discover -- --names "Zoox,Waymo" --write`
+# resolves company names to verified boards and appends them here, and the
+# discovery scripts (see SETUP.md) find companies you did not know to name.
+
+# Companies scanned first and flagged on the dashboard.
+watchlist:
+  - "Example Robotics"
+
+# Titles worth keeping. Anything matching a negative is flagged, never dropped.
+title_filter:
+  positive:
+    - "Mechanical Engineer"
+    - "Manufacturing Engineer"
+    - "Process Engineer"
+    - "Test Engineer"
+    - "New Grad"
+  negative:
+    - "Senior"
+    - "Staff"
+    - "Principal"
+  seniority_boost:
+    - "New Grad"
+    - "Entry Level"
+
+location_filter:
+  always_allow: ["United States", "US", "USA", "Remote"]
+  allow: [", CA", ", TX", ", WA", "Remote"]
+  block: []
+
+salary_filter:
+  min: 70000
+  max: 400000
+  currency: "USD"
+
+# Optional web-search queries some discovery passes use.
+search_queries:
+  - name: "Greenhouse — mechanical new grad"
+    query: 'site:job-boards.greenhouse.io "Mechanical Engineer" "New Grad"'
+    enabled: false
+
+tracked_companies:
+  # Greenhouse: careers_url plus the board API.
+  - name: "Example Robotics"
+    careers_url: "https://job-boards.greenhouse.io/examplerobotics"
+    api: "https://boards-api.greenhouse.io/v1/boards/examplerobotics/jobs"
+    enabled: true
+  # Lever and Ashby: the careers URL is enough.
+  - name: "Example Motors"
+    careers_url: "https://jobs.lever.co/examplemotors"
+    enabled: true
+  - name: "Example Energy"
+    careers_url: "https://jobs.ashbyhq.com/exampleenergy"
+    enabled: true
+  # Workday: tenant, instance and site, exactly as the careers page shows it.
+  - name: "Example Semiconductor"
+    careers_url: "https://examplesemi.wd1.myworkdayjobs.com/External"
+    enabled: true

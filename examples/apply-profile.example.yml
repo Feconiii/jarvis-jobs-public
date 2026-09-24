@@ -1,0 +1,156 @@
+# Jarvis Jobs — application profile
+#
+# Copy to data/jarvis/apply-profile.yml (that folder is gitignored) and replace
+# every value with your own. This is what the browser extension types into
+# application forms. Everything here is a fact about YOU: leave a key empty
+# rather than guess, and the form field is left for you with the reason.
+#
+# Values are plain strings unless noted. Answers to yes/no questions are "Yes"
+# or "No"; the engine matches them to whatever wording a form uses.
+
+identity:
+  first_name: "Alex"
+  last_name: "Rivera"
+  full_name: "Alex Rivera"
+  preferred_first_name: "Alex"
+  preferred_last_name: "Rivera"
+  preferred_full_name: "Alex Rivera"
+  email: "alex@example.com"
+  phone: "+1 (555) 010-0000"
+  location: "Springfield, Illinois"
+  address_line1: "1 Example Street"
+  city: "Springfield"
+  state: "Illinois"
+  postal_code: "12345"
+  country: "United States"
+  linkedin: "https://www.linkedin.com/in/your-handle"
+  website: "yourportfolio.example"     # bare domain if that is how you want it typed
+  portfolio: "yourportfolio.example"
+  github: ""                            # empty: GitHub boxes get the portfolio instead
+  salutation: ""
+
+education:
+  school: "State University"
+  degree: "Bachelor of Science"
+  discipline: "Mechanical Engineering"
+  graduation: "May 2027"
+  graduation_year: "2027"
+  gpa: "3.6"
+  degree_level: "Bachelor's"
+
+# Each language you list is added on Workday's "Languages" step. Proficiency
+# questions always take the top level the form offers.
+languages:
+  - name: "English"
+    proficiency: "Fluent"
+
+# Education and work history, entry by entry, for forms that ask for a table
+# (Workday "My Experience", SmartRecruiters). Months as "May 2026".
+education_entries:
+  - school: "State University"
+    degree: "Bachelor of Science"
+    field_of_study: "Mechanical Engineering"
+    gpa: "3.6"
+    first_year: "2023"
+    last_year: "2027"
+
+work_experience:
+  - title: "Manufacturing Engineering Intern"
+    company: "Example Manufacturing Co."
+    location: "Springfield, Illinois"
+    start: "May 2026"
+    end: "August 2026"
+    description: "One or two sentences, taken from your CV."
+
+answers:
+  phone_type: "Mobile"
+  # Work authorization — answer for YOUR situation. These drive the visa rules.
+  authorized_to_work_us: "Yes"
+  require_sponsorship: "No"
+  visa_status_note: ""
+  us_person: ""
+  protected_individual: ""
+  security_clearance: "No"
+  currently_on_opt: ""
+  stem_opt_extension_eligible: ""
+  held_h1b: "No"
+  held_j1: "No"
+  outside_us_12_months: ""
+  permanent_resident_elsewhere: ""
+  citizenship_status: ""
+  citizenship_country: ""
+  restricted_country_citizen: "No"
+  can_verify_right_to_work: "Yes"
+  # Availability and logistics
+  eligible_to_begin_immediately: ""
+  requires_cpt: ""
+  earliest_start: "June 2027"
+  willing_to_relocate: "Yes"
+  willing_onsite: "Yes"
+  remote_or_onsite: "Open to on-site, hybrid, or remote"
+  preferred_region: ""
+  notice_period: ""
+  # School
+  currently_in_school: "Yes"
+  year_in_school: "Senior"
+  highest_education: "Bachelor's"
+  field_of_study: "Mechanical Engineering"
+  graduation_season: "Spring 2027"
+  stem_degree: "Yes"
+  opportunity_type: "Full-time"
+  # Background
+  current_company: ""
+  current_title: ""
+  reason_for_leaving: "Internship ended"
+  current_employer_reason: "Currently employed"
+  years_relevant_experience: ""
+  meets_basic_requirements: "Yes"
+  # Comma-separated, taken from your CV; skills boxes are filled from this list,
+  # ranked for each posting.
+  skills: "SolidWorks, GD&T, FEA, Python, MATLAB"
+  salary_expectation: "Open — targeting market rate for the role and location"
+  how_heard: "LinkedIn"
+  heard_about_us: "Job Board or Social Media"
+  # History questions
+  previously_employed_here: "No"
+  previously_applied_here: "No"
+  relatives_at_company: "No"
+  terminated_for_cause: "No"
+  government_employee: "No"
+  board_membership: "No"
+  worked_via_agency: "No"
+  non_compete: "No"
+  employer_agreement: "No"
+  essential_functions: "Yes"
+  over_18: "Yes"
+  under_18_permit: "Not Applicable"
+  # Consents. The engine ticks these because you said yes here; you still
+  # review the whole form, and you press Submit yourself.
+  ai_screening_consent: "Yes"
+  communication_optin: "Yes"
+  talent_community_optin: "Yes"
+  future_contact: "Yes"
+  data_processing_consent: "Yes"
+  background_check_consent: "Yes"
+  agree_to_background_check: "Yes"
+  self_id_language: "English"
+
+# Voluntary self-identification. A key you leave out is left blank on the form.
+eeo:
+  gender: ""
+  hispanic: ""
+  race: ""
+  veteran: ""
+  disability: ""
+
+policy:
+  # Tick "I certify / I agree / I consent" boxes automatically. Each one is
+  # listed for review; Submit is always yours.
+  auto_check_certifications: true
+
+documents:
+  resume_path: ""        # optional: a fixed resume; normally the tailored one is built per posting
+  cover_letter_path: ""
+
+# Labels the engine must never fill, whatever else matches.
+never_fill: ["signature", "date of birth", "ssn", "social security"]

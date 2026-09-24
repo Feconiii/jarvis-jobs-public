@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Jarvis Apply",
+  "version": "1.47.0",
+  "description": "Fills a job application from the local Jarvis server, in the browser you are already signed into. One press follows the tab through every page of the application. Never presses Submit.",
+  "permissions": [
+    "scripting",
+    "activeTab",
+    "storage",
+    "alarms",
+    "tabs",
+    "webNavigation",
+    "contextMenus",
+    "sidePanel",
+    "downloads"
+  ],
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "host_permissions": [
+    "http://localhost:4300/*",
+    "http://127.0.0.1:4300/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Fill this application from Jarvis (and open the panel)"
+  },
+  "commands": {
+    "fill": {
+      "suggested_key": {
+        "default": "Alt+Shift+J"
+      },
+      "description": "Fill this application from Jarvis (and follow the tab)"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["panel.html", "panel.js", "report.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost:4300/*",
+      "http://127.0.0.1:4300/*"
+    ]
+  }
+}

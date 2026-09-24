@@ -1,0 +1,55 @@
+{
+  "_comment": "THE POOL — every sentence a resume may print. Copy to jarvis/resume-pool.json. Each bullet's text must appear VERBATIM in cv.md (the build refuses otherwise). Org keys and bullet keys are yours to name; jarvis/resume-variants.mjs and jarvis/resume-plan.mjs refer to them, so rename there too. `titles` gives one title per resume family (total-experience, automation, manufacturing, mechanical).",
+  "name": "Alex Rivera",
+  "contact": {
+    "location": "Springfield, IL",
+    "phone": "from config/profile.yml",
+    "email": "from config/profile.yml",
+    "linkedin": "from config/profile.yml"
+  },
+  "education": {
+    "school": "State University",
+    "location": "Springfield, IL",
+    "degree": "Bachelor of Science in Mechanical Engineering",
+    "date": "May 2027",
+    "gpa": { "lead": "GPA", "text": "3.6" },
+    "honors": { "lead": "Honors", "text": "Dean's List" },
+    "coursework": ["Machine Design", "Manufacturing Processes", "Heat Transfer", "Finite Element Analysis"]
+  },
+  "orgs": {
+    "firstjob": {
+      "org": "Example Manufacturing Co.",
+      "location": "Springfield, IL",
+      "date": "May 2026 – August 2026",
+      "group": "Manufacturing Engineering",
+      "titles": {
+        "total-experience": "Manufacturing Engineering Intern",
+        "automation": "Manufacturing Engineering Intern",
+        "manufacturing": "Manufacturing Engineering Intern",
+        "mechanical": "Manufacturing Engineering Intern"
+      },
+      "approvedTitles": ["Manufacturing Engineering Intern"],
+      "bullets": {
+        "fixture": {
+          "lead": "Fixture Design",
+          "text": "Designed a fixture in SolidWorks for an assembly step, with tolerance analysis, drawings and a bill of materials."
+        },
+        "time-study": {
+          "lead": "Line Time Study",
+          "text": "Ran time studies on a production line and documented the change that reduced cycle time."
+        }
+      }
+    }
+  },
+  "projects": {
+    "robotic-arm": {
+      "lead": "Robotic Arm",
+      "text": "Designed and built a 4-DOF arm with servo actuation and a 3D-printed gripper."
+    }
+  },
+  "skills": {
+    "cad": { "lead": "CAD/CAE", "items": ["SolidWorks", "Fusion 360", "Ansys"] },
+    "programming": { "lead": "Programming", "items": ["Python", "MATLAB"] },
+    "manufacturing": { "lead": "Manufacturing", "items": ["CNC machining", "3D printing", "GD&T"] }
+  }
+}
