@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { appendGateQuestions, GATE_QUESTION } from './enrich.mjs';
+import { appendGateQuestions, GATE_QUESTION, oracleDetailApi, detailSpec } from './enrich.mjs';
 import { classifyVisa } from './visa.mjs';
 
 // General Matter's real form, 2026-09-13, in the order the API returns it.
@@ -114,3 +114,63 @@ test('a duplicate label is carried once', () => {
 });
 
 console.log('enrich: form-question gate OK');
+
+test('ORACLE DETAIL ENDPOINT from the posting URL or portals.yml — Cummins, 1,199 postings unread, 2026-10-02', () => {
+  // On the real Oracle host: everything is in the URL.
+  assert.equal(oracleDetailApi('https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/2435230', 'Cummins Inc.'),
+    'https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails?expand=all&onlyData=true&finder=ById%3BId%3D%222435230%22%2CsiteNumber%3D%22CX_1%22');
+  // A vanity domain names no host: an unknown company gets nothing, never a guess.
+  assert.equal(oracleDetailApi('https://careers.example.com/en/sites/CX_1/job/25016597', 'No Such Company 123'), null);
+  // No requisition, no endpoint.
+  assert.equal(oracleDetailApi('https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs', 'Cummins Inc.'), null);
+});
+
+test('F-733: an Oracle body keeps the corporate block — where Emerson writes "not a position for which sponsorship will be provided"', async () => {
+  const { classifyVisa } = await import('./visa.mjs');
+  const spec = detailSpec({ source: 'oracle-orc', url: 'https://hdjq.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26011819', company: 'Emerson' });
+  assert.ok(spec?.pick, 'Emerson\'s Oracle host is in the URL');
+  const body = spec.pick({ items: [{
+    ExternalDescriptionStr: '<p>Manufacturing Engineer. Bachelor of Science in Mechanical Engineering.</p>',
+    CorporateDescriptionStr: '<p>Work Authorization Emerson will only employ those who are legally authorized to work in the United States. This is not a position for which sponsorship will be provided. Individuals with temporary visas such as E, F-1 (including those with OPT or CPT), H-1, H-2, L-1, B, J or TN, or who need sponsorship for work authorization now or in the future, are not eligible for hire.</p>',
+  }] });
+  assert.match(body, /not a position for which sponsorship will be provided/);
+  assert.ok(classifyVisa('Manufacturing Engineer', body.replace(/<[^>]+>/g, ' ')).block, 'and the visa gate blocks it');
+});
+
+test("FREEFORM, 2026-10-02: a gate question's own note is kept — that is where its ITAR clause is", () => {
+  const body = appendGateQuestions('We build metal 3D printers.', [{
+    label: 'Citizenship Status', required: true,
+    description: '<p>Export Compliance: Due to the nature of various Freeform customers, the person hired will have access to information and items controlled by the International Traffic in Arms Regulation (ITAR), and, therefore, must be a &ldquo;U.S. person&rdquo; as defined in the ITAR.</p>',
+  }]);
+  assert.match(body, /Citizenship Status — Export Compliance: .*International Traffic in Arms Regulation \(ITAR\)/);
+  assert.match(body, /\(required\)/);
+  // A note that is not about the gate is not copied in.
+  assert.doesNotMatch(appendGateQuestions('x', [{ label: 'Citizenship Status', description: '<p>Choose one.</p>' }]), /Choose one/);
+});
+
+test('A PHENOM TEASER IS READ FROM THE EMPLOYER’S WORKDAY TENANT (F-673)', () => {
+  const spec = detailSpec({ source: 'phenom', url: 'https://thermofisher.wd5.myworkdayjobs.com/ThermoFisherCareers/job/Florence-South-Carolina-USA/Process-Engineer_R-01346498' });
+  assert.equal(spec?.api, 'https://thermofisher.wd5.myworkdayjobs.com/wday/cxs/thermofisher/ThermoFisherCareers/job/Florence-South-Carolina-USA/Process-Engineer_R-01346498');
+});
+
+test('A WORKABLE POSTING IS READ FROM ITS OWN JSON, ALL THREE PARTS (2026-10-08)', () => {
+  const spec = detailSpec({ source: 'workable', url: 'https://apply.workable.com/new-flyer/jobs/view/CD00EADD50' });
+  assert.equal(spec?.api, 'https://apply.workable.com/api/v2/accounts/new-flyer/jobs/CD00EADD50');
+  assert.equal(detailSpec({ source: 'workable', url: 'https://apply.workable.com/acorn/j/AB12CD34EF' })?.api,
+    'https://apply.workable.com/api/v2/accounts/acorn/jobs/AB12CD34EF', 'the short /j/ link too');
+  const body = spec.pick({ description: '<p>Build buses.</p>', requirements: '<ul><li>BSME</li></ul>', benefits: '' });
+  assert.match(body, /Build buses[\s\S]*Requirements[\s\S]*BSME/);
+  assert.doesNotMatch(body, /Benefits/, 'an empty part is left out');
+  assert.equal(detailSpec({ source: 'workable', url: 'https://example.com/jobs/view/X' }), null);
+});
+
+test('A PHENOM POSTING WITH NO WORKDAY LINK IS READ FROM ITS OWN PAGE, IN THE LOCALE ITS ID NAMES (2026-10-07)', () => {
+  assert.equal(detailSpec({ source: 'phenom', url: 'https://careers.quest-global.com/us/en/job/QGRQGAGLOBALP122128EXTERNALENGLOBAL/ate-test-engineer' })?.html,
+    'https://careers.quest-global.com/global/en/job/QGRQGAGLOBALP122128EXTERNALENGLOBAL/ate-test-engineer',
+    '…EXTERNALENGLOBAL is served at /global/en/; the /us/en/ link redirects to the home page');
+  assert.equal(detailSpec({ source: 'phenom', url: 'https://careers.emdgroup.com/us/en/job/MQAEGZUS304460EXTERNALENUS/process-engineer' })?.html,
+    'https://careers.emdgroup.com/us/en/job/MQAEGZUS304460EXTERNALENUS/process-engineer');
+  assert.equal(detailSpec({ source: 'phenom', url: 'https://careers.honda.com/us/en/job/AHMA12394' })?.html,
+    'https://careers.honda.com/us/en/job/AHMA12394', 'an id with no locale keeps the path it came with');
+  assert.equal(detailSpec({ source: 'phenom', url: 'https://example.com/apply?id=1' }), null, 'not a posting page');
+});

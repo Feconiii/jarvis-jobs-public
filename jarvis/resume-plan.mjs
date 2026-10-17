@@ -18,14 +18,16 @@
  *   - The Inventor inspection fixture and the Neuro-T vision model are on
  *     every resume ("mechanical design is a damn staple", 2026-08-02).
  *   - Applied Materials keeps at least five bullets.
- *   - The UR leak-test cell is described once (robodk or cobot-install, never
- *     both — "in reality its only one thing", 2026-08-09).
+ *   - The UR leak-test cell is described once: robodk and cobot-rack as two
+ *     bullets, or cobot-cell (the two said as one), never cobot-cell beside
+ *     either ("in reality its only one thing", 2026-08-09; 2026-09-29).
  *   - Titles come from cv.md's approved list; at Applied Materials itself only
  *     the two official ones, chosen by the role type, whatever was proposed.
  *   - Education first, then Experience, Projects, Skills.
  */
 import { familyFor } from './resume-family.mjs';
 import { skillLines } from './resume-variants.mjs';
+import { person, DEFAULT_PRESET } from './targeting.mjs';
 
 /**
  * On every resume, whatever the lane.
@@ -61,8 +63,16 @@ export const OPTIONAL_ORGS = ['sae', 'rover'];
 export const TRIM_ORDER = ['sae', 'makerspace', 'rover', 'acme', 'amat'];
 /** Where spare room goes when the plan names nothing more: Acme Steel first (his call, 2026-09-23). */
 export const RESERVE_ORDER = ['acme', 'amat', 'makerspace', 'rover', 'sae'];
-/** The same cell described twice. */
-export const ONE_OF = [['amat.robodk', 'amat.cobot-install']];
+/**
+ * The same cell described twice. The first of each pair is the one kept.
+ *
+ * Alex, 2026-09-29: the RoboDK bullet and the rack bullet print separately,
+ * and "combine them when space is tight and you still want to hit cobot
+ * work". `cobot-cell` is that combination, so it never sits beside either.
+ */
+export const ONE_OF = [['amat.robodk', 'amat.cobot-cell'], ['amat.cobot-rack', 'amat.cobot-cell']];
+/** Bullets said as one when the page is tight, instead of one being dropped. */
+export const MERGES = [{ parts: ['amat.robodk', 'amat.cobot-rack'], into: 'amat.cobot-cell' }];
 /**
  * What Applied Materials keeps.
  *
@@ -100,6 +110,33 @@ export function ownCompanyTitle(orgEntry, job) {
 }
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/**
+ * ANOTHER PERSON'S POOL. Every rule above is keyed by his organisations, so
+ * against a pool without them those rules simply never fire. Two still need a
+ * generic answer, or a second person's page could neither keep their main
+ * internship's lines nor shed any line at all:
+ *
+ *   - the organisations exempt from the two-line cap: his are Applied Materials
+ *     and Acme Steel; another pool marks its own with `"primary": true`, or the
+ *     first two it lists are taken;
+ *   - the trim order: every organisation in the spec, the last-listed first
+ *     (a pool lists its strongest role first).
+ *
+ * Both are his rules, unchanged, under his preset.
+ */
+export function majorOrgs(pool, presetKey = person.preset) {
+  if (presetKey === DEFAULT_PRESET) return ['amat', 'acme'];
+  const keys = Object.keys(pool?.orgs || {});
+  const marked = keys.filter((k) => pool.orgs[k]?.primary === true);
+  return marked.length ? marked : keys.slice(0, 2);
+}
+
+function trimOrderFor(spec, presetKey = person.preset) {
+  if (presetKey === DEFAULT_PRESET) return [...TRIM_ORDER];
+  const rest = (spec?.experience || []).map((e) => e.orgKey).filter((k) => k && !TRIM_ORDER.includes(k)).reverse();
+  return [...TRIM_ORDER, ...rest];
+}
 
 /**
  * Apply a proposal to a family's base spec. Returns `{ spec, notes, changed }`:
@@ -204,7 +241,7 @@ export function applyPlan(base, proposal, { pool, job } = {}) {
           notes.push(`amat: ${keys.length} lines instead of ${MIN_AMAT} — ${p.whyFewerAmat.trim().slice(0, 240)}`);
         }
       }
-      if (orgKey !== 'amat' && orgKey !== 'acme') {
+      if (!majorOrgs(pool).includes(orgKey)) {
         // An org the posting leans on may hold a third line — a build-team
         // requirement is not answered by one line about applying machining
         // skills. It still has to fit the page budget below.
@@ -231,7 +268,7 @@ export function applyPlan(base, proposal, { pool, job } = {}) {
       // `emphasise` is why the page is over budget in the first place; taking
       // its lines back would undo the tailoring the trim is meant to protect.
       const emph = new Set((Array.isArray(p.emphasise) ? p.emphasise : []).map(String));
-      const trimOrder = [...TRIM_ORDER].sort((a, b) => (emph.has(a) ? 1 : 0) - (emph.has(b) ? 1 : 0));
+      const trimOrder = trimOrderFor({ experience: next }).sort((a, b) => (emph.has(a) ? 1 : 0) - (emph.has(b) ? 1 : 0));
       const amatFloor = (typeof p.whyFewerAmat === 'string' && p.whyFewerAmat.trim().length >= 20) ? MIN_AMAT_JUSTIFIED : MIN_AMAT;
       for (const orgKey of trimOrder) {
         const entry = next.find((e) => e.orgKey === orgKey);
@@ -512,8 +549,44 @@ export function shortenBulletEnding(spec, ends, protectedPhrases = []) {
 }
 
 /** Drop the last bullet of the least-protected org that still has one to spare. */
+/**
+ * Say two bullets as one instead of dropping a line from their organisation.
+ *
+ * `dropping` is what `withoutOneBullet` would cut. When that cut comes from an
+ * organisation where every part of a MERGE is on the page, the parts are
+ * replaced by the merged bullet at the first part's position: the page loses
+ * the same line or two and keeps both claims (Alex, 2026-09-29, on the cobot
+ * bullets). Returns null when no merge applies.
+ */
+export function mergeInsteadOf(spec, dropping, pool) {
+  if (!dropping || !pool) return null;
+  const orgKey = String(dropping).split('.')[0];
+  for (const m of MERGES) {
+    if (!m.parts.every((k) => k.startsWith(`${orgKey}.`))) continue;
+    const e = spec.experience.find((x) => x.orgKey === orgKey);
+    if (!e) continue;
+    const keys = e.bullets.map((b) => b.provenanceKey);
+    if (!m.parts.every((k) => keys.includes(k)) || keys.includes(m.into)) continue;
+    const orgEntry = pool.orgs?.[orgKey];
+    const intoKey = m.into.split('.')[1];
+    if (!orgEntry?.bullets?.[intoKey]) continue;
+    const at = Math.min(...m.parts.map((k) => keys.indexOf(k)));
+    const bullets = [];
+    e.bullets.forEach((b, i) => {
+      if (i === at) bullets.push(bulletFor(orgKey, intoKey, orgEntry));
+      if (!m.parts.includes(b.provenanceKey)) bullets.push(b);
+    });
+    return {
+      spec: { ...spec, experience: spec.experience.map((x) => (x === e ? { ...e, bullets } : x)) },
+      parts: m.parts,
+      into: m.into,
+    };
+  }
+  return null;
+}
+
 export function withoutOneBullet(spec) {
-  for (const orgKey of TRIM_ORDER) {
+  for (const orgKey of trimOrderFor(spec)) {
     const e = spec.experience.find((x) => x.orgKey === orgKey);
     if (!e) continue;
     const floor = orgKey === 'amat' ? MIN_AMAT : (OPTIONAL_ORGS.includes(orgKey) ? 0 : 1);

@@ -47,6 +47,11 @@ const ENTRY_KINDS = [
   ['character', /hardest you worked|biggest professional failure|empire|inspires you/i],
   ['challenge', /hardest problem|debugg|reliable outside simulation/i],
   ['project', /technical project|most complex|something you.{0,3}ve built|proud of/i],
+  // His 2026-09-27 answers (TODO.md §H), each its own kind in essay.mjs.
+  ['company-knowledge', /what do you know about/i],
+  ['why-looking', /why are you looking|looking for new opportunit/i],
+  ['anything-else', /anything else|additional information/i],
+  ['experience', /describe your experience|experience deploying/i],
   ['why-company', /^why |why [a-z0-9]|motivates you|like to join/i],
   ['motivation', /motivat/i],
   ['strength', /experience|industry experience/i],
@@ -174,7 +179,9 @@ export function pickExemplars(kind, { corpus = null, limit = 2, exclude = null }
   // own question, whose kept answer would otherwise be handed to the writer.
   const all = (corpus || loadCorpus()).filter((e) => exclude == null || e.n !== exclude);
   if (!all.length) return [];
-  const sameKind = all.filter((e) => e.kind === kind);
+  // NEWEST FIRST: his taste moves, and the later entries are what he sends
+  // now (2026-09-27: his why-company answers changed shape, TODO.md §H).
+  const sameKind = all.filter((e) => e.kind === kind).sort((a, b) => b.n - a.n);
   const ranked = [
     ...sameKind.filter((e) => e.rejected),
     ...sameKind.filter((e) => !e.rejected),

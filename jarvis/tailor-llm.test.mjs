@@ -197,3 +197,107 @@ test('a posting that names nothing concrete says so, instead of an empty list', 
   assert.match(p, /names no concrete tools or methods/);
   assert.doesNotMatch(p, /NOT ON THE DRAFT: \(none\)/);
 });
+
+// ── the Codex path (a second user runs Codex CLI instead of Claude Code) ──
+//
+// Every writer calls run('claude', ['-p', …]). With JARVIS_LLM=codex (or
+// `targeting.llm: codex` in the profile) that call must become one `codex
+// exec`, read-only, prompt on stdin, answer read from the -o file — and none of
+// this may call the real Codex. JARVIS_CODEX_BIN points run() at a stand-in.
+import { codexArgs, CODEX_AUTH_MESSAGE } from './tailor-llm.mjs';
+
+const CODEX_STUB = path.join(DIR, 'codex-stub.mjs');
+writeFileSync(CODEX_STUB, [
+  "import { writeFileSync } from 'fs';",
+  "const argv = process.argv.slice(2);",
+  "let stdin = '';",
+  "process.stdin.on('data', (d) => { stdin += d; });",
+  "process.stdin.on('end', () => {",
+  "  const o = argv[argv.indexOf('-o') + 1];",
+  "  if (stdin.includes('SAY-401')) { process.stderr.write('ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header'); process.exit(1); }",
+  "  if (stdin.includes('SAY-NOTHING')) { process.stdout.write('session log only'); process.exit(0); }",
+  "  writeFileSync(o, JSON.stringify({ argv, stdin }));",
+  "  process.stdout.write('session log, never the answer');",
+  "});",
+].join('\n'));
+
+const CODEX_DRIVER = path.join(DIR, 'drive-codex.mjs');
+writeFileSync(CODEX_DRIVER, `
+import { run, describeFailure } from ${JSON.stringify(pathToFileURL(path.join(HERE, 'tailor-llm.mjs')).href)};
+const [input, ...args] = JSON.parse(process.argv[2]);
+try {
+  const out = await run('claude', ['-p', ...args], { input, timeout: 20000, models: ['opus'] });
+  process.stdout.write(JSON.stringify({ ok: true, out }));
+} catch (e) {
+  process.stdout.write(JSON.stringify({ ok: false, why: describeFailure(e, 'claude', 'answer', 20000) }));
+}
+`);
+const askCodex = async (input, args = [], env = {}) => {
+  const { stdout } = await runOnce(process.execPath, [CODEX_DRIVER, JSON.stringify([input, ...args])], {
+    timeout: 30000, env: { ...process.env, JARVIS_LLM: 'codex', JARVIS_CODEX_BIN: CODEX_STUB, ...env },
+  });
+  return JSON.parse(stdout);
+};
+
+test('codexArgs: one read-only codex exec, prompt on stdin, answer to a file', () => {
+  assert.deepEqual(codexArgs(['-p'], { outFile: 'OUT', cwd: 'TMP', model: '' }),
+    ['exec', '--ephemeral', '--skip-git-repo-check', '-s', 'read-only', '--color', 'never', '-C', 'TMP', '-o', 'OUT', '-']);
+  // The lead research asks for web tools; Codex takes --search at the TOP level.
+  const web = codexArgs(['-p', '--permission-mode', 'dontAsk', '--allowedTools', 'WebSearch', 'WebFetch'], { outFile: 'OUT', model: '' });
+  assert.equal(web[0], '--search');
+  assert.equal(web[1], 'exec');
+  assert.ok(!web.includes('--allowedTools') && !web.includes('--permission-mode'), 'claude flags never reach codex');
+  assert.deepEqual(web.slice(web.indexOf('-s'), web.indexOf('-s') + 2), ['-s', 'read-only'], 'never a writable sandbox');
+  // Claude model names are dropped; a Codex model is its own setting.
+  assert.ok(!codexArgs(['-p', '--model', 'sonnet'], { outFile: 'O', model: '' }).includes('sonnet'));
+  const m = codexArgs(['-p'], { outFile: 'O', model: 'gpt-x' });
+  assert.deepEqual(m.slice(m.indexOf('-m'), m.indexOf('-m') + 2), ['-m', 'gpt-x']);
+});
+
+test('run(claude) on a Codex machine asks Codex, and returns the last message only', async () => {
+  const r = await askCodex('Reply with the single word OK');
+  assert.equal(r.ok, true, r.why);
+  assert.equal(r.out.model, 'codex');
+  assert.equal(r.out.requested, 'codex');
+  assert.equal(r.out.fellBack, false);
+  const seen = JSON.parse(r.out.stdout);
+  assert.equal(seen.stdin, 'Reply with the single word OK', 'the prompt travels on stdin');
+  assert.equal(seen.argv[0], 'exec');
+  assert.equal(seen.argv[seen.argv.length - 1], '-');
+  assert.ok(seen.argv.includes('read-only'));
+  assert.ok(!seen.argv.includes('opus') && !seen.argv.includes('--model'), 'the claude model ladder is dropped');
+  assert.doesNotMatch(r.out.stdout, /session log/, 'stdout is the session log, never the answer');
+});
+
+test('the web-research call reaches Codex with --search', async () => {
+  const r = await askCodex('find people', ['--permission-mode', 'dontAsk', '--allowedTools', 'WebSearch', 'WebFetch']);
+  assert.equal(r.ok, true, r.why);
+  assert.equal(JSON.parse(r.out.stdout).argv[0], '--search');
+});
+
+test('Codex not logged in: the error names Codex and `codex login`', async () => {
+  const r = await askCodex('SAY-401');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /Codex/);
+  assert.match(r.why, /codex login/);
+  assert.ok(CODEX_AUTH_MESSAGE.test('401 Unauthorized'));
+});
+
+test('Codex that answers nothing FAILS — an empty answer never reaches a form box', async () => {
+  const r = await askCodex('SAY-NOTHING');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /Codex/);
+});
+
+test('the default person stays on claude; JARVIS_LLM=codex switches the provider', async () => {
+  const { llmProvider } = await import('./tailor-llm.mjs');
+  const was = process.env.JARVIS_LLM;
+  try {
+    delete process.env.JARVIS_LLM;
+    assert.equal(llmProvider(), 'claude', 'the pinned test person uses claude');
+    process.env.JARVIS_LLM = 'codex';
+    assert.equal(llmProvider(), 'codex');
+  } finally {
+    if (was == null) delete process.env.JARVIS_LLM; else process.env.JARVIS_LLM = was;
+  }
+});

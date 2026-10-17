@@ -77,10 +77,24 @@ export function parseRules(text) {
     // Engineer family — mechanical, thermal and server-hardware design. Listing
     // every software form of "cloud" instead freed ~200 software reqs, so the
     // rule keeps its word and names what it does not mean.
+    //
+    // The exception reads the rule's own field unless it names others:
+    // `no field in title except robotics, humanoid in title or company`. His
+    // field rule (2026-10-02) spares robotics, and Humanoid's "Field Application
+    // Engineer" says robotics only in the employer's name. The description is
+    // never offered: Applied Materials and Medtronic write "robotics" into the
+    // boilerplate of every field service posting.
     let except = [];
+    let exceptFields = null;
     const ex = rest.match(/\s+except\s+(.+)$/i);
     if (ex) {
-      except = ex[1].split(',').map(t => t.trim().replace(/^["']|["']$/g, '')).filter(t => t.length >= 2);
+      let list = ex[1];
+      const scope = list.match(/\s+in\s+((?:title|location|company)(?:\s+or\s+(?:title|location|company))*)\s*$/i);
+      if (scope) {
+        exceptFields = scope[1].toLowerCase().split(/\s+or\s+/);
+        list = list.slice(0, scope.index);
+      }
+      except = list.split(',').map(t => t.trim().replace(/^["']|["']$/g, '')).filter(t => t.length >= 2);
       rest = rest.slice(0, ex.index).trim();
     }
 
@@ -97,7 +111,7 @@ export function parseRules(text) {
       .filter(t => t.length >= 2);
     if (!terms.length) continue;
 
-    rules.push({ verb, weight: WEIGHTS[verb], field, terms, except, source: line });
+    rules.push({ verb, weight: WEIGHTS[verb], field, terms, except, exceptFields: exceptFields || [field], source: line });
   }
   return rules;
 }
@@ -211,7 +225,20 @@ export function applyPrefs(job, rules) {
     const hay = pick(rule.field, { title, location, company, all });
     const matched = rule.terms.filter(t => termRe(t).test(hay));
     if (!matched.length) continue;
-    if (rule.except?.some(t => termRe(t).test(hay))) continue;
+    if (rule.except?.length) {
+      // A board shared by two employers ("Teradyne / Universal Robots") puts
+      // both names on every posting, so its name spares a job only when every
+      // employer it lists would — otherwise all of Teradyne's chip-test field
+      // roles walked back in as robotics.
+      const sparedBy = f => {
+        const v = pick(f, { title, location, company, all });
+        if (f !== 'company') return v;
+        const parts = String(company || '').split(/\s+\/\s+/);
+        return parts.length > 1 && !parts.every(p => rule.except.some(t => termRe(t).test(p))) ? '' : v;
+      };
+      const spared = (rule.exceptFields || [rule.field]).map(sparedBy).join(' ');
+      if (rule.except.some(t => termRe(t).test(spared))) continue;
+    }
 
     // Only an exclusion that rules out EVERY site actually rules out the job.
     if (rule.field === 'location' && rule.weight <= WEIGHTS.never && sites.length > 1) {

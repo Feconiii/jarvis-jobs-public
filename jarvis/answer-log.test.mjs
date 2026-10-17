@@ -8,7 +8,7 @@
 import fs, { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { logPlan, logWritten, logSnapshot, logReport, logRequest, readLog } from './answer-log.mjs';
+import { logPlan, logWritten, logSnapshot, logReport, logRequest, readLog, pastAnswers } from './answer-log.mjs';
 import { whichRule } from './apply/_answers.mjs';
 
 let pass = 0, fail = 0;
@@ -83,6 +83,23 @@ try {
     diff.some((r) => r.status === 'changed') && diff.some((r) => r.status === 'you answered') && !diff.some((r) => r.status === 'kept')
     && diff.some((r) => r.kind === 'plan' && r.action === 'unknown'), JSON.stringify(diff.map((r) => r.status || r.action)));
 
+  // F-631: a question longer than the 400 characters a plan row keeps
+  // (Micron's veteran, sponsorship and terms notices) still meets its plan.
+  const fl = path.join(dir, 'long.jsonl');
+  const LONG = 'Will you now or in the future require sponsorship? ' + 'This includes H-1B, TN status and job flexibility benefits. '.repeat(10);
+  logPlan({ pageUrl: url, job, fields: [{ label: LONG, type: 'prompt' }], file: fl, now: 5_000_000,
+    actions: [{ label: LONG, action: 'prompt', value: 'Yes', at: 0 }] });
+  logSnapshot({ pageUrl: url, job, stage: 'submit', button: 'Submit', by: 'you', file: fl, now: 5_100_000,
+    fields: [{ label: LONG, type: 'prompt', value: 'Yes' }] });
+  const longFinal = readLog({ file: fl, last: 10 }).find((r) => r.kind === 'final');
+  ok('a question over 400 characters is matched to its plan, not "not planned"', longFinal?.status === 'kept', longFinal?.status);
+
+  // F-631: the extension test's fixture pages on the local dashboard are not applications.
+  const fx = path.join(dir, 'fixture.jsonl');
+  logPlan({ pageUrl: 'http://localhost:4300/__jarvis_fixture_a', job: null, file: fx,
+    actions: [{ label: 'First Name', action: 'fill', value: 'Anna Maria Alex' }] });
+  ok('a page on localhost writes nothing to his log', !fs.existsSync(fx));
+
   // 2026-09-24, "are the logs recording everything?": every item a prompt was
   // given, and each run's own report of what it left for him.
   const f2 = path.join(dir, 'more.jsonl');
@@ -105,6 +122,93 @@ try {
   ok('an answer rewrite keeps the question, his note and what it replaced', asks[1].label === 'Why ABB?' && asks[1].previous === 'old text');
   ok('an empty request is not a row', asks.length === 3);
   ok('the rewritten answer carries the note that caused it', asks[2].kind === 'written' && asks[2].request === 'shorter, less formal');
+  // TWO "First Name" FIELDS ON ONE PAGE (F-609): Workday's Legal Name and
+  // Preferred Name. Each final row must be judged against ITS plan — by key,
+  // or by page order when the extension sent no key.
+  {
+    const wf = path.join(dir, 'names.jsonl');
+    const wurl = 'https://kla.wd1.myworkdayjobs.com/x/apply';
+    const wjob = { id: 'kla1', company: 'KLA', title: 'Engineer' };
+    const nf = [
+      { label: 'First Name', type: 'text', key: 'formField-legalName--firstName' },
+      { label: 'First Name', type: 'text', key: 'formField-preferredName--firstName' },
+    ];
+    logPlan({ pageUrl: wurl, job: wjob, fields: nf, file: wf, now: 3_000_000, actions: [
+      { label: 'First Name', type: 'text', action: 'fill', value: 'Anna Maria Alex', at: 0, key: nf[0].key },
+      { label: 'First Name', type: 'text', action: 'fill', value: 'Alex', at: 1, key: nf[1].key },
+    ] });
+    const read = () => fs.readFileSync(wf, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.kind === 'final');
+    logSnapshot({ pageUrl: wurl, job: wjob, stage: 'step', button: 'Save and Continue', by: 'you', file: wf, now: 3_100_000,
+      fields: [{ ...nf[1], value: 'Alex' }, { ...nf[0], value: 'Alex' }] });
+    const byKey = read();
+    ok('by key: the preferred field is judged against "Alex" and kept', byKey.find((r) => r.key === nf[1].key)?.status === 'kept');
+    ok('by key: "Alex" typed into the legal field is a change, not "kept" by containment',
+      byKey.find((r) => r.key === nf[0].key)?.status === 'changed' && byKey.find((r) => r.key === nf[0].key)?.engine === 'Anna Maria Alex');
+    logSnapshot({ pageUrl: wurl, job: wjob, stage: 'submit', button: 'Submit', by: 'you', file: wf, now: 3_200_000,
+      fields: [{ label: 'First Name', type: 'text', value: 'Anna Maria Alex' }, { label: 'First Name', type: 'text', value: 'Alex' }] });
+    const byOrder = read().filter((r) => r.stage === 'submit');
+    ok('with no key, page order pairs them', byOrder.map((r) => `${r.engine}:${r.status}`).join(',') === 'Anna Maria Alex:kept,Alex:kept',
+      byOrder.map((r) => `${r.engine}:${r.status}`).join(','));
+  }
+  {
+    // A SPLIT DATE'S BOXES SHARE ONE KEY (F-618): HP's start date logged all
+    // three parts against the month's "06", so the year's 2006 read as a
+    // change from "06" rather than from "2027".
+    const wf = path.join(dir, 'date-parts.jsonl');
+    const wurl = 'https://hp.wd5.myworkdayjobs.com/apply/2';
+    const wjob = { id: 'hp2', company: 'HP Inc.', title: 'Design Engineer' };
+    const key = 'formField-003181317e521000b936f5c3a4410006';
+    const label = 'When are you available to start?';
+    const df = ['month', 'day', 'year'].map((datePart) => ({ label, type: 'text', key, datePart }));
+    logPlan({ pageUrl: wurl, job: wjob, fields: df, file: wf, now: 4_000_000, actions: [
+      { label, type: 'text', action: 'fill', value: '06', at: 0, key, datePart: 'month' },
+      { label, type: 'text', action: 'fill', value: '01', at: 1, key, datePart: 'day' },
+      { label, type: 'text', action: 'fill', value: '2027', at: 2, key, datePart: 'year' },
+    ] });
+    logSnapshot({ pageUrl: wurl, job: wjob, stage: 'step', button: 'Save and Continue', by: 'jarvis', file: wf, now: 4_100_000,
+      fields: [{ ...df[0], value: '6' }, { ...df[1], value: '1' }, { ...df[2], value: '2006' }] });
+    const rows = fs.readFileSync(wf, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.kind === 'final');
+    const got = rows.map((r) => `${r.datePart}:${r.engine}>${r.answer}:${r.status}`).join(',');
+    ok('each date part is judged against its own plan, "06" and "6" the same', got === 'month:06>6:kept,day:01>1:kept,year:2027>2006:changed', got);
+  }
+  {
+    // WHAT COUNTS AS HIS ANSWER TO REUSE (F-618): not a menu's own pick that
+    // Jarvis pressed past, and never a self-identification question.
+    const pf = path.join(dir, 'past.jsonl');
+    const row = (label, answer, status, by) => JSON.stringify({ at: '2026-09-26T10:36:37Z', kind: 'final', by, host: 'hp.wd5.myworkdayjobs.com', pageUrl: 'https://hp.wd5.myworkdayjobs.com/x', company: 'HP Inc.', label, type: 'prompt', answer, status });
+    fs.writeFileSync(pf, [
+      row('Are you a protected U.S. Military Veteran?', 'I IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN', 'you answered', 'you'),
+      row('What shift do you prefer to work?', 'Days', 'changed', 'jarvis'),
+      row('Which office would you prefer to work from?', 'Palo Alto', 'changed', 'you'),
+    ].join('\n') + '\n');
+    const past = pastAnswers({ file: pf });
+    ok('a veteran answer is never reused', past('Are you a protected U.S. Military Veteran?', 'HP Inc.') === null);
+    ok('a change Jarvis pressed past is not his answer', past('What shift do you prefer to work?', 'HP Inc.') === null);
+    ok('a change he pressed past is', past('Which office would you prefer to work from?', 'HP Inc.')?.answer === 'Palo Alto');
+  }
+  {
+    // THE SAME QUESTION IN OTHER WORDS (step 3, 2026-10-03): the employer's
+    // name masked, nearly the same words — but never his relation to one
+    // employer carried to another.
+    const pf = path.join(dir, 'shape.jsonl');
+    const row = (company, label, answer) => JSON.stringify({ at: '2026-10-03T10:00:00Z', kind: 'final', by: 'you', host: 'x', pageUrl: 'https://x.example/apply', company, label, type: 'radio', answer, status: 'you answered' });
+    fs.writeFileSync(pf, [
+      row('John Deere', 'Do you currently, or have you in the past, worked for a company that has supplied contingent workers to John Deere?', 'N/A'),
+      row('Applied Materials', 'Have you ever worked for Applied Materials as an employee or intern?', 'Yes'),
+      row('Flowserve', 'Are you open to business travel?', '25%'),
+    ].join('\n') + '\n');
+    const past = pastAnswers({ file: pf });
+    ok('a supplier question names the employer and its relation, so it stays with John Deere',
+      past('Do you currently or have you in the past worked for a company that supplied contingent workers to Plug Power?', 'Plug Power') === null);
+    ok('"worked for <co>" Yes at Applied Materials is NEVER his answer at another employer',
+      past('Have you ever worked for Plug Power as an employee or intern?', 'Plug Power') === null);
+    ok('…and still his answer at Applied Materials itself',
+      past('Have you ever worked for Applied Materials as an employee or intern?', 'Applied Materials')?.answer === 'Yes');
+    ok('a plain question in nearly the same words borrows from one other employer',
+      past('Are you open to business travel for this role?', 'Plug Power')?.answer === '25%');
+    ok('a negated question never borrows from its positive twin',
+      past('Are you not open to business travel?', 'Plug Power') === null);
+  }
 } finally { rmSync(dir, { recursive: true, force: true }); }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

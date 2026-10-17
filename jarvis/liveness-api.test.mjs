@@ -15,7 +15,7 @@
 //   forbids slashes, dots-dot and percent-encoding. The negative cases below are
 //   that guard, and they matter more than the positive ones.
 
-import { resolveAtsApi, isAtsPosting, postingMetaFrom, definitelyGone, classifyEightfoldPosition, checkLivenessViaApi, workdayRequisition } from '../liveness-api.mjs';
+import { resolveAtsApi, isAtsPosting, postingMetaFrom, definitelyGone, classifyEightfoldPosition, checkLivenessViaApi, workdayRequisition, oraclePosting, oracleMetaFrom } from '../liveness-api.mjs';
 import { isSuspectWholeSource } from './liveness-sweep.mjs';
 
 let pass = 0, fail = 0;
@@ -44,6 +44,24 @@ ok('wd5 tenant',
 ok('locale prefix is stripped',
   apiUrl('https://jabil.wd5.myworkdayjobs.com/en-US/Jabil_Careers/job/Claremont-NH/Manufacturing-Engineer_J2459834'),
   'https://jabil.wd5.myworkdayjobs.com/wday/cxs/jabil/Jabil_Careers/job/Claremont-NH/Manufacturing-Engineer_J2459834');
+// A FORM NAMES ITS POSTING, and a state is written with an encoded comma
+// (Solar Turbines, opened from Jack & Jill, 2026-09-25: "not a posting").
+ok('the apply form maps to its posting, comma and all',
+  apiUrl('https://cat.wd5.myworkdayjobs.com/en-US/SolarTurbines/job/San-Diego%2C-California/XMLNAME-2027-Entry-Level-Engineer-Rotation-Turbomachinery-Operations_R0000382939/apply/autofillWithResume?utm_source=jackandjill'),
+  'https://cat.wd5.myworkdayjobs.com/wday/cxs/cat/SolarTurbines/job/San-Diego%2C-California/XMLNAME-2027-Entry-Level-Engineer-Rotation-Turbomachinery-Operations_R0000382939');
+ok('…and a bare /apply too',
+  apiUrl('https://kla.wd1.myworkdayjobs.com/Search/job/Milpitas-CA/NPI-Product-Engineer_2636601/apply'),
+  'https://kla.wd1.myworkdayjobs.com/wday/cxs/kla/Search/job/Milpitas-CA/NPI-Product-Engineer_2636601');
+ok('an encoded slash is still refused, beside the comma',
+  ats('https://kla.wd1.myworkdayjobs.com/Search/job/Milpitas%2C%2FCA/Engineer_1'), null);
+ok('Workday names no employer: the site does, when it is a name',
+  postingMetaFrom('workday', { jobPostingInfo: { title: 'X' }, hiringOrganization: { name: '' } }, { tenant: 'cat', site: 'SolarTurbines' })?.company, 'Solar Turbines');
+ok('…Samsung_Careers is Samsung',
+  postingMetaFrom('workday', { jobPostingInfo: { title: 'X' } }, { tenant: 'sec', site: 'Samsung_Careers' })?.company, 'Samsung');
+ok('…and a generic site falls back to the tenant',
+  postingMetaFrom('workday', { jobPostingInfo: { title: 'X' } }, { tenant: 'intel', site: 'External' })?.company, 'Intel');
+ok('…while a name Workday does give wins',
+  postingMetaFrom('workday', { jobPostingInfo: { title: 'X' }, hiringOrganization: { name: 'Samsung Austin Semiconductor, LLC.' } }, { tenant: 'sec', site: 'Samsung_Careers' })?.company, 'Samsung Austin Semiconductor, LLC.');
 ok('workday is recognised as an ATS posting',
   isAtsPosting('https://kla.wd1.myworkdayjobs.com/Search/job/Milpitas-CA/NPI-Product-Engineer_2636601'), true);
 
@@ -296,6 +314,75 @@ for (const [slug, want] of [
   ['Some-Role-With-No-Id', ''],
   ['', ''],
 ]) ok(`${slug.slice(-34) || '(empty)'} -> ${want || '(none)'}`, workdayRequisition(slug), want);
+
+// -- a Greenhouse posting on the company's own site (Lucid, 2026-09-25) ------
+//
+// lucidmotors.com/careers/search/<id>?gh_jid=<id> names no board, so it was
+// never asked about, and a posting four days off Lucid's board was still in
+// his picks. The embed page takes the id alone: 404 for a pulled job, a
+// redirect to its own board for a live one — and only that exact redirect.
+console.log('');
+console.log("testing: gh_jid on a company's own domain");
+{
+  const JOB = 'https://lucidmotors.com/careers/search/5228239007?gh_jid=5228239007';
+  ok('resolved to the embed page by id', apiUrl(JOB), 'https://boards.greenhouse.io/embed/job_app?token=5228239007');
+  ok('a greenhouse.io link keeps its board route', apiUrl('https://boards.greenhouse.io/vast/jobs/4711403006?gh_jid=4711403006'), 'https://boards-api.greenhouse.io/v1/boards/vast/jobs/4711403006');
+  ok('no gh_jid, no route', apiUrl('https://lucidmotors.com/careers/search'), null);
+  ok('a non-numeric gh_jid is refused', apiUrl('https://x.com/?gh_jid=../../x'), null);
+  const realFetch = globalThis.fetch;
+  const run = async (status, location) => {
+    globalThis.fetch = async () => ({ status, headers: { get: (h) => (h.toLowerCase() === 'location' ? location : null) } });
+    try { return await checkLivenessViaApi(JOB); } finally { globalThis.fetch = realFetch; }
+  };
+  ok('404 = gone', (await run(404))?.result, 'expired');
+  ok('a redirect to its own board = live', (await run(302, 'https://job-boards.greenhouse.io/embed/job_app?for=lucidmotors&token=5228239007'))?.result, 'active');
+  ok('a redirect anywhere else decides nothing', await run(302, 'https://job-boards.greenhouse.io/embed/job_board?for=&error=true'), null);
+  ok('...nor a redirect to a different job', await run(302, 'https://job-boards.greenhouse.io/embed/job_app?for=lucidmotors&token=1'), null);
+}
+
+// -- Rippling redirects a pulled posting to its board (Aalo, 2026-09-25) -----
+console.log('');
+console.log('testing: a Rippling posting redirected as job_not_found');
+{
+  const JOB = 'https://ats.rippling.com/aalo-atomics/jobs/4863b7b1-39fc-47fe-94b0-6a5a9de5cfec';
+  ok('resolved to its own page', apiUrl(JOB), JOB);
+  const realFetch = globalThis.fetch;
+  const run = async (status, location) => {
+    globalThis.fetch = async () => ({ status, headers: { get: (h) => (h.toLowerCase() === 'location' ? location : null) } });
+    try { return await checkLivenessViaApi(JOB); } finally { globalThis.fetch = realFetch; }
+  };
+  ok('a redirect marked job_not_found = gone', (await run(308, 'https://ats.rippling.com/aalo-atomics/jobs?rr_message=job_not_found'))?.result, 'expired');
+  ok('any other redirect decides nothing', await run(302, 'https://ats.rippling.com/login'), null);
+  ok('its page = live', (await run(200))?.result, 'active');
+}
+
+console.log('\n🧪 a LinkedIn copy is asked about, in LinkedIn\'s own words (F-674)');
+{
+  const url = 'https://www.linkedin.com/jobs/view/process-engineer-at-wd-4451253407';
+  ok('the guest posting endpoint, by the id at the end of the slug', apiUrl(url), 'https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4451253407');
+  ok('a search page is not a posting', ats('https://www.linkedin.com/jobs/search?keywords=engineer'), null);
+  const { interpret } = resolveAtsApi(url);
+  const page = (html) => interpret(new Response(html, { status: 200 }));
+  ok('"No longer accepting applications" = gone',
+    (await page('<h2 class="top-card-layout__title">Process Engineer</h2><figure class="closed-job"><figcaption>No longer accepting applications</figcaption></figure>'))?.code, 'linkedin_api_gone');
+  ok('the posting card, still open = live', (await page('<h2 class="top-card-layout__title">Process Engineer</h2><button>Apply</button>'))?.result, 'active');
+  ok('anything else (a sign-in wall, a throttle page) decides nothing', await page('<html>Sign in</html>'), null);
+  // liveness-sweep's isDefinitelyGone() retires on a code ending `_api_gone`.
+  ok('…in the shape the sweep retires on', /_api_gone$/.test('linkedin_api_gone'), true);
+}
+
+console.log('\n🧪 an Oracle form is named by its own tenant (F-714)');
+{
+  const form = 'https://iadugs.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/1246/apply/email';
+  ok('tenant, site and number read off the form', JSON.stringify(oraclePosting(form)), JSON.stringify({ host: 'iadugs.fa.ocs.oraclecloud.com', site: 'CX_1001', id: '1246' }));
+  ok('a vanity domain is not read as a tenant', oraclePosting('https://careers.ti.com/en/sites/CX_1/job/25016597'), null);
+  ok('a search page is not a posting', oraclePosting('https://iadugs.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs'), null);
+  ok('not a liveness provider (an empty Oracle answer is unmeasured)', isAtsPosting(form), false);
+  const item = { Title: 'Manufacturing Engineer', LegalEmployer: null, requisitionFlexFields: [{ Prompt: 'Employment type', Value: 'Regular' }, { Prompt: 'Brand', Value: 'Legrand' }] };
+  ok('title, and the employer from the Brand field', JSON.stringify(oracleMetaFrom({ items: [item] })), JSON.stringify({ title: 'Manufacturing Engineer', company: 'Legrand', ats: 'oracle-orc' }));
+  ok('no Brand: the legal employer', oracleMetaFrom({ items: [{ Title: 'X', LegalEmployer: 'Acme Corp', requisitionFlexFields: [] }] })?.company, 'Acme Corp');
+  ok('no posting, no title invented', oracleMetaFrom({ items: [] }), null);
+}
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

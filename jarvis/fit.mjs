@@ -44,6 +44,11 @@ import yaml from 'js-yaml';
 import { loadPrefs, applyPrefs } from './prefs.mjs';
 import { parseSalaryFromText } from './salary-text.mjs';
 import { classifyField } from './field.mjs';
+import { person, screen, DEFAULT_PERSON } from './targeting.mjs';
+
+// Prose written about one person keys on his name: his own profile is not
+// `isDefault` (that is the no-profile fallback).
+const IS_HIM = person.fullName === DEFAULT_PERSON.fullName;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -58,102 +63,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // `weight` is how much a match is worth. Deep, differentiating skills (cobot
 // programming, machine vision, GD&T) outweigh table stakes (Excel).
 
-const SKILLS = [
-  // CAD / design
-  { id: 'solidworks', w: 3, a: ['solidworks', 'solid works'] },
-  { id: 'inventor', w: 2, a: ['autodesk inventor', 'inventor'] },
-  { id: 'autocad', w: 2, a: ['autocad'] },
-  { id: 'fusion360', w: 2, a: ['fusion 360', 'fusion360'] },
-  { id: 'nx', w: 2, a: ['siemens nx', 'unigraphics', ' nx '] },
-  { id: 'catia', w: 1, a: ['catia'] },
-  { id: 'creo', w: 1, a: ['creo', 'pro/engineer'] },
-  { id: 'cad-generic', w: 2, a: ['cad', '3d modeling', '3d modelling', 'computer-aided design'] },
-  { id: 'gdt', w: 3, a: ['gd&t', 'gdt', 'geometric dimensioning', 'tolerance analysis', 'tolerance stack'] },
-  { id: 'dfm', w: 3, a: ['dfm', 'dfa', 'design for manufactur', 'design for assembly'] },
-  { id: 'drafting', w: 1, a: ['technical drawing', 'engineering drawing', 'drafting', 'blueprint'] },
-
-  // analysis
-  { id: 'fea', w: 3, a: ['fea', 'finite element', 'ansys', 'structural analysis'] },
-  { id: 'thermal', w: 2, a: ['thermal analysis', 'heat transfer', 'thermal management'] },
-  { id: 'fluids', w: 2, a: ['fluid mechanics', 'cfd', 'computational fluid', 'hydraulic', 'pneumatic'] },
-  { id: 'statics', w: 1, a: ['mechanics of materials', 'stress analysis', 'statics'] },
-
-  // manufacturing / hands-on
-  { id: 'cnc', w: 3, a: ['cnc', 'haas', 'machining', 'milling', 'lathe', 'turning center'] },
-  { id: 'cam', w: 2, a: ['cam', 'toolpath', 'g-code', 'gcode', 'mastercam'] },
-  { id: 'welding', w: 2, a: ['welding', 'mig', 'tig', 'brazing'] },
-  { id: 'fixture', w: 3, a: ['fixture', 'jig', 'tooling design', 'workholding'] },
-  { id: 'additive', w: 2, a: ['additive manufactur', '3d printing', 'rapid prototyp', 'sla', 'sls'] },
-  { id: 'sheetmetal', w: 1, a: ['sheet metal', 'stamping', 'forming', 'roll form'] },
-  { id: 'molding', w: 1, a: ['injection molding', 'casting', 'extrusion'] },
-  { id: 'assembly', w: 2, a: ['mechanical assembly', 'assembly process', 'build process'] },
-  { id: 'prototyping', w: 2, a: ['prototyp', 'bench testing', 'breadboard'] },
-
-  // automation / robotics
-  { id: 'robotics', w: 4, a: ['robot', 'robotic', 'robotics'] },
-  { id: 'cobot', w: 4, a: ['cobot', 'collaborative robot', 'universal robots', ' ur5', ' ur10'] },
-  { id: 'robodk', w: 3, a: ['robodk', 'robot simulation', 'offline programming'] },
-  { id: 'amr', w: 4, a: ['amr', 'agv', 'autonomous mobile robot', 'automated guided vehicle', 'mobile robot'] },
-  { id: 'plc', w: 3, a: ['plc', 'ladder logic', 'allen bradley', 'siemens s7', 'scada', 'hmi'] },
-  { id: 'motion', w: 2, a: ['motion control', 'servo', 'actuator', 'stepper', 'linear stage'] },
-  { id: 'kinematics', w: 2, a: ['kinematic', 'inverse kinematics', 'path planning', 'trajectory'] },
-  { id: 'ros', w: 2, a: ['ros', 'ros2', 'robot operating system'] },
-  { id: 'automation', w: 3, a: ['automation', 'automated system', 'industrial automation'] },
-
-  // vision / data / IoT
-  { id: 'vision', w: 4, a: ['machine vision', 'computer vision', 'vision system', 'cognex', 'keyence', 'image classification', 'object detection'] },
-  { id: 'iot', w: 3, a: ['iot', 'iiot', 'industrial internet', 'tulip', 'edge device', 'data logging'] },
-  { id: 'sensors', w: 2, a: ['sensor', 'instrumentation', 'data acquisition', 'daq'] },
-
-  // quality / process
-  { id: 'sixsigma', w: 3, a: ['six sigma', 'lean', 'kaizen', '5s', 'continuous improvement'] },
-  { id: 'spc', w: 2, a: ['spc', 'statistical process control', 'control chart', 'capability study'] },
-  { id: 'rootcause', w: 3, a: ['root cause', 'rca', '8d', 'fmea', 'failure analysis', 'corrective action'] },
-  { id: 'metrology', w: 3, a: ['metrology', 'cmm', 'coordinate measuring', 'caliper', 'dimensional inspection', 'gauge'] },
-  { id: 'qms', w: 1, a: ['iso 9001', 'as9100', 'ppap', 'quality management system'] },
-  { id: 'timestudy', w: 2, a: ['time study', 'cycle time', 'takt', 'throughput analysis', 'line balanc'] },
-  { id: 'layout', w: 2, a: ['plant layout', 'facility layout', 'material flow', 'value stream'] },
-  { id: 'npi', w: 3, a: ['npi', 'new product introduction', 'design transfer', 'pilot production'] },
-  { id: 'validation', w: 3, a: ['validation', 'verification', 'iq oq pq', 'qualification', 'test protocol'] },
-
-  // software
-  { id: 'python', w: 3, a: ['python'] },
-  { id: 'matlab', w: 1, a: ['matlab', 'simulink'] },
-  { id: 'vba', w: 2, a: ['vba', 'excel macro', 'visual basic'] },
-  { id: 'nodered', w: 1, a: ['node-red', 'node red'] },
-  { id: 'sql', w: 1, a: ['sql', 'database quer'] },
-  { id: 'labview', w: 1, a: ['labview'] },
-
-  // electrical / embedded — skills he does NOT have, and that is exactly why
-  // they belong here.
-  //
-  // scoreSkills measures coverage of what the JD ASKS FOR, but the vocabulary
-  // held only skills he has, so the demands he fails were invisible to it.
-  // NXP's "Entry Level Field Applications Engineer" was his #1 card at fit 100
-  // scoring 25/26 on skills, while its qualifications read: "Electrical
-  // Engineering, Computer Engineering, Computer Science…", "embedded MCU/MPU
-  // software", "analog and digital circuits", "C, C++, Python", "schematic and
-  // PCB reviews". The only words the scorer could see were robotics, motion,
-  // iot and sensors — NXP's product-market vocabulary — so it read 96%.
-  //
-  // A denominator blind to the asks he fails is not measuring fit. These enter
-  // `wants`, raise the total weight, and surface in the card's "Also wants:"
-  // line, which is the thing he actually needed to be told.
-  { id: 'embedded', w: 4, a: ['embedded system', 'embedded software', 'embedded development', 'embedded c', 'microcontroller', 'mcu', 'mpu'] },
-  { id: 'firmware', w: 4, a: ['firmware', 'rtos', 'bare metal', 'device driver'] },
-  { id: 'cpp', w: 3, a: ['c++', 'c/c++'] },
-  { id: 'circuits', w: 4, a: ['analog circuit', 'digital circuit', 'analog and digital', 'circuit design', 'signal integrity', 'power integrity', 'analog design'] },
-  { id: 'pcb', w: 3, a: ['pcb', 'schematic capture', 'schematic review', 'schematic design', 'altium', 'board bring-up', 'board design'] },
-  { id: 'hdl', w: 3, a: ['verilog', 'vhdl', 'systemverilog', 'rtl design', 'fpga'] },
-  { id: 'labinstr', w: 2, a: ['oscilloscope', 'logic analyzer', 'spectrum analyzer', 'soldering'] },
-  { id: 'embeddedos', w: 2, a: ['linux kernel', 'embedded linux', 'yocto', 'buildroot'] },
-
-  // semiconductor / cleanroom
-  { id: 'semi', w: 3, a: ['semiconductor', 'wafer', 'fab', 'cleanroom', 'clean room'] },
-  { id: 'vacuum', w: 3, a: ['vacuum', 'pump down', 'leak test', 'helium leak'] },
-  { id: 'process-semi', w: 2, a: ['etch', 'deposition', 'cvd', 'pvd', 'cmp', 'lithography', 'photoresist'] },
-  { id: 'yield', w: 2, a: ['yield', 'defect density', 'excursion'] },
-];
+// The vocabulary moved to the preset so a second user can run Jarvis
+// (presets/<preset>/screen.mjs); the hardware list is the one described above.
+const SKILLS = screen.skills;
 
 // ── alias matching ──────────────────────────────────────────────────
 //
@@ -290,8 +202,23 @@ export function getProfile({ force = false } = {}) {
 // Each returns { pts, max, why[] } or null when it cannot be judged.
 // Returning null is meaningful: the dimension leaves the denominator.
 
-const SENIOR_RE = /\b(senior|sr\.?|staff|principal|lead|manager|supervisor|superintendent|director|head of|architect|fellow|iii|iv|v)\b/i;
-const ENTRY_RE = /\b(intern|internship|co-?op|new ?grad|graduate|entry.?level|junior|jr\.?|university|campus|rotational|apprentice|associate|level 1|i\b)\b/i;
+// Title words, discipline words and the fallback vocabulary are the preset's
+// (moved so a second user can run Jarvis): "staff" is senior for an engineer
+// and entry level for an accountant.
+const SENIOR_RE = screen.fitSeniorTitle;
+const ENTRY_RE = screen.fitEntryTitle;
+
+/** The discipline word of a primary role ("automation" of "automation engineer"), when an engineer's title carries it. */
+function primaryDiscipline(title, p) {
+  if (!screen.disciplineTitle.test(title)) return null;
+  const words = new Set(p.primaryRoles.map((r) => r.split(/\s+/)[0]).filter((w) => w.length > 4));
+  // Mechatronics is robotics work by another name (the preset's aliases).
+  for (const [w, also] of Object.entries(screen.disciplineAliases || {})) {
+    if (words.has(w)) for (const a of also) words.add(a);
+  }
+  for (const w of words) if (new RegExp(`\\b${w}`).test(title)) return w;
+  return null;
+}
 
 function scoreRole(job, p) {
   const title = (job.title || '').toLowerCase();
@@ -305,6 +232,13 @@ function scoreRole(job, p) {
   if (hitPrimary.length) {
     pts = 28;
     why.push(`Title is a primary target role (${hitPrimary[0]})`);
+  } else if (primaryDiscipline(title, p)) {
+    // "Tools and Automation Mechatronics Engineer" (Apple, 2026-10-16) — the
+    // work he calls a perfect fit — is not the literal string "automation
+    // engineer", so it scored as a generic discipline title, 16 of 28. A
+    // primary discipline word in an engineer's title is that role.
+    pts = 25;
+    why.push(`Title names a primary target discipline (${primaryDiscipline(title, p)})`);
   } else if (hitSecondary.length) {
     pts = 21;
     why.push(`Title is a secondary target role (${hitSecondary[0]})`);
@@ -312,13 +246,13 @@ function scoreRole(job, p) {
     // No title match — fall back to the archetype vocabulary appearing in the
     // body. Titles are branded ("Product Realization Engineer") far more often
     // than they are descriptive, so the JD is the fairer test.
-    const words = ['mechanical', 'manufacturing', 'automation', 'robotics', 'process', 'equipment',
-      'industrial', 'mechatronic', 'design engineer', 'test engineer', 'quality engineer'];
+    const words = screen.roleFallbackWords;
+    const say = screen.roleFallbackWhy;
     const inTitle = words.filter(w => title.includes(w));
     const inBody = words.filter(w => body.includes(w));
-    if (inTitle.length) { pts = 16; why.push(`Engineering-discipline title (${inTitle.join(', ')})`); }
-    else if (inBody.length >= 3) { pts = 9; why.push('Body describes engineering work, but the title does not match a target role'); }
-    else if (inBody.length) { pts = 4; why.push('Only a weak engineering signal'); }
+    if (inTitle.length) { pts = 16; why.push(`${say.title} (${inTitle.join(', ')})`); }
+    else if (inBody.length >= 3) { pts = 9; why.push(say.body); }
+    else if (inBody.length) { pts = 4; why.push(say.weak); }
     else { pts = 0; why.push('No match to any target role'); }
   }
   return { pts, max: 28, why };
@@ -370,9 +304,19 @@ function scoreSeniority(job) {
   if (typeof years === 'number') {
     if (years <= 1) { why.push(`Asks ~${years}y experience`); return { pts: 20, max: 20, why }; }
     if (years <= 2) { why.push(`Asks ~${years}y experience — reachable with internships`); return { pts: 15, max: 20, why }; }
-    if (years <= 5) { why.push(`Asks ${years}+ years — he has none until May 2027`); return { pts: 5, max: 20, why }; }
+    if (years <= 5) { why.push(`Asks ${years}+ years — ${IS_HIM ? `he has none until ${person.gradLabel}` : `a new grad (${person.gradLabel}) has none`}`); return { pts: 5, max: 20, why }; }
     why.push(`Asks ${years}+ years — well beyond a new grad`);
     return { pts: 0, max: 20, why };
+  }
+  // A MINIMUM THAT IS ONLY A DEGREE (2026-10-16). Apple's Touch team lists
+  // its minimum qualifications — CAD, prototyping, analog basics, "Minimum
+  // requirement of a bachelors degree" — and no years anywhere; that is a
+  // posting a graduate can meet, not an unknown.
+  const body = String(job.description || '');
+  if (body.length > 400 && /\b(minimum|basic|required)\b[^.]{0,60}\b(bachelor'?s?|b\.?s\.?|degree)\b|\b(bachelor'?s?|degree)\b[^.]{0,40}\b(minimum|required)\b/i.test(body)
+    && !/\b\d+\s*\+?\s*(years?|yrs?)\b/i.test(body)) {
+    why.push('Asks for a degree and no years of experience');
+    return { pts: 17, max: 20, why };
   }
   why.push('No stated experience requirement and a level-neutral title');
   return { pts: 11, max: 20, why };
@@ -480,16 +424,32 @@ function scoreComp(job, p) {
   return { pts, max: 10, why };
 }
 
+const METRO_CITIES = {
+  'bay area': ['san francisco', 'san jose', 'santa clara', 'sunnyvale', 'cupertino', 'mountain view', 'palo alto', 'fremont', 'milpitas', 'menlo park', 'redwood city', 'hayward', 'livermore', 'pleasanton', 'oakland', 'berkeley', 'newark, ca', 'union city', 'san mateo', 'south san francisco', 'foster city', 'los gatos', 'campbell', 'san carlos', 'emeryville', 'alameda', 'richmond, ca', 'san leandro', 'dublin, ca', 'morgan hill', 'gilroy'],
+  'austin': ['round rock', 'taylor, tx', 'cedar park', 'pflugerville', 'georgetown, tx', 'san marcos'],
+  'seattle': ['redmond', 'bellevue', 'kirkland', 'everett', 'kent, wa', 'renton', 'bothell', 'tukwila', 'auburn, wa', 'woodinville', 'issaquah', 'mukilteo', 'tacoma'],
+  'boston': ['cambridge, ma', 'waltham', 'burlington, ma', 'bedford, ma', 'woburn', 'lexington, ma', 'billerica', 'andover', 'wilmington, ma', 'marlborough', 'somerville', 'watertown', 'needham', 'chelmsford', 'lowell', 'framingham', 'natick', 'medford'],
+  'san diego': ['carlsbad', 'la jolla', 'poway', 'sorrento', 'oceanside', 'escondido', 'chula vista', 'san marcos, ca', 'vista, ca'],
+  'phoenix': ['chandler', 'tempe', 'mesa', 'scottsdale', 'gilbert', 'glendale, az', 'goodyear', 'peoria, az'],
+  'portland': ['hillsboro', 'beaverton', 'tigard', 'wilsonville', 'tualatin', 'gresham', 'vancouver, wa'],
+};
+
 function scoreLocation(job, p) {
   const loc = (job.location || '').toLowerCase();
   if (!loc) return null;
   const why = [];
   const bucket = job.triage?.locationBucket;
 
-  if (bucket === 'non-us') { why.push('Outside the US — he cannot work there on F-1/OPT'); return { pts: 0, max: 6, why }; }
+  // Outside the US scores 0 for everyone; only an F-1 student is told it is the visa.
+  if (bucket === 'non-us') { why.push(person.workAuth === 'f1' ? 'Outside the US — he cannot work there on F-1/OPT' : 'Outside the US — not a location in scope'); return { pts: 0, max: 6, why }; }
+  // A HUB IS A METRO, NOT ITS NAME (2026-10-16): "San Francisco Bay Area"
+  // matched no posting at all — they say Cupertino, Santa Clara, San Jose — so
+  // Apple, Applied Materials, Lam and KLA all scored "not one of his hubs".
   const hub = p.hubs.find(h => {
     const city = h.split('(')[0].trim().split(',')[0].toLowerCase();
-    return city.length > 3 && loc.includes(city);
+    if (city.length > 3 && loc.includes(city)) return true;
+    const metro = Object.entries(METRO_CITIES).find(([k]) => city.includes(k));
+    return !!metro && metro[1].some((c) => loc.includes(c));
   });
   if (hub) { why.push(`In a preferred hub (${hub.split('(')[0].trim()})`); return { pts: 6, max: 6, why }; }
   if (/remote/.test(loc)) { why.push('Remote'); return { pts: 5, max: 6, why }; }

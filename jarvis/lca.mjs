@@ -31,6 +31,7 @@
  * confidence and the dashboard shows which.
  */
 import { eachRow, cellDate } from './xlsx.mjs';
+import { discovery } from './targeting.mjs';
 
 // ── employer names ──────────────────────────────────────────────────
 
@@ -107,8 +108,12 @@ export function mapHeader(headerRow) {
   return idx;
 }
 
-/** The SOC families a mechanical engineering new grad competes in. */
-export const HIS_SOCS = /^(?:17-2(?:141|112|199|111|131|051|072|061)|17-3(?:027|026|029)|11-3051|17-2011)/;
+/**
+ * The SOC families the person competes in — the preset's socFamilies (for the
+ * hardware preset, mechanical/industrial engineering). Every "eng" count below
+ * (engCertified, eng_certified) is a count in THESE families.
+ */
+export const HIS_SOCS = discovery.socFamilies;
 
 /**
  * A PLAUSIBLE annual salary. Outside this band the filing is a data-entry
@@ -418,7 +423,7 @@ export function verdictFor(s, { now = new Date() } = {}) {
   const year = Number(String(s.lastDecision || '').slice(0, 4)) || 0;
   const stale = year && (now.getUTCFullYear() - year) >= 2;
   const lvl = s.engModalLevel || s.modalLevel;
-  const where = s.engCertified ? 'in mechanical/industrial engineering' : 'across all occupations';
+  const where = s.engCertified ? `in ${discovery.socLabel}` : 'across all occupations';
   const levelPart = lvl
     ? `, usually at Level ${['I', 'II', 'III', 'IV'][lvl - 1]} (${lvl} lottery ${lvl === 1 ? 'entry' : 'entries'})`
     : '';

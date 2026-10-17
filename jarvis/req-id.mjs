@@ -50,3 +50,28 @@ export function urlHasReqId(url, reqId) {
   if (!/^[A-Z]{0,3}\d{2,}$/.test(req)) return false;
   return reqIdOf(url) === req;
 }
+
+/**
+ * Multi-tenant ATS domains whose HOSTNAME names the employer, and whose job
+ * numbers are counted per employer from 1.
+ */
+const TENANT_HOST_RE = /(?:^|\.)(oraclecloud\.com|taleo\.net|icims\.com|myworkdayjobs\.com|bamboohr\.com|applicantpro\.com|avature\.net|pageuppeople\.com|eightfold\.ai|zohorecruit\.com|jobs\.personio\.de)$/i;
+
+/**
+ * ARE TWO URLS ON DIFFERENT EMPLOYERS' SITES OF THE SAME ATS? (F-714)
+ *
+ * Oracle numbers each employer's postings from 1, so "job 1246" is Legrand's
+ * Manufacturing Engineer on iadugs.fa.ocs.oraclecloud.com and Darling
+ * Ingredients' Fleet Mechanic 2 on ekgz.fa.us6.oraclecloud.com — and the panel
+ * showed the second on the first's form (2026-10-06). The same requisition
+ * number on two tenants of one ATS is two postings. A company's own domain
+ * fronting the ATS is not a tenant host, so it is never ruled out here.
+ */
+export function crossTenant(a, b) {
+  let ha;
+  let hb;
+  try { ha = new URL(String(a)).hostname.toLowerCase(); hb = new URL(String(b)).hostname.toLowerCase(); } catch { return false; }
+  if (ha === hb) return false;
+  const da = ha.match(TENANT_HOST_RE)?.[1]?.toLowerCase();
+  return !!da && da === hb.match(TENANT_HOST_RE)?.[1]?.toLowerCase();
+}

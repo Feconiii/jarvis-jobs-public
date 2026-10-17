@@ -191,6 +191,19 @@ test('THE COVER LETTER IS ASKED FOR, SHOWN WITH ITS CHECKS, AND PUT IN THE FORM 
  * he watched the card say "None written for this posting yet." beside a
  * Neuralink form holding "… - Cover Letter.pdf" (2026-09-21).
  */
+test('F-734: SELECT-ALL ON A SHOWN LETTER TAKES THE LETTER, never the panel around it', async () => {
+  const ready = { ok: true, status: 'ready', at: '2026-10-16T06:26:49Z', text: 'Dear Hiring Manager,\n\nAt Applied Materials I designed a fixture.\n\nAlex Rivera', problems: [], notices: [], request: '' };
+  await open({ letter: ready });
+  await page.click('#tab-letter');
+  await page.waitForFunction(() => !document.getElementById('letter-text').hidden);
+  await page.click('#letter-text');
+  await page.keyboard.press('Control+a');
+  const got = await page.evaluate(() => String(window.getSelection()).trim());
+  assert.match(got, /^Dear Hiring Manager/, 'the selection starts at the letter');
+  assert.doesNotMatch(got, /Jarvis|Strong fit|Filling|Cover letter/, 'and holds none of the panel\'s own words');
+  await page.close();
+});
+
 test('"NONE WRITTEN YET" IS RE-ASKED, so a letter the filler wrote shows up', async () => {
   const ready = { ok: true, status: 'ready', at: '2026-09-21T00:42:00Z', text: 'Dear Hiring Manager,\n\nAt Applied Materials I designed a fixture.\n\nAlex Rivera', problems: [], notices: [], request: '' };
   const none = { ok: false, status: 404, error: 'no letter for this job yet' };

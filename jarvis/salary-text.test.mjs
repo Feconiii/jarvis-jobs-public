@@ -94,6 +94,71 @@ check('an hourly range next to the word hour is still hourly',
 check('…and a self-stated hourly range is untouched',
   parseSalaryFromText('$33/hour - $36/hour').interval, 'hour');
 
+console.log('\n🧪 salary-text: a bare range must be two amounts (F-629)');
+// 88 stored jobs showed hourly pay read out of a travel share, and more out of
+// dates, shift lengths and mileage. Each string below is from the store.
+check('Tesla — "10-15% of travel" is not $10-15/hr',
+  range('Ability to travel 10-15% for work on site on a regular basis. Compensation and Benefits: Along with competitive pay, as a full-time Tesla employee…'), null);
+check('Avery Dennison — "10 - 20 percent of the time"',
+  range('Travel Ability to travel 10 - 20 percent of the time. The hourly pay for this position is competitive.'), null);
+check('Marble — "15-25% of plant revenue"',
+  range('As a result, 15-25% of plant revenue (salary and equity offered)'), null);
+check('the travel share does not hide the real pay beside it',
+  range('Travel Requirements 25-50% Relocation Provided. Base salary range: $95,000 - $120,000.'), [95000, 120000, 'USD']);
+check('CrowdStrike — a posting date is not pay',
+  range('Salary will vary. The Date of Job Posting is:09-22-2026'), null);
+check('Baker Hughes — "8–10-hour shift"',
+  range('Pay is competitive. Stand and/or walk for most of an 8–10-hour shift, with additional overtime'), null);
+check('Amcor — "10–12-point font"',
+  range('Hourly pay; ability to read 10–12-point font at a distance'), null);
+check('Ecolab — "400-500 mile radius"',
+  range('Great pay! Delivery within a 400-500 mile radius from plant'), null);
+check('Stryker — "80-100 miles/day"',
+  range('Base salary plus commission; personal vehicle (drive 80-100 miles/day depending on territory)'), null);
+check('Allegion — "20 to 40 hourly associates"',
+  range('Salary range below. Lead a team of approximately 20 to 40 hourly associates to safely produce'), null);
+check('Devon — "September 10-11th"',
+  range('Paid travel to Oklahoma City on September 10-11th, 2026.'), null);
+check('Gartner — "managing 10 – 20 large enterprise accounts", pay word far away',
+  range('Competitive base salary and uncapped commissions. You will own a territory in the supply chain practice, delivering value in over, managing 10 – 20 large enterprise accounts'), null);
+check('Smith+Nephew — space-grouped thousands are not a 500-110 range',
+  range('The base salary range for this position is 73 500 -110 250 PLN annually.'), null);
+check('Stryker PR — decimal commas are not read from the middle',
+  range('Salary range verbal. Puerto Rico: 10,50 - 12,43 - 14,36 USD Hour'), null);
+check('Boeing — no currency, but "pay range:" right before it',
+  range('Summary pay range: 33.32 – 61.01 Language Requirements'), [33.32 * 2080, 61.01 * 2080, 'USD']);
+check('Hadrian — "target salary range is 160k-190k"',
+  range('The target salary range is 160k-190k (actual range may vary)'), [160000, 190000, 'USD']);
+check('Ecolab — "35 - 37 / HR" with no pay word, the rate is in the range',
+  range("Competitive pay for our CDL-A drivers, with home time every week and a strong safety culture. What's in it For You: • 35 - 37 / HR • Terminal Location"), [35 * 2080, 37 * 2080, 'USD']);
+check('Ecolab — min-mid-max reads as min to max',
+  range('Hourly Compensation Range: 53,600.00 - 66,900.00 - 80,300.00 USD Annual'), [53600, 80300, 'USD']);
+check('Baker Hughes — hourly min-mid-max',
+  (r => r && [r.rate.min, r.rate.max, r.interval])(parseSalaryFromText('The hourly pay scale for this position is between 19.02 - 25.36 - 31.69 USD. Candidates for this role')),
+  [19.02, 31.69, 'hour']);
+check('ICEYE — "from 50 to 75 to 120+ satellites per year" is a count',
+  range('The production system is designed and operated to scale, from 50 to 75 to 120+ satellites per year, with competitive salary'), null);
+check('GE Aerospace — "150,000-200,000 shipments annually" is a count',
+  range('Competitive salary. Own site-level processes for approximately 150 locations and 150,000-200,000 shipments annually.'), null);
+check('Boeing — "Level 4 $162,350-$219,650": the level number is a label',
+  range('Summary pay range: Level 4 $162,350-$219,650 Language Requirements'), [162350, 219650, 'USD']);
+check('PsiQuantum — "Zone 1 $48.75—$57.26 USD"',
+  (r => r && [r.rate.min, r.rate.max, r.interval])(parseSalaryFromText('The estimated base salary range for this role is: Zone 1 $48.75—$57.26 USD')),
+  [48.75, 57.26, 'hour']);
+check('Rolls-Royce — "$78,918 - $128,242-Annually"',
+  range('may vary from the posted range. $78,918 - $128,242-Annually Location: India'), [78918, 128242, 'USD']);
+check('Outokumpu — "Salary range: USD. 106,100-145,900"',
+  range('Salary range: USD. 106,100-145,900 plus bonus.'), [106100, 145900, 'USD']);
+check('Spotify — "base range for this position is 164,448 - 234,926"',
+  range('The United States base range for this position is 164,448 - 234,926 plus equity. Benefits include health insurance and the salary is reviewed yearly.'), [164448, 234926, 'USD']);
+check('Ryder — pay word just after: "48k - 50k (DOE) yearly salary"',
+  range('perks of joining our Ryder Team. • 48k - 50k (DOE) yearly salary + benefits'), [48000, 50000, 'USD']);
+check('Amazon — a refused first pair does not hide the pair after it',
+  (r => r && [r.rate.min, r.rate.max, r.interval])(parseSalaryFromText('benefits at https://amazon.jobs/en/benefits. USA, OR, PDX170 - 30.00 - 54.00 USD hourly')),
+  [30, 54, 'hour']);
+check('a trailing "- depending on experience" does not cost the range',
+  range('Base pay: $100,000 - $120,000 - depending on experience'), [100000, 120000, 'USD']);
+
 console.log('\n🧪 salary-text: resolveSalary decides what may be re-derived');
 // This resolver is what rescore.mjs calls, and it used to short-circuit on ANY
 // stored value — which meant no improvement to the parser could ever reach a

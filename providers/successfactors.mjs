@@ -27,6 +27,7 @@
 // Override the path with `feed:` if a site publishes it elsewhere.
 
 const FEED_PATH = '/sitemap.xml';
+const ALT_FEED_PATH = '/googlejobs.xml';
 
 function feedUrl(entry) {
   if (typeof entry.feed === 'string' && entry.feed.startsWith('https://')) return entry.feed;
@@ -127,6 +128,14 @@ export default {
     const url = feedUrl(entry);
     if (!url) throw new Error(`successfactors: ${entry.name} needs a careers_url (https://careers.<company>.com)`);
     const xml = await ctx.fetchText(url);
-    return parseSuccessFactorsFeed(xml, entry.name);
+    const jobs = parseSuccessFactorsFeed(xml, entry.name);
+    // Some CSB sites (Arthrex, CTS, Lindsay, REV Group — 2026-10-01) serve a
+    // plain URL sitemap at /sitemap.xml and keep the RSS at /googlejobs.xml.
+    // A urlset with no <item> is that case, not an empty board.
+    if (!jobs.length && !entry.feed && /<urlset[\s>]/i.test(xml)) {
+      const alt = url.replace(/\/sitemap\.xml$/, ALT_FEED_PATH);
+      if (alt !== url) return parseSuccessFactorsFeed(await ctx.fetchText(alt), entry.name);
+    }
+    return jobs;
   },
 };

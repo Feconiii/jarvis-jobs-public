@@ -45,11 +45,35 @@ function wdValue(fieldId, p) {
     // own site both times ("Company Career Site", "ABB Careers Website"). The
     // career-site spellings follow LinkedIn, and a closed prompt now tries
     // every alternative in turn (F-551), so a tenant without LinkedIn lands on
-    // its career site. LinkedIn stays first: on Applied Materials the career
-    // site is a CATEGORY that commits nothing, and LinkedIn is the leaf (F-390).
-    case 'formField-source': return [A.how_heard, 'Career Site', 'Careers Website', 'Corporate Website', 'Company Website', 'Job Board', 'Job Boards', 'Other'].filter(Boolean);
+    // its career site.
+    //
+    // THE CAREER SITE NOW COMES FIRST. Wolfspeed, 2026-09-24, after that fix:
+    // "LinkedIn" landed and he changed it to "Corporate Website" by hand — his
+    // third Workday tenant in one night choosing the company's own site. On
+    // Applied Materials the career site is a CATEGORY (F-390); the menu walk
+    // opens it and chooses again at the level beneath, and LinkedIn is still
+    // next in line if nothing there commits.
+    //
+    // LINKEDIN FIRST AGAIN — HIS RULE, 2026-09-24: "always just answer
+    // LinkedIn, thing is I never see it filled, it always fails — or company
+    // site or social media, Instagram, Facebook… whatever pops up first and
+    // works." He chose the career site on KLA/ABB/Wolfspeed because LinkedIn
+    // never landed, not because it was wrong. LinkedIn usually sits one level
+    // down, inside a Social Media / Job Board / Career Websites category, so
+    // those categories come next: the menu walk opens one and chooses LinkedIn
+    // at the level beneath. Then the company's site, then any social network.
+    case 'formField-source': return [...HOW_HEARD_LADDER].filter(Boolean);
     default: return undefined; // unknown → handled by label matcher / flagged
   }
 }
+
+/** "How did you hear about us?", in his order of preference (2026-09-24). */
+export const HOW_HEARD_LADDER = [
+  'LinkedIn',
+  'Social Media', 'Job Board or Social Media', 'Social Networking', 'Career Websites', 'Online Job Board', 'Job Board', 'Job Boards',
+  'Company Career Site', 'Career Site', 'Careers Website', 'Corporate Website', 'Company Website', 'Company Careers Page',
+  'Instagram', 'Facebook', 'Twitter', 'X (Twitter)',
+  'Other',
+];
 
 export { wdValue };

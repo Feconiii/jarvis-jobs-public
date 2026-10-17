@@ -15,7 +15,7 @@
 //     the regression guard for that, and are the most important ones here:
 //     a wrong answer that reports as correct is worse than a blank field.
 
-import { chooseOption, polarityOf } from './apply/_form.mjs';
+import { chooseOption, polarityOf, moneyRangeIndex } from './apply/_form.mjs';
 
 let pass = 0, fail = 0;
 const t = (name, want, options, expect) => {
@@ -59,6 +59,11 @@ t('not a veteran, greenhouse wording', 'I am not a Veteran.',
 // matched" on a real application.
 t('lam veteran: a negated first-person claim is No', 'I am not a Veteran.', ['Choose not to disclose', 'No', 'Yes'], 1);
 t('lam veteran: an un-negated claim is Yes', 'I am a veteran', ['Choose not to disclose', 'No', 'Yes'], 2);
+// HP (Workday), F-618: an option that says he IS a veteran is never "not a veteran".
+const HP_VETS = ['I IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN', 'I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERANS LISTED ABOVE', 'I DO NOT WISH TO SELF-IDENTIFY'];
+t('hp veteran: no honest option is no match, not a veteran claim', 'I am not a Veteran.', HP_VETS, -1);
+t('hp veteran: the honest option is taken when it is there', 'I am not a Veteran.', [...HP_VETS, 'I am not a Veteran.'], 3);
+t('hp veteran: a bare No claims nothing', 'No', HP_VETS, -1);
 t('a first-person claim still prefers the option that says it', 'I am not a Veteran.',
   ['I am not a protected veteran', 'I am a disabled veteran', 'Yes', 'No'], 0);
 t('lam consent: Yes is the widest scope', 'Yes',
@@ -240,9 +245,62 @@ t('an exact match still wins over the rule', 'Open to on-site, hybrid, or remote
 t('a non-open answer is untouched by it', 'Remote only',
   ['Remote only', 'Office-based position'], 0);
 
+// -- a placeholder is never an answer --------------------------------
+//
+// TSMC's SuccessFactors menus open on "No Selection"; "No" chose it
+// (2026-09-24), so the question stayed empty.
+t('"No" is not "No Selection"', 'No', ['No Selection', 'No', 'Yes'], 1);
+t('"Yes" still finds Yes', 'Yes', ['No Selection', 'No', 'Yes'], 2);
+t('a placeholder alone matches nothing', 'No', ['Select...'], -1);
+
+// -- a place, "City, State", against abbreviated rows ---------------
+//
+// Measured 2026-09-24 on SmartRecruiters (Western Digital): Office location and
+// School location offered "Springfield, WA, US" and nothing matched "Springfield,
+// Washington", so both were left with the right row on screen.
+t('a spelled state matches its code', 'Springfield, Washington',
+  ['Cannot find your city?', 'Springfield, WA, US'], 1);
+t('another state, same shape', 'Austin, Texas', ['Austin, TX, US'], 0);
+t('the city must agree, not just start alike', 'Springfield, Washington',
+  ['Springfield Valley, WA, US'], -1);
+t('the state must agree', 'Portland, Oregon',
+  ['Portland, ME, US', 'Portland, OR, US'], 1);
+
 // Numeric BANDS ("3.3- 4.0", "6+ years") are not matched here — chooseOption
 // matches text, and a band list has no text to match. `chooseBand` in
 // jarvis/apply-plan.mjs owns that and is tested beside it.
+
+// AN AMOUNT AGAINST RANGES — Phoenix Tailings' Lever radio, 2026-09-25.
+{
+  const phx = ['$50, 000 - $100, 000', '$100, 000 - $150, 000', '$150, 000 - $200, 000'];
+  t('salary range: $90000/year is in 50–100k', '$90000/year', phx, 0);
+  t('salary range: a shared boundary takes the lower range', '$100,000', phx, 0);
+  t('salary range: 120k', '120k', phx, 1);
+  t('salary range: "Under" and "+" ends', '$55,000', ['Under $60,000', '$60,000 - $80,000', '$100,000+'], 0);
+  t('salary range: open top', '$130,000', ['Under $60,000', '$60,000 - $80,000', '$100,000+'], 2);
+  const guard = (name, got) => { if (got === -1) pass++; else { fail++; console.log(`✗ ${name}: took the money path (${got})`); } };
+  guard('a GPA never takes the money path', moneyRangeIndex('3.85', ['3.0 - 3.5', '3.5 - 4.0']));
+  guard('years never take the money path', moneyRangeIndex('2 years', ['0-1', '1-3', '3-5']));
+  guard('a phone number is two amounts, never a salary', moneyRangeIndex('555-010-0000', ['$50,000 - $100,000', '$100,000 - $150,000']));
+}
+
+// ── the same words in another order (HP's field of study, 2026-09-26) ─
+t('"Engineering, Mechanical" over "Mechanical Engineering Technology"', 'Mechanical Engineering', ['Engineering, Mechanical', 'Engineering, Electrical', 'Mechanical Engineering Technology'], 0);
+t('"Engineering - Mechanical" is found at all', 'Mechanical Engineering', ['Engineering - Civil', 'Engineering - Mechanical'], 1);
+t('the exact option still wins first', 'Mechanical Engineering', ['Engineering, Mechanical', 'Mechanical Engineering'], 1);
+t('one word takes no reordering path', 'Engineering', ['Engineering', 'Physics'], 0);
+
+// THE KIND OF THE ANSWER, WHEN THE LIST NAMES KINDS (2026-10-03).
+t('a yearly figure is "Salary" (Plug Power)', '$90000/year', ['Hourly', 'Salary'], 1);
+t('a yearly figure is "Yearly" (Paylocity)', '$90000/year', ['--', 'Hourly', 'Yearly'], 2);
+t('an hourly figure is "Hourly"', '$28/hour', ['Hourly', 'Salary'], 0);
+t('an email address is "Email"', 'jane.doe@example.com', ['Email', 'Phone', 'Text'], 0);
+t('a phone number is "Phone"', '555-010-0199', ['Email', 'Phone', 'Text'], 1);
+t('a link is "Website"', 'https://alexrivera.example', ['LinkedIn', 'Website', 'Other'], 1);
+t('a kind is never forced on a list that names none', '$90000/year', ['Yes', 'No'], -1);
+// A STREET ADDRESS IN THE POST OFFICE'S SPELLING (Optomec, F-691).
+t('North/Street read as N/St, the row without an apartment first', '123 North Main Street', ['123 N Main St, Apt (61), Springfield, WA 12345', '123 N Main St, Springfield, WA 12345', '123 W Main St, Pasco, WA 99301'], 1);
+t('a different street number is not the address', '123 North Main Street', ['1 N Browne St, Springfield, WA 99201'], -1);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

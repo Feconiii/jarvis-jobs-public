@@ -97,6 +97,70 @@ export function googlePosting(html) {
 }
 
 /** Whichever site-specific reader recognises the page, or null. */
+/**
+ * The JSON object literal that starts at `start` (a '{'), read by brace depth
+ * with strings respected, or null.
+ */
+function objectAt(text, start) {
+  if (text[start] !== '{') return null;
+  let depth = 0, inStr = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (c === '\\') i++;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) {
+      try { return JSON.parse(text.slice(start, i + 1)); } catch { return null; }
+    }
+  }
+  return null;
+}
+
+//   UKG     new US.Opportunity.CandidateOpportunityDetail({…})  — the posting
+//           record the OpportunityDetail page renders from: Title, Description
+//           (HTML), Locations[].Address, PostedDate (F-705, 2026-10-03).
+export function ukgPosting(html) {
+  const s = String(html || '');
+  const at = s.indexOf('CandidateOpportunityDetail(');
+  if (at < 0) return null;
+  const job = objectAt(s, at + 'CandidateOpportunityDetail('.length);
+  if (!job || typeof job.Title !== 'string' || typeof job.Description !== 'string' || !job.Description.trim()) return null;
+  const locs = Array.isArray(job.Locations) ? job.Locations : [];
+  return {
+    '@type': 'JobPosting',
+    title: job.Title.trim(),
+    description: job.Description,
+    datePosted: typeof job.PostedDate === 'string' ? job.PostedDate : undefined,
+    occupationalCategory: job.JobCategoryName || undefined,
+    jobLocation: locs.map((l) => asAddress(l?.Address?.City, l?.Address?.State?.Code, l?.Address?.Country?.Code)),
+  };
+}
+
+//   Phenom  phApp.ddo = {…jobDetail: {data: {job: {title, description, …}}}}
+//           — the record a Phenom career site's posting page renders from; the
+//           board's own search only gives a 300-character teaser (2026-10-07:
+//           Quest Global, STERIS, Merck KGaA rows all stopped there).
+export function phenomPosting(html) {
+  const s = String(html || '');
+  const at = s.indexOf('phApp.ddo = ');
+  if (at < 0) return null;
+  const ddo = objectAt(s, s.indexOf('{', at));
+  const job = ddo?.jobDetail?.data?.job;
+  if (!job || typeof job.title !== 'string' || typeof job.description !== 'string' || !job.description.trim()) return null;
+  return {
+    '@type': 'JobPosting',
+    title: job.title.trim(),
+    description: job.description,
+    datePosted: typeof job.postedDate === 'string' ? job.postedDate : undefined,
+    occupationalCategory: job.category || undefined,
+    jobLocation: [asAddress(job.city, job.state, job.country)],
+  };
+}
+
 export function embeddedPosting(html) {
-  return applePosting(html) || googlePosting(html);
+  return applePosting(html) || googlePosting(html) || ukgPosting(html) || phenomPosting(html);
 }

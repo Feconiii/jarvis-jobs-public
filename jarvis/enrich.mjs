@@ -24,6 +24,7 @@
 
 import { writeFileSync, readFileSync } from 'fs';
 import path from 'path';
+import yaml from 'js-yaml';
 import { fileURLToPath } from 'url';
 import { getJob, updateJob, query, db, STORE_DIR, withStoreLock } from './store.mjs';
 import { triage } from './triage.mjs';
@@ -31,6 +32,7 @@ import { scoreFit, getProfile, slimFit } from './fit.mjs';
 import { resolveSalary } from './salary-text.mjs';
 import { htmlToText } from './text.mjs';
 import { embeddedPosting } from './embedded-posting.mjs';
+import { adpDetailApi } from '../providers/adp.mjs';
 import { makeHostLimiter, serviceOf } from './net-pool.mjs';
 import { makePacer, pacePath } from './pace.mjs';
 import { DETAIL_SOURCES, driftFrom } from './detail-sources.mjs';
@@ -109,11 +111,52 @@ export function appendGateQuestions(body, questions) {
     const label = String(q?.label || '').replace(/\s+/g, ' ').trim();
     if (!label || !GATE_QUESTION.test(label)) continue;
     if (labels.some((l) => l.text === label)) continue;
-    labels.push({ text: label, required: q?.required === true });
+    // THE QUESTION'S OWN NOTE IS WHERE THE ITAR CLAUSE LIVES (Freeform,
+    // 2026-10-02): "Citizenship Status" carries "Export Compliance: … must be
+    // a 'U.S. person' as defined in the ITAR …" in its description, and the
+    // posting body says nothing. He hid it for ITAR; the screen never saw it.
+    const note = htmlToText(String(q?.description || '')).replace(/\s+/g, ' ').trim();
+    labels.push({ text: note && GATE_QUESTION.test(note) ? `${label} — ${note.slice(0, 900)}` : label, required: q?.required === true });
   }
   if (!labels.length) return body;
   return `${body}\n\nApplication form questions (asked by the employer on its own application):\n${
     labels.map((l) => `${l.text}${l.required ? ' (required)' : ''}`).join('\n')}`;
+}
+
+/**
+ * ORACLE'S DETAIL ENDPOINT WHEN THE ROW DOES NOT CARRY IT (2026-10-02).
+ *
+ * New rows lost the scanner's detailApi in the store (fixed there), so 5,045
+ * of 5,512 Oracle postings had no description. Two ways back, the same order
+ * as Greenhouse's: the posting URL itself when it is on the real Oracle host
+ * (Cummins, Emerson, Honeywell: …/hcmUI/CandidateExperience/en/sites/CX_1/job/
+ * 2435230), else the company's entry in portals.yml (orc_host, orc_site) with
+ * the requisition from the vanity URL (careers.ti.com/en/sites/CX_1/job/…).
+ */
+let ORC_BOARDS = null;
+export function oracleDetailApi(url, company) {
+  const id = String(url || '').match(/\/job\/(\d+)(?:[/?#]|$)/)?.[1];
+  if (!id) return null;
+  let host = '';
+  let site = '';
+  const own = String(url).match(/^(https:\/\/[\w.-]+\.oraclecloud\.com)\/hcmUI\/CandidateExperience\/[\w-]+\/sites\/([\w-]+)\//i);
+  if (own) [, host, site] = own;
+  else {
+    if (!ORC_BOARDS) {
+      ORC_BOARDS = new Map();
+      try {
+        const doc = yaml.load(readFileSync(process.env.CAREER_OPS_PORTALS || path.join(ROOT, 'portals.yml'), 'utf-8')) || {};
+        for (const e of [...(doc.tracked_companies || []), ...(doc.watchlist || [])]) {
+          if (e?.provider === 'oracle-orc' && e.orc_host && e.name) ORC_BOARDS.set(String(e.name).trim().toLowerCase(), { host: String(e.orc_host).replace(/\/$/, ''), site: e.orc_site || 'CX_1' });
+        }
+      } catch { /* no portals.yml */ }
+    }
+    const b = ORC_BOARDS.get(String(company || '').trim().toLowerCase());
+    if (!b) return null;
+    ({ host, site } = b);
+  }
+  return `${host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails`
+    + `?expand=all&onlyData=true&finder=ById%3BId%3D%22${id}%22%2CsiteNumber%3D%22${encodeURIComponent(site)}%22`;
 }
 
 function greenhouseBoardFor(company) {
@@ -135,6 +178,15 @@ function greenhouseBoardFor(company) {
   return GH_BOARDS.get(key) || '';
 }
 
+/** The detail deriver for a row's source; `<ats>-manual` reads as `<ats>`. */
+const detailFor = (source) => DETAIL[source] || DETAIL[String(source || '').replace(/-manual$/, '')];
+
+/** The detail spec for a row, or null when its source has no reader. Exported for tests. */
+export function detailSpec(job) {
+  const d = detailFor(job?.source);
+  return d ? d(String(job?.url || ''), job) : null;
+}
+
 const DETAIL = {
   // Oracle Recruiting Cloud (Texas Instruments and the rest of the ORC estate).
   //
@@ -151,16 +203,23 @@ const DETAIL = {
   // as its URL: some detail endpoints are not derivable from the posting
   // address at all.
   'oracle-orc'(url, job) {
-    const api = String(job?.detailApi || '');
-    if (!/^https:\/\/[\w.-]+\/hcmRestApi\//.test(api)) return null;
+    const api = /^https:\/\/[\w.-]+\/hcmRestApi\//.test(String(job?.detailApi || ''))
+      ? String(job.detailApi)
+      : oracleDetailApi(url, job?.company);
+    if (!api) return null;
     return {
       api,
       // The body is split across three fields and any of them can be empty;
       // the qualifications block is the one that carries "Bachelor's in
       // electrical engineering", which is exactly what the degree check reads.
+      // …and the CORPORATE block, last (F-733). Emerson keeps its work-
+      // authorization rule there and only there: "This is not a position for
+      // which sponsorship will be provided … F-1 (including those with OPT or
+      // CPT) … are not eligible for hire". Without it the visa gate never saw
+      // the sentence, and an Emerson posting reached his inbox.
       pick: (j) => {
         const d = j?.items?.[0] || {};
-        return [d.ExternalDescriptionStr, d.ExternalResponsibilitiesStr, d.ExternalQualificationsStr]
+        return [d.ExternalDescriptionStr, d.ExternalResponsibilitiesStr, d.ExternalQualificationsStr, d.CorporateDescriptionStr]
           .filter(Boolean).join('\n\n');
       },
     };
@@ -191,6 +250,23 @@ const DETAIL = {
       };
     }
     return null;
+  },
+  // Phenom career sites (Thermo Fisher, GE HealthCare) list a ~380-character
+  // teaser and link each posting to the employer's own Workday tenant. The
+  // curator needs 400 characters to read anything, so those rows took half of
+  // every batch as "no description to read" (F-673). The Workday link is the
+  // full posting; any other link has no reader here.
+  phenom(url) {
+    if (/myworkday(?:jobs|site)\.com\//.test(url)) return DETAIL.workday(url);
+    // A posting on the Phenom site itself: its page carries the whole record
+    // (phenomPosting). The locale in the path must be the one the id was filed
+    // under — QGRQGAGLOBALP122128EXTERNALENGLOBAL lives at /global/en/, and the
+    // /us/en/ link the search hands back redirects to the home page.
+    const m = /^(https:\/\/[^/]+)\/([a-z]{2,6}\/[a-z]{2})\/job\/([A-Za-z0-9]+)(\/[^?#]*)?/.exec(url);
+    if (!m) return null;
+    const loc = /EXTERNAL([A-Z]{2})([A-Z]{2,6})$/.exec(m[3]);
+    const path = loc ? `${loc[2].toLowerCase()}/${loc[1].toLowerCase()}` : m[2];
+    return { html: `${m[1]}/${path}/job/${m[3]}${m[4] || ''}`, pick: null };
   },
   // Greenhouse: list URL .../<board>/jobs/<id>  →  boards-api.greenhouse.io/v1/boards/<board>/jobs/<id>
   //
@@ -347,6 +423,35 @@ const DETAIL = {
   // the page says so itself — it ships a `noscript_icims_content_iframe`
   // whose src is the same URL with `in_iframe=1`. Fetching the shell returns
   // 18KB of chrome and no job; fetching the iframe returns the posting.
+  // Paylocity (F-720): the posting page publishes a schema.org JobPosting.
+  paylocity(url) {
+    const u = String(url || '');
+    return /^https:\/\/recruiting\.paylocity\.com\/Recruiting\/Jobs\/Details\/\d+$/i.test(u) ? { html: u, pick: null } : null;
+  },
+  // Workable (2026-10-08): the board's feed is a list, and 114 relevant rows
+  // (New Flyer, Acorn Product Development, Monarch Quantum) were never
+  // attempted. One posting's JSON carries the body in three parts.
+  workable(url) {
+    const m = /^https:\/\/apply\.workable\.com\/([a-z0-9][a-z0-9-]*)\/(?:jobs\/view|j)\/([A-Z0-9]{6,})/i.exec(String(url || ''));
+    if (!m) return null;
+    return {
+      api: `https://apply.workable.com/api/v2/accounts/${m[1]}/jobs/${m[2]}`,
+      pick: (j) => [j?.description, j?.requirements && `<h3>Requirements</h3>${j.requirements}`, j?.benefits && `<h3>Benefits</h3>${j.benefits}`]
+        .filter((x) => typeof x === 'string' && x.trim()).join('\n'),
+    };
+  },
+  // ADP Workforce Now (F-705): one requisition's JSON carries the body.
+  adp(url) {
+    const api = adpDetailApi(url);
+    return api ? { api, pick: (j) => (typeof j?.requisitionDescription === 'string' ? j.requisitionDescription : '') } : null;
+  },
+  // UKG Pro Recruiting (F-705): the OpportunityDetail page carries the posting
+  // as an embedded record (embedded-posting.mjs → ukgPosting).
+  ukg(url) {
+    const u = String(url || '');
+    if (!/^https:\/\/recruiting\d*\.ultipro\.com\/[A-Za-z0-9]+\/JobBoard\/[0-9a-f-]{36}\/OpportunityDetail\?opportunityId=[0-9a-f-]{36}/i.test(u)) return null;
+    return { html: u, pick: null };
+  },
   icims(url) {
     const u = String(url || '');
     if (!/\.icims\.com\//i.test(u)) return null;
@@ -556,6 +661,9 @@ function parseArgs() {
     // ONE POSTING, BY ID — what the dashboard asks for the moment a resume
     // is about to be written for a job whose description was never read.
     id: get('--id'),
+    // A LIST OF POSTINGS, ONE ID PER LINE — a hand-picked batch (the recent
+    // mechanical rows a curation run is about to read) that no filter names.
+    idsFile: get('--ids-file'),
     company: get('--company')?.toLowerCase(),
     status: get('--status'),
     relevance: get('--relevance') != null ? Number(get('--relevance')) : undefined,
@@ -588,7 +696,13 @@ function selectJobs(opts) {
   // to read, and an empty list is the honest answer.
   if (opts.id) {
     const one = getJob(String(opts.id), { description: true });
-    return one && DETAIL[one.source] ? [one] : [];
+    return one && detailFor(one.source) ? [one] : [];
+  }
+  if (opts.idsFile) {
+    const ids = readFileSync(opts.idsFile, 'utf8').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    return ids.map((id) => getJob(id, { description: true }))
+      .filter((j) => j && detailFor(j.source) && (opts.force || !j.description))
+      .slice(0, opts.limit);
   }
   const known = Object.keys(DETAIL);
   if (opts.sources?.length) {
@@ -601,7 +715,9 @@ function selectJobs(opts) {
     // Only what we CAN read (a detail deriver exists for its source), narrowed
     // to the caller's --source list when there is one. An unknown name is
     // dropped rather than silently widening the run back to everything.
-    source: opts.sources?.length ? opts.sources.filter(s => known.includes(s)) : known,
+    // `<ats>-manual`: a posting recorded from its own ATS because he opened
+    // its form first (serve.mjs recordFromAts). Same API, same deriver.
+    source: (opts.sources?.length ? opts.sources.filter(s => known.includes(s)) : known).flatMap((s) => [s, `${s}-manual`]),
   };
   if (opts.auto) {
     // Auto mode (spawned by the dashboard server): read the jobs the user
@@ -679,7 +795,12 @@ function selectJobs(opts) {
   //
   // Fit still leads when re-reading rows that already HAVE a description
   // (--force), because there the score is computed from real text.
-  const sort = filters.needsRead ? 'relevance' : 'fit';
+  //
+  // NEW-GRAD POSTINGS FIRST (F-672, 2026-10-03). 464 unread rows carried
+  // f_newgrad against 175,474 that did not, and Micron's "New College Grad
+  // ... Shift Engineer" titles score relevance 0, so a 150-row batch ordered
+  // by relevance never reached the postings he is actually eligible for.
+  const sort = filters.needsRead ? 'unread' : 'fit';
   const { rows } = query(filters, { sort, limit: opts.limit, full: true });
   return rows;
 }
@@ -776,7 +897,7 @@ async function runBatch(jobs, T) {
   const goneIds = [];
   const tick = () => { T.done++; if (T.done % 5 === 0 || T.done === T.total) writeProgress({ running: true, total: T.total, done: T.done, ok: T.ok + ok, failed: T.failed + failed, gone: T.gone + gone, startedAt: T.startedAt }); };
   await pool(jobs, async (job) => { try {
-    const deriver = DETAIL[job.source];
+    const deriver = detailFor(job.source);
     const spec = deriver(job.url, job);
     if (!spec) { failed++; note(`no detail URL for source ${job.source}`, job.company); failedIds.push(job.id); return; }
     try {
@@ -1156,6 +1277,7 @@ const USAGE = `
     --company <value>     
     --fit <value>         
     --force               
+    --ids-file <path>     only the posting ids listed in this file, one per line
     --limit <value>       
     --relevance <value>
     --source <a,b>        only these ATSes (greenhouse, ashby, workday, …)
@@ -1165,7 +1287,7 @@ const USAGE = `
 `;
 
 // F-163: not one command in this project handled --help, so --help RAN them.
-guardArgs({ usage: USAGE, flags: ["--all","--auto","--company","--fit","--force","--id","--limit","--relevance","--source","--stale","--status"], valued: ["--company","--fit","--id","--limit","--relevance","--source","--stale","--status"] });
+guardArgs({ usage: USAGE, flags: ["--all","--auto","--company","--fit","--force","--id","--ids-file","--limit","--relevance","--source","--stale","--status"], valued: ["--company","--fit","--id","--ids-file","--limit","--relevance","--source","--stale","--status"] });
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // WHATEVER ENDS THIS RUN, THE FILE SAYS SO. Ctrl-C, a SIGTERM from the

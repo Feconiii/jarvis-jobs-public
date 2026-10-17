@@ -333,6 +333,18 @@ console.log('\n🧪 findByHeading: a form that names the job by board and headin
   ok('level II is not level I', S.findByHeading(BD, ['Advanced Manufacturing Engineer II'])?.title === 'Advanced Manufacturing Engineer II');
   ok('another board never answers', S.findByHeading('https://jobs.smartrecruiters.com/Bosch/', ['Advanced Manufacturing Engineer II']) === null);
   ok('a heading that is nobody\'s title answers nothing', S.findByHeading(BD, ['Easy Apply']) === null);
+  // A title two postings on the board share names neither (Intel's "Module
+  // Engineer" in Phoenix AND Penang, 2026-09-26): the heading picks nothing.
+  S.upsertJobs([
+    { url: 'https://jobs.smartrecruiters.com/BectonDickinson2/743999797968301-module-engineer', title: 'Module Engineer', company: 'Becton Dickinson', description: JD_GOOD },
+    { url: 'https://jobs.smartrecruiters.com/BectonDickinson2/743999797968302-module-engineer', title: 'Module Engineer', company: 'Becton Dickinson', description: JD_GOOD },
+  ]);
+  ok('a title two postings share names neither', S.findByHeading(BD, ['Module Engineer']) === null);
+  // A careers LISTING names many jobs (Lucid, 2026-09-25): no posting.
+  ok('a heading holding two titles names no posting',
+    S.findByHeading(BD, ['Open Roles Advanced Manufacturing Engineer I Advanced Manufacturing Engineer II Apply now']) === null);
+  ok('a heading far longer than the title is a list, not the job',
+    S.findByHeading(BD, [`Search for Jobs Advanced Manufacturing Engineer I ${'Location Department Team Remote '.repeat(4)}`]) === null);
   S.updateJob(hit.id, { goneAt: new Date().toISOString() });
   ok('a posting marked gone is not matched', S.findByHeading(BD, ['Advanced Manufacturing Engineer I']) === null);
 }
@@ -569,6 +581,25 @@ console.log('\n🧪 the age filter reads the posted date, falls back to first se
 
   h.close?.();
   try { rmSync(dir3, { recursive: true, force: true }); } catch { /* tmp, it can wait */ }
+}
+
+console.log('\n🧪 store: an unread backlog is read new-grad postings first (F-672)');
+{
+  const { queryJobs } = await import('./db.mjs');
+  const dir4 = mkdtempSync(path.join(tmpdir(), 'jarvis-unread-'));
+  const h = openDb(path.join(dir4, 'jobs.db'));
+  const add = (id, title, newgrad, relevance) => h.prepare(
+    `INSERT INTO jobs (id, url, title, company, status, f_newgrad, relevance, first_seen, last_seen)
+     VALUES (?, ?, ?, 'Micron Technology', 'new', ?, ?, '2026-10-01', '2026-10-03')`,
+  ).run(id, `https://example.test/${id}`, title, newgrad, relevance);
+  add('mid', 'Mechanical Engineer', 0, 25);
+  add('ncg', 'New College Grad Photolithography Mde Shift Engineer Boise Idaho', 1, 0);
+  add('low', 'Buyer', 0, 2);
+  const order = (sort) => queryJobs(h, {}, { sort, limit: 50 }).rows.map((r) => r.id);
+  eq('a new-grad posting with relevance 0 is read first', order('unread'), ['ncg', 'mid', 'low']);
+  eq('…which the relevance order never did', order('relevance'), ['mid', 'low', 'ncg']);
+  h.close?.();
+  try { rmSync(dir4, { recursive: true, force: true }); } catch { /* tmp, it can wait */ }
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

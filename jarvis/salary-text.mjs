@@ -59,7 +59,24 @@ const NOT_PAY_BEFORE = /\b(savings|saved|budget|grant|scholarship|tuition|reimbu
 const NOT_PAY_AFTER = /\b(savings|saved|in\s+revenue|cost\s+(reduction|avoidance)|grant|scholarship|award|budget|per\s+unit)\b/i;
 
 // What the numbers are counting, when they are not counting money.
-const COUNTED_THING = /^\s*(?:\+\s*)?(years?|yrs?|months?|weeks?|days?|hours?\s+per|employees|people|customers|patients|units|parts|products|sites|locations|square\s+feet|sq\.?\s?ft|lbs?|pounds|kg|tons?|psi|rpm|mm|cm|inches|volts?|watts?|amps?)\b/i;
+const COUNTED_THING = /^\s*(?:\+\s*)?(years?|yrs?|months?|weeks?|days?|hours?\s+per|hrs|hs|employees|people|associates|staff|workers|team\s+members|direct\s+reports|accounts|customers|patients|units|parts|products|shipments|orders|deliveries|satellites|components|assemblies|sites|locations|miles?|square\s+feet|sq\.?\s?ft|lbs?|pounds|kg|tons?|psi|rpm|mm|cm|inches|volts?|watts?|amps?)\b/i;
+
+// What follows a range that was never a pair of amounts (F-629): a share
+// ("travel 10-15% of the time", "15-25% of plant revenue"), a third number
+// ("09-22-2026", "(22-29-35-44"), a compound ("8–10-hour shift", "10–12-point
+// font"), an ordinal ("September 10-11th") or the rest of a number grouped with
+// spaces ("73 500 - 110 250 PLN"). Each of these was stored as hourly pay.
+const SHARE_OR_ORDINAL_AFTER = /^(?:\s*(?:%|percent\b|per\s?cent\b)|(?:th|st|nd|rd)\b)/i;
+// Only for small bare numbers, and only unspaced: "$78,918 - $128,242-Annually",
+// "$100,000 - $120,000 - depending on experience" and Ecolab's
+// "53,600.00 - 66,900.00 - 80,300.00" are all real pay.
+const DATE_OR_COMPOUND_AFTER = /^[-–][\da-z]/i;
+
+// A range written with no currency anywhere near it has only its neighbours to
+// say it is pay. "Summary pay range: 33.32 – 61.01" qualifies; a travel share
+// three sentences away from the word "compensation" does not.
+const CURRENCY_MARK = /[$€£¥₹]|\b(?:USD|CAD|EUR|GBP|AUD|SGD|INR|MXN|JPY|PLN|CHF)\b/;
+const RATE_IN_MATCH = /\/\s*(?:hr|hour|yr|year|mo|month)\b|\bper\s+(?:hour|year|annum|month)\b|\b(?:hourly|annually)\b/i;
 
 // Anything ending in B/M right after the digits is a corporate figure, never a wage.
 const SCALE_SUFFIX = /\d\s?(?:B|M|bn|mm)\b/;
@@ -142,6 +159,57 @@ function rejected(matchText, plain, at, end) {
 }
 
 /**
+ * A range's own edges: is this really two amounts, or a slice of something
+ * else? Starting mid-number ("10,50 - 12,43" read from "50") or running on into
+ * a share, a date or a compound word all mean it is not.
+ */
+function notAmounts(matchText, plain, at, end) {
+  const lead = matchText.match(/^\s*/)[0].length;
+  const start = at + lead;
+  const body = matchText.slice(lead);
+  // "Level 4 $162,350" and "Zone 1 $48.75" start at a currency sign, so the
+  // number before them is a label, not the front of this one.
+  if (!/^[$€£¥₹]/.test(body)) {
+    // Glued to letters, a dash or a slash, it is a code or a date: "PDX170",
+    // "HR-023-33", "8/6/26 - 8/30/26".
+    if (/[\d.,A-Za-z\-/#]$/.test(plain.slice(Math.max(0, start - 1), start))) return true;
+    if (/\d\s$/.test(plain.slice(Math.max(0, start - 2), start))) return true;
+  }
+  const after = plain.slice(end, end + 12);
+  if (SHARE_OR_ORDINAL_AFTER.test(after)) return true;
+  // "73 500 -110 250 PLN": the second bound is only the front of a number.
+  if (/(?:^|[^\d,.])\d{1,3}$/.test(body.trimEnd()) && /^\s\d{3}\b/.test(after)) return true;
+  const small = !CURRENCY_MARK.test(body) && !/\d,\d{3}|\d\s?[kK]\b/.test(body);
+  if (small && DATE_OR_COMPOUND_AFTER.test(after)) return true;
+  // "50 to 75 to 120+ satellites", "40–50+ homes": a plus makes it a count.
+  if (small && /^\+/.test(after)) return true;
+  // "shift premium for hours worked between 19.00 - 22.00" is a clock.
+  if (/\bhours\s+(?:worked\s+)?between\s*$/i.test(plain.slice(Math.max(0, start - 40), start))) return true;
+  return false;
+}
+
+// Range wording that names pay without one of PAY_WORD's words:
+// "The United States base range for this position is 164,448 - 234,926".
+const RANGE_WORD = /\b(?:base|hiring|target|salary|starting)\s+range\b|\bOTE\b/i;
+
+/**
+ * A bare range needs a currency, a rate, or pay wording right beside it —
+ * 80 characters before, or a pay noun within 25 after ("48k - 50k (DOE)
+ * yearly salary"). Only a noun after: "200,000 shipments annually" is a count.
+ */
+function saysPayNearby(matchText, plain, at, end) {
+  if (CURRENCY_MARK.test(matchText) || RATE_IN_MATCH.test(matchText)) return true;
+  if (CURRENCY_MARK.test(plain.slice(Math.max(0, at - 15), at))) return true;
+  const before = plain.slice(Math.max(0, at - 80), at);
+  if (PAY_WORD.test(before) || RANGE_WORD.test(before)) return true;
+  return /\b(salary|pay|compensation|wages?)\b/i.test(plain.slice(end, end + 25));
+}
+
+// "between 19.02 - 25.36 - 31.69 USD" and "53,600.00 - 66,900.00 - 80,300.00"
+// are minimum, midpoint and maximum; the range is the outer two.
+const THIRD_BOUND = new RegExp(String.raw`^${SEP}${MONEY}`, 'i');
+
+/**
  * Extract an annualised pay range from free text.
  *
  * `min`/`max` are always annualised so the store can sort and filter on one
@@ -157,18 +225,30 @@ export function parseSalaryFromText(text) {
   const plain = plainText(text);
   const candidates = [];
 
-  const rangeRe = new RegExp(`${MONEY}${UNIT}${SEP}${MONEY}${UNIT}`, 'gi');
-  for (const m of plain.matchAll(rangeRe)) {
+  const rangeRe = new RegExp(`${MONEY}${UNIT}${SEP}${MONEY}${UNIT}`, 'gid');
+  for (let m; (m = rangeRe.exec(plain));) {
     const at = m.index ?? 0;
     const end = at + m[0].length;
     const window = plain.slice(Math.max(0, at - 140), end + 140);
     if (!looksLikeMoney(m[0], window)) continue;
     if (rejected(m[0], plain, at, end)) continue;
+    if (notAmounts(m[0], plain, at, end) || !saysPayNearby(m[0], plain, at, end)) {
+      // The second bound may open the real range: "USA, OR, PDX170 - 30.00 -
+      // 54.00 USD hourly" is refused as 170-30, and 30.00-54.00 is the pay.
+      rangeRe.lastIndex = m.indices[3][0];
+      continue;
+    }
 
     let lo = num(m[1], m[2]);
     let hi = num(m[3], m[4]);
     if (lo == null || hi == null) continue;
     if (hi < lo) [lo, hi] = [hi, lo];
+    let raw = m[0];
+    const third = plain.slice(end, end + 40).match(THIRD_BOUND);
+    if (third) {
+      const top = num(third[1], third[2]);
+      if (top != null && top > hi && top <= hi * 2) { hi = top; raw += third[0]; }
+    }
 
     // The interval is read from the match FIRST — "$33/hour - $36/hour" states
     // it twice inside itself — and only then from the wider sentence.
@@ -199,7 +279,7 @@ export function parseSalaryFromText(text) {
     candidates.push({
       min, max, currency: currencyIn(window), interval,
       rate: { min: lo, max: hi },
-      source: 'description', raw: m[0].trim(),
+      source: 'description', raw: raw.trim(),
       // A range sitting next to the words "salary"/"pay range" is far more
       // trustworthy than two bare numbers, so it wins ties.
       confident: PAY_WORD.test(window),

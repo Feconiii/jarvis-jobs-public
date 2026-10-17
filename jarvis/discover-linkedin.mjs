@@ -37,12 +37,15 @@
 //   node jarvis/discover-linkedin.mjs --days 14 --min 2
 //   node jarvis/discover-linkedin.mjs --queries "humanoid robotics,wafer fab"
 
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 
 import { guardArgs } from './cli.mjs';
+import { NEVER_TRACK, HARDWARE_TITLE_RE, BUILDING_SERVICES_RE, worthTracking } from './hiring-signals.mjs';
+export { NEVER_TRACK, HARDWARE_TITLE_RE, BUILDING_SERVICES_RE, worthTracking };
+import { discovery } from './targeting.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -61,7 +64,9 @@ const USAGE = `
     --levels <list>    LinkedIn experience levels (default 1,2,3,4; 'any' for no filter)
     --metros           also run every search per hardware metro, to get past the
                        few hundred results a country-wide search is cut off at
-    --metro <list>     comma-separated location names, instead of the built-in metros
+    --metro <list>     location names, instead of the built-in metros: separated by
+                       ";" (names carry commas: "Austin, Texas Metropolitan Area"),
+                       or by "," when no ";" is present
     --gap <ms>         pause between requests (default 1200)
     --all-titles       count every posting toward a company, not only hardware titles
     --limit <n>        stop after n new companies
@@ -73,110 +78,12 @@ const USAGE = `
  *
  * These are deliberately ROLE searches, not company searches — the whole point
  * is to find employers we cannot name yet, so naming them in the query defeats
- * it. They cover the shapes of work his files actually evidence: mechanical
- * design, manufacturing and process engineering, equipment and test, robotics
- * and automation. Overlap between them is free; the harvest dedupes by posting
- * id and the same company surfacing under four searches is a signal, not waste.
+ * it. They are the preset's (discovery.linkedinQueries), which records why each
+ * was added. Overlap between them is free; the harvest dedupes by posting id
+ * and the same company surfacing under four searches is a signal, not waste.
  */
-export const DEFAULT_QUERIES = [
-  'robotics engineer', 'mechanical engineer new grad', 'manufacturing engineer new grad',
-  'process engineer semiconductor', 'hardware engineer new grad', 'mechanical design engineer',
-  'automation engineer', 'equipment engineer', 'test engineer mechanical',
-  'systems engineer new grad', 'product engineer hardware', 'manufacturing engineer robotics',
-  'mechatronics engineer', 'R&D engineer mechanical', 'integration engineer hardware',
-  'field service engineer semiconductor', 'process engineer new grad', 'NPI engineer',
-  'validation engineer hardware', 'tooling engineer', 'applications engineer robotics',
-  'design engineer entry level', 'associate mechanical engineer', 'graduate engineer',
-  // Added 2026-09-20 from the LinkedIn page he pasted, where none of the titles
-  // that excited him carried a "new grad" tag: a twelve-person robotics company
-  // writes "Mechanical Engineer", "Prototype Engineer", "Robotics Build
-  // Engineer". These are the shapes of that work, still never a company name.
-  'mechanical engineer robotics', 'humanoid robot mechanical', 'robotics hardware engineer',
-  'prototype engineer', 'robotics build engineer', 'electromechanical engineer',
-  'actuator design engineer', 'mechanism design engineer', 'opto-mechanical engineer',
-  'mechanical engineer startup', 'hardware integration engineer', 'robot technician',
-  'surgical robotics mechanical', 'lab automation engineer', 'mechanical engineer medical device',
-  'mechanical engineer drone', 'eVTOL mechanical engineer', 'spacecraft mechanical engineer',
-  'battery manufacturing engineer', 'fusion energy engineer', 'additive manufacturing engineer',
-  'thermal engineer hardware', 'packaging engineer semiconductor', 'wafer fab equipment engineer',
-  'consumer electronics product design engineer', 'reliability engineer hardware',
-];
+export const DEFAULT_QUERIES = [...discovery.linkedinQueries];
 
-/**
- * Employers that are never worth tracking, whatever they post.
- *
- * Staffing agencies and job-board reposters are most of the noise in any
- * keyword search: they relist other companies' roles under their own name, so
- * tracking them adds duplicates with a worse apply path and no employer behind
- * them. Defense primes are excluded for the standing reason — an F-1 cannot
- * hold a clearance — and NOT because of export control, which stopped being a
- * disqualifier on 2026-09-19 (see jarvis/visa.mjs).
- *
- * This filter only decides what to TRACK. It never hides a posting; triage does
- * that, visibly, with the sentence it read.
- */
-export const NEVER_TRACK = new RegExp([
-  // staffing, recruiting and reposting
-  'cybercoders', 'jobot', '\\balten\\b', 'aerotek', 'insight global', 'actalent', 'randstad',
-  'kelly services', 'robert half', 'teksystems', 'motion recruitment', 'apex systems',
-  'collabera', 'kforce', 'adecco', 'manpower', 'belcan', 'system one', 'staffing',
-  'recruit', 'talent solutions', 'diverse lynx', 'mindlance', 'tata consultancy',
-  'infosys', 'wipro', 'cognizant', 'accenture', 'capgemini', 'lensa', 'ziprecruiter',
-  'careerbuilder', 'get\\.it', 'dice\\b', 'jobs?\\.', '\\bvetjobs\\b', 'executive search',
-  'rex\\.zone', 'lofton', 'zobility', 'eteam\\b', 'jobs? (?:in|at|near)\\b',
-  // Named one by one because no pattern catches them: these are IT- and
-  // engineering-staffing shops that relist other companies' roles under their
-  // own name. Every one was read and confirmed from its own postings on
-  // 2026-09-19 rather than guessed at from the name.
-  'bright vision', 'zenovo', 'cindavi', 'haveron james', 'newnovation', 'auxo talent',
-  'ttn talent', 'green key', 'edison smart', 'lumicity', 'strativ', 'evona',
-  'acceler8', 'pentangle', 'steneral', 'silverspace', 'info way', 'ls solutions',
-  'dsm-h', 'mount kemble', 'brightpath', 'michael page', '\\blhh\\b', 'vaco',
-  'aegis worldwide', 'sterling engineering', 'kcm technical', '\\bhti\\b', 'prosum',
-  'quest global', 'hcltech', 'l&t technology', 'tata technologies', 'spectrum killian',
-  'searchmasters', 'paradigm nat', '\\bcps, inc', 'ina solution', 'atem corp',
-  'bn associates', 'westmag', 'omega technical', 'global connect technologies',
-  'innorev', 'tiltedge', 'jbs technologies', 'pacific international',
-  'val\\x27s services', 'roshay', 'teleperformance',
-  // From the page he pasted on 2026-09-20. Raydar resolved to a live Workable
-  // board with 186 postings and was tracked for four minutes before its titles
-  // were read: "(Confidential) Director of Marketing", account executives in
-  // every city. A name ending in "Search" is a search firm.
-  'raydar', '\\bd24\\b', 'spectra360', 'programmers\\.io', '\\bsearch$', 'professional search',
-  // From the per-metro harvest the same day: agencies, and the employers a
-  // keyword search drags in that will never post his kind of role.
-  'judge group', 'acro service', 'akkodis', 'personnel services', '\\bpersonnel\\b', 'talent\\b',
-  '\\bbank\\b', 'insurance', '\\bgeico\\b', '\\baig\\b', '\\bllp\\b', '\\bpwc\\b', '^ey$', 'deloitte', 'kpmg',
-  'towne park', 'cushman', '\\bcbre\\b', 'cypress hcm', 'htc global',
-  // Building design and construction. Their "Mechanical Engineer" is HVAC and
-  // plumbing for buildings, which his filters have excluded since the first day,
-  // and the title alone cannot say so — Jacobs posted 31 of them in one harvest.
-  '^jacobs\\b', 'kiewit', 'dlr group', '^hed$', 'mckinstry', 'bowman consulting', 'aecom',
-  'burns (?:&|and) mcdonnell', 'black (?:&|and) veatch', 'stantec', '^wsp\\b', '^hdr\\b', '^arup\\b',
-  'consulting engineers', 'building technologies', 'carollo', 'gray aes', '\\barchitects?\\b',
-  'engineers (?:&|and) constructors', '\\bconstruction\\b',
-  // Defense primes, weapons companies and the clearance-gated national labs.
-  // These are filtered on the employer, not on anything the posting says — an
-  // F-1 cannot hold a clearance and he does not want weapons work. Export
-  // control is NOT why they are here; that stopped disqualifying anything on
-  // 2026-09-19. Radiant, Vast, Impulse and Astrolab are deliberately absent.
-  'lockheed', 'northrop', 'raytheon', '\\brtx\\b', 'blue origin', 'spacex', 'l3harris',
-  'general dynamics', 'bae systems', 'booz allen', 'applied physics laborator', '\\bkbr\\b',
-  'leidos', '\\bsaic\\b', 'mitre', 'peraton', '\\bcaci\\b', 'huntington ingalls',
-  'general atomics', 'sandia', 'lawrence livermore', 'los alamos', 'lincoln laborator',
-  'anduril', 'shield ai', 'firefly aerospace', 'collins aerospace', 'rocket lab',
-  'sierra nevada', 'sierra space', 'kratos', 'epirus', 'castelion', 'ursa major',
-  'aerovironment', 'x-bow', 'true anomaly', 'amentum', 'parsons', '\\bv2x\\b',
-  'mercury systems', 'voyager technologies', 'aerospace corporation', 'draper',
-  'battelle', 'textron', '\\bmoog\\b', 'elbit', 'qinetiq', 'overland ai', 'neros',
-  // Weapons manufacture, by name and by word. "Defense" in a company's own name
-  // is the company telling us what it builds, so it counts — but the word needs
-  // its boundaries: an unanchored "ammo" matched "Mammoth Brands", a consumer
-  // goods company, on the first run.
-  '\\bdefen[cs]e\\b', '\\barmament', '\\bmunitions?\\b', '\\bordnance\\b', '\\bammo\\b',
-  'firearms?\\b', 'sig sauer', 'smith *& *wesson', '\\bsturm,? ruger', '\\bcolt\\b',
-  'barrett firearms', 'vista outdoor', 'winchester repeating',
-].join('|'), 'i');
 
 // ── the public endpoint ─────────────────────────────────────────────
 
@@ -214,6 +121,9 @@ export function parseSearchPage(html) {
       loc: decodeEntities((chunk.match(/job-search-card__location"[^>]*>([\s\S]*?)<\//) || [])[1]),
       posted: (chunk.match(/datetime="([\d-]+)"/) || [])[1] || '',
       url: (chunk.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"?]+)/) || [])[1] || '',
+      // The company's own LinkedIn page, which names its website (F-657).
+      companyUrl: (chunk.match(/hidden-nested-link"[^>]*href="(https:\/\/[a-z]{2,3}\.linkedin\.com\/company\/[^"?/]+)/)
+        || chunk.match(/href="(https:\/\/[a-z]{2,3}\.linkedin\.com\/company\/[^"?/]+)[^"]*"[^>]*class="hidden-nested-link/) || [])[1] || '',
     });
   }
   return out;
@@ -239,7 +149,7 @@ export const DEFAULT_LEVELS = '1,2,3,4';
 export const UNITED_STATES = { name: 'United States', location: 'United States', geoId: '103644278' };
 
 /**
- * The metros where hardware and robotics companies cluster.
+ * The metros where the preset's employers cluster (discovery.metros).
  *
  * A guest search returns the newest few hundred results and no more, so a
  * country-wide "mechanical engineer" is truncated long before it reaches a
@@ -247,14 +157,7 @@ export const UNITED_STATES = { name: 'United States', location: 'United States',
  * reaches past the cut. Named by LinkedIn's own location text rather than by
  * geoId — the text resolves on the guest endpoint, and a wrong id fails silent.
  */
-export const METROS = [
-  'San Francisco Bay Area', 'Los Angeles Metropolitan Area', 'Greater Boston',
-  'Greater Seattle Area', 'Austin, Texas Metropolitan Area', 'New York City Metropolitan Area',
-  'Greater Pittsburgh Region', 'San Diego Metropolitan Area', 'Denver Metropolitan Area',
-  'Detroit Metropolitan Area', 'Greater Phoenix Area', 'Dallas-Fort Worth Metroplex',
-  'Atlanta Metropolitan Area', 'Greater Chicago Area', 'Raleigh-Durham-Chapel Hill Area',
-  'Salt Lake City Metropolitan Area', 'Portland, Oregon Metropolitan Area', 'Greater Minneapolis-St. Paul Area',
-].map(name => ({ name, location: name }));
+export const METROS = discovery.metros.map(name => ({ name, location: name }));
 
 export function searchUrl(query, { start = 0, days = 7, levels = DEFAULT_LEVELS, place = UNITED_STATES } = {}) {
   const p = new URLSearchParams({
@@ -333,6 +236,59 @@ export async function harvest(queries, {
   return { postings: [...seen.values()], requests, errors, throttled, unfinished };
 }
 
+/**
+ * THE COMPANY'S OWN WEBSITE, FROM ITS OWN LINKEDIN PAGE (F-657).
+ *
+ * A name is all a search card hands the resolver, and a name cannot reach a
+ * board whose address nothing derives from it: JPL runs Workday as `citjpl`,
+ * Vertex sits on pod `wd501`. Both had picks in his inbox that sent him to
+ * LinkedIn's login wall. The company's own careers page links the board
+ * outright, and discover-ats already follows it — when it is given a website.
+ *
+ * Every card links the company's LinkedIn page, and that page names the
+ * website the company published ("about_website"), wrapped in a redirect.
+ * Pure, so the tests feed it fixtures.
+ *
+ * @param {string} html
+ * @returns {string} the website's origin, or '' when the page names none
+ */
+export function websiteFromCompanyPage(html) {
+  // The attribute order is not fixed; the one in the tag is what matters.
+  const href = (String(html || '').match(/href="([^"]+)"[^>]*about_website|about_website[^>]*href="([^"]+)"/) || []).slice(1).find(Boolean);
+  if (!href) return '';
+  let target = decodeEntities(href);
+  try {
+    const u = new URL(target);
+    if (/linkedin\.com$/i.test(u.hostname)) target = u.searchParams.get('url') || '';
+    const site = new URL(target);
+    if (!/^https?:$/.test(site.protocol) || /linkedin\.com$/i.test(site.hostname)) return '';
+    return site.origin;
+  } catch { return ''; }
+}
+
+/**
+ * Look up the website for each company that has a LinkedIn page link. Paced like
+ * the search, and it STOPS at the first rate-limit rather than waiting it out: a
+ * missing website only costs the resolver its best hint, never a company.
+ */
+export async function companyWebsites(companies, { fetchImpl = fetch, pause = sleep, gap = 1200 } = {}) {
+  const out = new Map();
+  for (const c of companies) {
+    if (!c.companyUrl) continue;
+    let r;
+    try {
+      r = await fetchImpl(c.companyUrl, { headers: { 'user-agent': UA, accept: 'text/html' }, credentials: 'omit' });
+    } catch { continue; }
+    if (THROTTLED.has(r.status)) break;
+    if (r.ok) {
+      const site = websiteFromCompanyPage(await r.text());
+      if (site) out.set(c.name, site);
+    }
+    await pause(gap);
+  }
+  return out;
+}
+
 // ── matching against what we already track ──────────────────────────
 
 /**
@@ -359,21 +315,6 @@ export function companyKey(name) {
  * Split a harvest into companies we track and companies we do not.
  * Pure — takes the tracked names, so the tests do not need portals.yml.
  */
-/**
- * Is this posting the kind of work that makes its EMPLOYER worth tracking?
- *
- * A keyword search is a hint, not a filter. "mechanical engineer" per city
- * returns Jacobs, Kiewit and thirty MEP consultancies — mechanical engineering
- * of buildings, which his filters have excluded from the first day — and
- * "systems engineer" returns a bank. Pass 2 on 2026-09-20 tracked GEICO, US
- * Bank and a valet-parking company off exactly that, 2,518 rows of insurance
- * agents and cash-vault processors, before the audit read their titles. So a
- * company is only worth resolving when something it posted is hardware work
- * and is not building services.
- */
-export const HARDWARE_TITLE_RE = /\b(?:mechanical|mechatronic|electromechanical|robotic|manufacturing|hardware|automation|controls?|process|test|design|product|equipment|tooling|npi|r&d|systems?|thermal|propulsion|opto-?mechanical|quality|reliability|integration|prototype|build)\w*\b[^|]{0,40}\b(?:engineer|technician|designer)|\b(?:engineer|technician)\b[^|]{0,30}\b(?:mechanical|robotic|hardware|manufacturing)/i;
-export const BUILDING_SERVICES_RE = /\b(?:hvac|mep\b|plumbing|piping|building|construction|commissioning|facilit(?:y|ies)|water|wastewater|civil|structural|architect|fire protection|energy modeling|refrigeration|utilities|substation|transmission line|it systems?|network|software|cloud|devops|salesforce|sap\b|servicenow|cyber)/i;
-export const worthTracking = (title) => HARDWARE_TITLE_RE.test(title || '') && !BUILDING_SERVICES_RE.test(title || '');
 
 export function newCompanies(postings, trackedNames, { min = 1, relevantOnly = false } = {}) {
   const tracked = new Set(trackedNames.map(companyKey).filter(Boolean));
@@ -383,9 +324,10 @@ export function newCompanies(postings, trackedNames, { min = 1, relevantOnly = f
     if (!key || tracked.has(key) || NEVER_TRACK.test(p.company)) continue;
     // Counted toward the company only when the posting itself is the work.
     if (relevantOnly && !worthTracking(p.title)) continue;
-    if (!found.has(key)) found.set(key, { name: p.company, key, count: 0, titles: [], locations: new Set() });
+    if (!found.has(key)) found.set(key, { name: p.company, key, count: 0, titles: [], locations: new Set(), companyUrl: '' });
     const e = found.get(key);
     e.count++;
+    if (!e.companyUrl && p.companyUrl) e.companyUrl = p.companyUrl;
     if (e.titles.length < 4) e.titles.push(p.title);
     e.locations.add(p.loc);
   }
@@ -421,8 +363,11 @@ async function main(argv) {
   const asJson = has('json');
   const levels = flag('levels', DEFAULT_LEVELS) === 'any' ? '' : String(flag('levels', DEFAULT_LEVELS));
   const gap = Number(flag('gap', 1200));
-  const places = flag('metro', '')
-    ? String(flag('metro', '')).split(',').map(s => s.trim()).filter(Boolean).map(name => ({ name, location: name }))
+  // Metro names carry commas ("Austin, Texas Metropolitan Area"), so a list
+  // with a ';' in it is split on ';' only.
+  const metroList = String(flag('metro', ''));
+  const places = metroList
+    ? metroList.split(metroList.includes(';') ? ';' : ',').map(s => s.trim()).filter(Boolean).map(name => ({ name, location: name }))
     : has('metros') ? [UNITED_STATES, ...METROS] : [UNITED_STATES];
   const queries = flag('queries', '')
     ? String(flag('queries', '')).split(',').map(s => s.trim()).filter(Boolean)
@@ -436,6 +381,38 @@ async function main(argv) {
     days, pages, levels, places, gap,
     onProgress: asJson ? null : ({ label, fresh, total }) => console.log(`    ${String(total).padStart(5)} postings  +${String(fresh).padStart(3)}  ${label}`),
   });
+  // THE HARVEST IS KEPT, AND EVERY COMPANY IN IT GOES IN THE LEDGER (F-701).
+  // 2026-10-03: a run collected 1,950 postings and 624 untracked companies,
+  // was killed for memory 25 names into the resolver, and kept nothing — the
+  // names existed only in a console log. Saved first, before anything slow.
+  if (!asJson) {
+    try {
+      const dir = path.join(ROOT, 'data', 'jarvis', 'harvests');
+      mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `linkedin-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.json`);
+      writeFileSync(file, JSON.stringify(postings));
+      console.log(`  harvest saved → ${path.relative(ROOT, file)}`);
+    } catch (e) { console.log(`  ⚠ harvest not saved: ${e.message}`); }
+  }
+  let ledger = null;
+  try {
+    const u = await import('./universe.mjs');
+    ledger = { u, db: u.openUniverse() };
+    const byCompany = new Map();
+    for (const p of postings) {
+      if (!p.company) continue;
+      if (!byCompany.has(p.company)) byCompany.set(p.company, { name: p.company, titles: [], count: 0 });
+      const e = byCompany.get(p.company);
+      e.count++;
+      if (e.titles.length < 8) e.titles.push(p.title);
+    }
+    // Only employers with hardware work among what they posted (F-528): a
+    // keyword search also returns banks and building-services firms.
+    const r = u.ingest(ledger.db, [...byCompany.values()].filter(e => e.titles.some(t => worthTracking(t))), 'linkedin');
+    u.sync(ledger.db);
+    if (!asJson) console.log(`  ledger: ${r.added} new employer(s), ${r.seen} seen again`);
+  } catch (e) { if (!asJson) console.log(`  ⚠ coverage ledger not updated: ${e.message}`); }
+
   const tracked = trackedNamesFromPortals();
   // A company is reported only when something it posted is hardware work (F-528).
   let fresh = newCompanies(postings, tracked, { min, relevantOnly: !has('all-titles') });
@@ -458,6 +435,7 @@ async function main(argv) {
   }
 
   if (!has('write')) {
+    ledger?.db.close();
     if (!asJson) {
       console.log(`\n  (report only — re-run with --write to resolve these boards and track them)`);
       console.log(`  Or hand a subset to the resolver yourself:`);
@@ -469,14 +447,40 @@ async function main(argv) {
   // --write delegates rather than reimplementing. discover-ats is the only
   // thing that may touch portals.yml, and it VERIFIES a board with a live API
   // call before writing it — a LinkedIn company name is a hint, not a source.
-  if (!fresh.length) { console.log('\n  Nothing new to track.\n'); return 0; }
+  if (!fresh.length) { ledger?.db.close(); console.log('\n  Nothing new to track.\n'); return 0; }
+  // --names is comma-separated, and "American Honda Motor Company, Inc." is
+  // one company. The slug guesser drops punctuation anyway.
+  const plain = (name) => name.replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  // Each company's published website, so the resolver can follow its careers
+  // page to a board no slug reaches (F-657).
+  console.log(`\n  Reading the website on ${fresh.filter(c => c.companyUrl).length} company pages…`);
+  const sites = await companyWebsites(fresh, { gap });
+  console.log(`  ${sites.size} website(s) found. Handing ${fresh.length} names to discover-ats for verification…\n`);
+  if (ledger) {
+    // Through the ledger, so every answer is recorded — a miss is retried in a
+    // month, a tracked one never again — and a killed run is replayed.
+    const list = fresh.map(c => ({ name: plain(c.name), site: sites.get(c.name) || '' }));
+    const counts = await ledger.u.resolveNames(ledger.db, list, { write: true });
+    ledger.u.sync(ledger.db);
+    console.log(`\n  settled: ${JSON.stringify(counts)}`);
+    console.log(`  ${ledger.u.coverageLine(ledger.u.coverage(ledger.db))}`);
+    ledger.db.close();
+    return 0;
+  }
   const { spawnSync } = await import('node:child_process');
-  console.log(`\n  Handing ${fresh.length} names to discover-ats for verification…\n`);
+  const extra = [];
+  if (sites.size) {
+    const { writeFileSync, mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const file = path.join(mkdtempSync(path.join(tmpdir(), 'jarvis-sites-')), 'sites.json');
+    writeFileSync(file, JSON.stringify([...sites].map(([name, site]) => ({ name: plain(name), site }))));
+    extra.push('--sites-file', file);
+  }
+  console.log(`  ${sites.size} website(s) found. Handing ${fresh.length} names to discover-ats for verification…\n`);
   const r = spawnSync(process.execPath, [
     path.join(ROOT, 'jarvis', 'discover-ats.mjs'),
-    // --names is comma-separated, and "American Honda Motor Company, Inc." is
-    // one company. The slug guesser drops punctuation anyway.
-    '--names', fresh.map(c => c.name.replace(/,/g, ' ').replace(/\s+/g, ' ').trim()).join(','),
+    '--names', fresh.map(c => plain(c.name)).join(','),
+    ...extra,
     '--write',
   ], { stdio: 'inherit' });
   return r.status ?? 0;

@@ -120,6 +120,26 @@ export function registrableDomain(host) {
   return labels.slice(-n).join('.');
 }
 
+/**
+ * Does an ATS tenant slug spell this company? "kla" in "KLA Corporation",
+ * "agilityrobotics" against "Agility Robotics", "nvidia" — yes; "sec" against
+ * "Samsung Electronics America", "amat" against "Applied Materials" — no, and
+ * the name's own guesses are asked instead. With no company to check against,
+ * the slug is taken as before.
+ */
+export function slugNamesCompany(slug, company) {
+  const flat = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const s = flat(slug).replace(/(careers?|jobs?|external|inc|corp)$/g, '');
+  const words = String(company || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim().split(/\s+/).filter((w) => w && !CORP_SUFFIX.has(w));
+  if (!words.length) return true;
+  const name = words.join('');
+  if (s.length < 2) return false;
+  // Initials count: ti.com is Texas Instruments, hpe.com Hewlett Packard
+  // Enterprise. Samsung Electronics America's are "sea", not "sec".
+  const initials = words.map((w) => w[0]).join('');
+  return name.includes(s) || (words[0].length >= 3 && s.startsWith(words[0])) || (words.length >= 2 && s === initials);
+}
+
 /** Turn an employer slug or name into domain guesses, most likely first. */
 function guesses(slug, tlds = ['com']) {
   const s = String(slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '');
@@ -170,7 +190,11 @@ export function domainCandidates({ company, url } = {}) {
       else if (ats.fromPath) slug = u.pathname.match(ats.fromPath)?.[1] || null;
       else if (ats.fromQuery) slug = u.searchParams.get(ats.fromQuery);
       // "embed", "job", "jobs", "careers" are path words, not tenants.
-      if (slug && !/^(embed|jobs?|careers?|apply|en|en-us|external|home|search|job_app|company)$/i.test(slug)) {
+      // …and a tenant that does not spell the company is not its domain:
+      // Samsung's Workday tenant is "sec", and sec.com is someone else's
+      // site — its icon, a stranger's face, sat on every Samsung card
+      // (2026-10-03: "why its some guys random face").
+      if (slug && !/^(embed|jobs?|careers?|apply|en|en-us|external|home|search|job_app|company)$/i.test(slug) && slugNamesCompany(slug, company)) {
         for (const d of guesses(slug, ['com', 'ai', 'io', 'tech'])) push(d);
       }
     } else if (!AGGREGATOR_RE.test(host)) {

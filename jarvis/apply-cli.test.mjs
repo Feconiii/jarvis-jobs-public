@@ -68,8 +68,10 @@ test('several unknown flags are all named', async () => {
 test('a real flag and its value are not mistaken for a typo', async () => {
   // --company takes a value; the value must not be read as an unknown flag, and
   // a company with no queued jobs must stop cleanly rather than open anything.
+  // A copy with no form answers yet (a fresh clone) stops one step earlier.
   const r = await cli(['--company', 'nosuchcompanyanywhere', '--limit', '1']);
-  assert.match(r.out + r.err, /Nothing to apply to/i);
+  assert.ok(!/Unknown option/.test(r.err), r.err);
+  assert.match(r.out + r.err, /Nothing to apply to|apply-profile not found/i);
   assert.ok(!startedApplying(r));
 });
 

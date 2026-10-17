@@ -13,7 +13,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -43,7 +43,7 @@ test.before(async () => {
   dir = mkdtempSync(path.join(tmpdir(), 'jarvis-outreach-'));
   server = spawn(process.execPath, [path.join(HERE, 'serve.mjs'), '--port', String(PORT)], {
     cwd: ROOT,
-    env: { ...process.env, JARVIS_AUTO: '0', JARVIS_DATA_DIR: dir, JARVIS_RESUME_DIR: path.join(dir, 'resumes'), JARVIS_TAILOR: 'off' },
+    env: { ...process.env, JARVIS_AUTO: '0', JARVIS_DATA_DIR: dir, JARVIS_RESUME_DIR: path.join(dir, 'resumes'), JARVIS_DOWNLOADS_DIR: path.join(dir, 'Downloads'), JARVIS_TAILOR: 'off' },
     stdio: 'ignore',
   });
   const until = Date.now() + 30000;
@@ -105,9 +105,15 @@ test('a contact is recorded, with the address marked as a guess', async () => {
   assert.equal(body.contact.email_conf, 'guess', 'nothing confirmed the format, and it says so');
 });
 
-test('THE ROUTE REFUSES A SECOND PERSON FOR THE SAME ROLE', async () => {
-  const { status, body } = await post('/api/outreach/contact', {
+// Two people per role since 2026-10-05 (OUTREACH.md: "the per-role cap is now
+// two people"); the third is refused at the route.
+test('THE ROUTE REFUSES A THIRD PERSON FOR THE SAME ROLE', async () => {
+  const second = await post('/api/outreach/contact', {
     id: jobId, name: 'Sam Rivers', title: 'Staff Engineer', persona: 'team',
+  });
+  assert.equal(second.status, 200, 'a second person for the role is allowed');
+  const { status, body } = await post('/api/outreach/contact', {
+    id: jobId, name: 'Lee Park', title: 'Engineering Manager', persona: 'manager',
   });
   assert.equal(status, 409, 'refused at the route, not left to the page to remember');
   assert.match(body.error, /Dana Lee/, 'and it says who is already in flight');
@@ -176,6 +182,29 @@ test('THE OUTREACH BUTTON: a lead run is started, reported, and summarised for t
   assert.equal(body.jobs[jobId].count, 0);
 });
 
+test('THE OUTREACH TAB LISTS ONLY WHAT HE CHOSE, and Remove takes it off until he presses Outreach again', async () => {
+  // A second posting he never pressed Outreach on — it must not appear.
+  const other = await post('/api/apply-page', {
+    pageUrl: 'https://jobs.lever.co/acmetools/9c8b7a65-7777-2222-3333-444455556666',
+    posting: { title: 'Test Engineer', company: 'Acme Tools', location: 'Austin, TX, US', source: 'jsonld',
+      url: 'https://jobs.lever.co/acmetools/9c8b7a65-7777-2222-3333-444455556666', description: 'Test fixtures. '.repeat(40) },
+  });
+  assert.ok(other.body?.id);
+
+  const q = (await get('/api/outreach/queue')).body;
+  assert.deepEqual(q.jobs.map((j) => j.id), [jobId], 'the pressed job, and not the other one');
+  assert.equal(q.jobs[0].leads.status, 'failed', 'the research state travels with it');
+  assert.ok(q.jobs[0].contacts.some((c) => c.name === 'Dana Lee' && c.status === 'replied'), 'and who is on it');
+
+  assert.equal((await post('/api/outreach/remove', { id: jobId })).status, 200);
+  assert.deepEqual((await get('/api/outreach/queue')).body.jobs, [], 'off the list');
+  assert.equal((await get('/api/outreach/leads/summary')).body.jobs[jobId], undefined, 'so its button reads "Outreach" again');
+
+  await post('/api/outreach/leads', { id: jobId });
+  assert.deepEqual((await get('/api/outreach/queue')).body.jobs.map((j) => j.id), [jobId], 'pressing Outreach brings it back');
+  assert.equal((await post('/api/outreach/remove', { id: 'nope' })).status, 404);
+});
+
 // ── mail: the setup routes, against a server with no Gmail ─────────────
 test('MAIL SETUP: status, a validated client, Google\'s read-only consent link, and a refused stale sign-in', async () => {
   const st = await get('/api/mail/status');
@@ -208,4 +237,40 @@ test('MAIL SETUP: status, a validated client, Google\'s read-only consent link, 
 test('a lead run for an unknown job is refused', async () => {
   assert.equal((await post('/api/outreach/leads', { id: 'nope' })).status, 404);
   assert.equal((await get('/api/outreach/leads?id=nope')).status, 404);
+});
+
+test('A SAVED PERSON SHOWS THEIR PROFILE AND MESSAGE on the Outreach list, and the message can be edited (2026-09-26)', async () => {
+  const q = await get('/api/outreach/queue');
+  const job = q.body.jobs.find((j) => j.id === jobId);
+  assert.ok(job, 'the job with a saved person is on the list');
+  const dana = job.contacts.find((c) => c.name === 'Dana Lee');
+  assert.ok(dana?.id, 'each person carries the id the row writes back with');
+  assert.ok('linkedin_url' in dana && 'draft' in dana, 'the profile link and the message travel to the row');
+  const edited = await post('/api/outreach/contact/draft', { contactId: dana.id, draft: 'Hi Dana, a short note.' });
+  assert.equal(edited.status, 200);
+  assert.equal(edited.body.contact.draft, 'Hi Dana, a short note.');
+  assert.equal(edited.body.contact.name, 'Dana Lee', 'an edit keeps the rest of the row');
+  // Writing is switched off here: the route answers, says why, and keeps his text.
+  const w = await post('/api/outreach/contact/write', { contactId: dana.id });
+  assert.equal(w.status, 200);
+  assert.equal(w.body.text, '');
+  assert.match(w.body.why, /switched off/);
+  assert.equal((await post('/api/outreach/contact/write', { contactId: 'nobody' })).status, 404);
+});
+
+test('THE RESUME GOES TO DOWNLOADS AS ONE FILE: "Alex Rivera Resume.pdf", replaced on every press, never "(1)" (2026-09-27)', async () => {
+  const sent = path.join(dir, 'resumes', 'sent');
+  mkdirSync(sent, { recursive: true });
+  writeFileSync(path.join(sent, 'Alex Rivera Resume - mechanical - Acme - A.pdf'), '%PDF first');
+  writeFileSync(path.join(sent, 'Alex Rivera Resume - mechanical - Acme - B.pdf'), '%PDF second');
+  const dest = path.join(dir, 'Downloads', 'Alex Rivera Resume.pdf');
+  const a = await post('/api/outreach/resume-to-downloads', { dir: 'sent', file: 'Alex Rivera Resume - mechanical - Acme - A.pdf' });
+  assert.equal(a.status, 200);
+  assert.equal(a.body.path, dest);
+  assert.equal(readFileSync(dest, 'utf8'), '%PDF first');
+  await post('/api/outreach/resume-to-downloads', { dir: 'sent', file: 'Alex Rivera Resume - mechanical - Acme - B.pdf' });
+  assert.equal(readFileSync(dest, 'utf8'), '%PDF second', 'the next press replaces it');
+  assert.ok(!existsSync(path.join(dir, 'Downloads', 'Alex Rivera Resume (1).pdf')));
+  assert.equal((await post('/api/outreach/resume-to-downloads', { dir: 'sent', file: '../../secret.pdf' })).status, 404, 'nothing outside the resume folder');
+  assert.equal((await post('/api/outreach/resume-to-downloads', { dir: '..', file: 'x.pdf' })).status, 404);
 });

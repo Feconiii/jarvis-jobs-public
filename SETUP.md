@@ -1,9 +1,9 @@
 # Setting up your own Jarvis Jobs
 
-> **Faster with Claude Code:** open the folder in Claude Code and say *"set this
-> up"* or type `/jarvis-setup`. It runs the steps below as an interview and
-> writes each file with you. `npm run jarvis:setup-check` shows what is left at
-> any point.
+> **Faster with an assistant:** open the folder in Claude Code or Codex and say
+> *"set me up"* (or type `/jarvis-setup` in Claude Code). It runs the steps
+> below as an interview and writes each file with you. `npm run
+> jarvis:setup-check` shows what is left at any point.
 
 About 20 minutes to a working dashboard. The files you write about yourself
 (steps 3–5) are what make it good; give them the time.
@@ -16,10 +16,11 @@ is committed unless you change `.gitignore`.
 
 - **Node.js 24 or newer** (the store uses the built-in `node:sqlite`).
 - **A Chromium browser** — Chrome, Edge, Brave or Opera — for the extension.
-- **Claude Code** (`claude` on your PATH, signed in) for the writers: tailored
-  resumes, application answers, cover letters and the daily curation. Without
-  it, discovery, triage, scoring, the dashboard and form filling all still
-  work; the writing features say they are unavailable.
+- **Claude Code** (`claude` on your PATH, signed in) **or Codex** (`codex` on
+  your PATH, `codex login` done once) for the writers: tailored resumes,
+  application answers, cover letters and the daily curation. Setup asks which
+  one you have. Without either, discovery, triage, scoring, the dashboard and
+  form filling all still work; the writing features say they are unavailable.
 - Windows, macOS or Linux. The desktop shortcut helper is Windows-only.
 
 ## 2. Install
@@ -32,7 +33,35 @@ npx playwright install chromium     # used for liveness fallbacks and resume ren
 cp .env.example .env                # optional settings, all commented out
 ```
 
-## 3. Your CV — the source of truth
+## 3. Run setup
+
+```bash
+npm run jarvis:setup -- --find-boards
+```
+
+It asks who you are and what you want: name, contact details, school, degree,
+major, graduation, **field** (`hardware-engineering` or `finance-data`), target
+titles, **work authorization** (`citizen`, `permanent_resident`, `f1`, `visa`,
+`no_sponsorship_needed`), pay floor, cities, and which assistant you have
+(`claude` or `codex`). Then it writes:
+
+| File | What it holds |
+|------|---------------|
+| `config/profile.yml` | who you are, your field (`targeting.preset`), your assistant (`targeting.llm`), target roles, pay floor |
+| `data/jarvis/apply-profile.yml` | the answers forms are filled with: identity, education, work authorization |
+| `jarvis/preferences.md` | starter rules for your field, in plain English |
+| `portals.yml` | the companies you track (empty, then filled by `--find-boards`) |
+
+`--find-boards` looks up the job boards of your field's starter companies and
+tracks the ones it can verify. `--force` rewrites existing files (each is kept
+as a `.bak-<date>` first). An assistant runs the same thing non-interactively:
+`node jarvis/setup.mjs --answers <answers.json> --find-boards`.
+
+Work authorization decides the visa screen: a citizen is never hidden from a
+"U.S. citizens only" or "no sponsorship" posting; someone who needs
+sponsorship sees those flagged and hidden from the shortlist.
+
+## 4. Your CV — the source of truth
 
 ```bash
 cp examples/cv.example.md cv.md
@@ -51,52 +80,46 @@ Optional companions, used when present:
 - `interview-prep/stories.md` — longer first-person stories the answer writer
   may draw on.
 
-## 4. Your application profile
+## 5. Your application profile
 
-```bash
-mkdir -p data/jarvis
-cp examples/apply-profile.example.yml data/jarvis/apply-profile.yml
-```
+Setup wrote `data/jarvis/apply-profile.yml` with your identity, education and
+work-authorization answers. Open it and fill the rest with your own values:
+work history (from `cv.md`), languages, standard answers, consents and
+voluntary self-identification (`examples/apply-profile.example.yml` shows every
+key). This is what the extension types into forms. **Leave a key empty rather
+than guess**: an empty key leaves that field for you, with the reason. The
+self-identification answers start blank and are yours alone to fill.
 
-Fill in every value with your own. This is what the extension types into
-forms: identity, education, work history, work-authorization answers,
-consents and voluntary self-identification. **Leave a key empty rather than
-guess** — an empty key leaves that field for you, with the reason.
+## 6. What you want
 
-The work-authorization answers drive the visa screen. The defaults assume a
-student on F-1 who will need sponsorship later; set yours honestly, and the
-triage adjusts what it flags.
+- **`config/profile.yml`**: your target roles and compensation floor, which
+  the fit scorer weighs. Setup wrote it; edit it any time.
 
-## 5. What you want
-
-```bash
-cp examples/portals.example.yml portals.yml
-cp examples/preferences.example.md jarvis/preferences.md
-cp config/profile.example.yml config/profile.yml
-```
-
-- **`config/profile.yml`** — your target roles and compensation floor, which
-  the fit scorer weighs. Replace the example's roles with yours.
-
-- **`portals.yml`** — the companies you track and your title, location and
-  salary filters. You do not need to type boards by hand:
+- **`portals.yml`**: the companies you track. `--find-boards` started it with
+  your field's starter companies. Add more without typing boards by hand:
 
   ```bash
   npm run jarvis:discover -- --names "Company A,Company B" --write   # resolve names to verified boards
   npm run jarvis:discover -- --seeds hardware --write               # a curated hardware seed list
-  npm run jarvis:discover-linkedin -- --write                       # companies hiring for your titles
+  npm run jarvis:discover-linkedin -- --write                       # companies hiring in your field
   npm run jarvis:discover-sources                                   # Built In, HN, YC, The Muse, Climatebase
   ```
+
+  A board found by name is a claim: the finder lists "thin boards" (under 10
+  postings) at the end, which are usually a different company with the same
+  name. Turn those off with `npm run jarvis:disable-board -- "<name>" --why
+  "<reason>"`.
 
   Read the titles on any board you just added (`npm run jarvis:audit-boards --
   --since <an older copy of portals.yml>`): a name can resolve to a different
   company with the same name, or to a recruiting agency.
 
-- **`jarvis/preferences.md`** — plain-English rules the fit scorer reads every
-  run (`never night shift`, `prefer in location Austin`). Edit it any time and
-  run `npm run jarvis:rescore`.
+- **`jarvis/preferences.md`**: plain-English rules the fit scorer reads every
+  run (`never night shift`, `prefer in location Austin`). Setup started it
+  with your field's rules; `examples/preferences.example.md` explains the
+  syntax. Edit it any time and run `npm run jarvis:rescore`.
 
-## 6. First scan
+## 7. First scan
 
 ```bash
 npm run jarvis:scan          # every tracked company's board
@@ -113,7 +136,7 @@ does the same by hand; `-- --dry-run` shows what it would do).
 On Windows, `npm run jarvis:shortcut` puts a **Jarvis Jobs** launcher on the
 desktop.
 
-## 7. The browser extension
+## 8. The browser extension
 
 1. Open `chrome://extensions` (or your browser's equivalent) and turn on
    **Developer mode**.
@@ -129,11 +152,13 @@ what is left for you, and lets you ask Claude about any question.
 After you pull an update, reload the extension on the extensions page; the
 dashboard tells you when the loaded extension is out of date.
 
-## 8. Resumes
+## 9. Resumes
 
-The resume builder selects bullets from `jarvis/resume-pool.json` — a pool
+The resume builder selects bullets from `jarvis/resume-pool.json`, a pool
 whose every sentence must appear verbatim in your `cv.md`, or the build
-refuses to run. Build yours from your CV, starting from the example:
+refuses to run. `jarvis/RESUME-POOL.md` says how to build it from your CV (an
+assistant can do it for you), and `examples/resume-pool.example.json` shows
+the shape:
 
 ```bash
 cp examples/resume-pool.example.json jarvis/resume-pool.json
@@ -152,7 +177,7 @@ they name the sample persona's employers (`amat`, `acme`, `makerspace`,
 builds the family resumes and runs the layout check; look at the PNG it writes
 beside each PDF before trusting a layout.
 
-## 9. Optional
+## 10. Optional
 
 - **Gmail** — Applications → Connect Gmail, with your own Google OAuth client.
   Read-only; it moves a card forward on a confirmation, interview or
@@ -162,18 +187,30 @@ beside each PDF before trusting a layout.
 - **Backups** — `npm run jarvis:backup` copies your decisions and hand-written
   files to `jarvis-backup/`.
 
-## 10. Tests
+## 11. Tests
 
 ```bash
 npm run jarvis:test            # everything that runs on a fresh clone (fixtures only)
-npm run jarvis:test:personal   # suites that read YOUR files: cv.md, config/profile.yml,
-                               # data/jarvis/apply-profile.yml, jarvis/resume-pool.json
+npm run jarvis:test:personal   # suites written against the original user's files
 npm run jarvis:test:e2e        # the end-to-end extension test
 ```
 
-`jarvis:test:personal` fails until your files exist, and a few of its suites
-assert the sample persona's resume layouts — adjust them when you rewrite
-`resume-variants.mjs` for your own history.
+Tests never read your setup: they run as the sample persona with the
+`hardware-engineering` preset, so they pass the same on every machine.
+`JARVIS_PROFILE=jarvis/presets/finance-data/test-profile.yml` runs a command
+as a made-up finance user instead. `jarvis:test:personal` checks the original
+user's own CV, bullet pool and sent answers, so it fails on any other copy;
+it is there to show what those suites check.
+
+## Adding a field
+
+A preset is four files in `jarvis/presets/<name>/`: `screen.mjs` (title and
+degree words, the curator brief), `discovery.mjs` (searches, metros, which
+employers to skip), `writing.mjs` (how resumes and answers describe the work)
+and `index.mjs` (label, default titles, starter companies, starter rules).
+Copy `finance-data`, change the words, and keep the same keys:
+`node --test jarvis/targeting.test.mjs` checks that every preset has the same
+shape.
 
 ## Rules the engine keeps
 

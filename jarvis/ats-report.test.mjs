@@ -1,0 +1,47 @@
+/**
+ * The platform report: every posting lands on the right vendor, and a fault's
+ * open/closed state is read from its own heading.
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { vendorOf, faultStatuses } from './ats-report.mjs';
+
+test('postings are classified by the page they are applied on', () => {
+  const cases = [
+    ['https://globalfoundries.wd1.myworkdayjobs.com/External/job/x', 'workday'],
+    ['https://job-boards.greenhouse.io/anthropic/jobs/1', 'greenhouse'],
+    ['https://careers.formlabs.com/job/7996435/apply/?gh_jid=7996435', 'greenhouse'],
+    ['https://app.careerpuck.com/job-board/lyft/job/8779925002?gh_jid=8779925002', 'careerpuck'],
+    ['https://jobs.smartrecruiters.com/oneclick-ui/company/WesternDigital/publication/x', 'smartrecruiters'],
+    ['https://career10.successfactors.com/portalcareer?x=1', 'successfactors'],
+    ['https://careers.micron.com/careers/job/1', 'eightfold'],
+    ['https://jobs.ashbyhq.com/openai/1', 'ashby'],
+    ['https://ats.rippling.com/cintal/jobs/x', 'rippling'],
+    ['https://app.dover.com/apply/loombotic/x', 'dover'],
+    ['https://wayve.firststage.co/jobs?gh_jid=8483422002', 'firststage'],
+    ['https://www.amazon.jobs/en/jobs/1', 'amazon'],
+  ];
+  for (const [url, want] of cases) assert.equal(vendorOf(url), want, url);
+  assert.equal(vendorOf('https://careers.veeco.com/job/x/1/', 'sitemap-jobs'), 'company-site', 'an unclaimed host falls back to its provider');
+  assert.equal(vendorOf('https://example.test/x'), 'other');
+});
+
+test('a fault is open or closed by its own heading, the last one with that id winning', () => {
+  const s = faultStatuses([
+    '## F-1 · A thing · `major` · OPEN',
+    '## F-2 · Another · `minor` · fixed 2026-09-24',
+    '## F-3 · Radios · `major` · FIXED on a fixture, UNVERIFIED live',
+    '## F-3 · Radios · `major` · fixed 2026-09-24, verified in his Chrome',
+  ].join('\n'));
+  assert.equal(s.get('F-1').open, true);
+  assert.equal(s.get('F-2').open, false);
+  assert.equal(s.get('F-3').open, false, 'the later heading supersedes');
+});
+
+test('every fault the registry cites exists in FAULTS.md', () => {
+  const reg = JSON.parse(readFileSync(new URL('./ats-registry.json', import.meta.url), 'utf8'));
+  const known = faultStatuses(readFileSync(new URL('./FAULTS.md', import.meta.url), 'utf8'));
+  const missing = reg.vendors.flatMap((v) => (v.faults || []).filter((id) => !known.has(id)).map((id) => `${v.key}:${id}`));
+  assert.deepEqual(missing, []);
+});

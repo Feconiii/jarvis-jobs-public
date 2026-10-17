@@ -34,6 +34,7 @@
 import { mkdirSync } from 'fs';
 import path from 'path';
 import { chromium } from 'playwright';
+import { person } from './targeting.mjs';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
   'August', 'September', 'October', 'November', 'December'];
@@ -90,7 +91,7 @@ export function addressFromJd(jd = '', location = '') {
  * @param {string} jd         its description, read only for a street address
  */
 export function letterHead({ candidate = {}, job = {}, jd = '', date = new Date(), salutation = 'Hiring Manager' } = {}) {
-  const name = String(candidate.full_name || 'Alex Rivera').trim();
+  const name = String(candidate.full_name || person.fullName).trim();
   const mine = [name, candidate.location, candidate.phone, candidate.email]
     .map((v) => String(v || '').trim()).filter(Boolean);
   const street = addressFromJd(jd, job.location);

@@ -50,5 +50,10 @@ check('a board nothing was captured from is unscanned, never suspect', verdict([
 
 check('the reason is stated in numbers', judgeBoard(['Account Executive', 'Account Executive', 'Account Executive', 'Mechanical Engineer', 'Buyer']).why, '3 of 5 titles read like an agency or a sales floor');
 
+// 2026-10-02: a same-name SOFTWARE company passed every check above.
+check('engineers but no hardware title: suspect', verdict(['Software Engineer (Rust) - Backend', 'Software Engineer, Infrastructure', 'Forward Deployed Engineer', 'Strategic Operations', 'Software Engineer (Rust)', 'Product Designer']), 'suspect');
+check('a robotics board with a sales team is still ok', verdict(['Customer Success Manager', 'Robotics Software Engineer (Perception)', 'Forward Deployed Robotics Engineer', 'Account Executive', 'Senior Machine Learning Engineer', 'Mechanical Engineer']), 'ok');
+check('a small board is not judged on it', verdict(['Software Engineer', 'Designer', 'Founding Engineer']), 'ok');
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

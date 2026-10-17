@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSpec, loadPool } from './resume-variants.mjs';
-import { applyPlan, reserveFor, withBullet, withoutOneBullet, isOwnCompany, ownCompanyTitle, MIN_AMAT, MIN_AMAT_JUSTIFIED, MAX_BULLETS, shortenOneBullet, shortenOneProject, shortenBulletEnding, dropsProtected, protectedPhrases } from './resume-plan.mjs';
+import { applyPlan, reserveFor, withBullet, withoutOneBullet, mergeInsteadOf, isOwnCompany, ownCompanyTitle, MIN_AMAT, MIN_AMAT_JUSTIFIED, MAX_BULLETS, shortenOneBullet, shortenOneProject, shortenBulletEnding, dropsProtected, protectedPhrases } from './resume-plan.mjs';
 
 const pool = loadPool();
 const base = () => buildSpec('manufacturing', pool);
@@ -11,14 +11,14 @@ const OTHER = { company: 'Lam Research', title: 'Mechanical Engineer 2' };
 
 test('a good proposal is applied in full — titles, order, projects, coursework, skills', () => {
   const { spec, notes, changed } = applyPlan(base(), {
-    titles: { amat: 'Robotics Engineer Intern', acme: 'Process Improvement Intern' },
+    titles: { amat: 'Robotics Automation Engineer Intern', acme: 'Process Improvement Intern' },
     experience: { amat: ['robodk', 'cobot-rack', 'vision-fixture', 'neuro-t', 'amr'], acme: ['robotic-line', 'docs'], makerspace: ['supervise'], sae: ['coach'] },
     projects: ['robotic-arm'],
     coursework: ['System Dynamics and Control', 'Mechanical Design', 'Circuit Analysis', 'Python Programming', 'Machine Design'],
     skills: [{ key: 'automation', items: ['RoboDK', 'Universal Robots', 'Python'] }, { key: 'cad', items: ['SolidWorks', 'GD&T'] }, 'process'],
   }, { pool, job: OTHER });
   assert.deepEqual(notes, []);
-  assert.equal(spec.experience[0].title, 'Robotics Engineer Intern');
+  assert.equal(spec.experience[0].title, 'Robotics Automation Engineer Intern');
   assert.equal(spec.experience[0].group, 'Automation Technology Group', 'the group survives a title change');
   assert.equal(spec.experience[1].title, 'Process Improvement Intern');
   assert.deepEqual(keysOf(spec, 'amat'), ['robodk', 'cobot-rack', 'vision-fixture', 'neuro-t', 'amr']);
@@ -35,29 +35,41 @@ test('a good proposal is applied in full — titles, order, projects, coursework
   assert.equal(spec.order[0], 'education', 'education first, always');
 });
 
+test('Acme Steel carries no automation or robotics title; Applied Materials says robotics AUTOMATION (his words, 2026-09-27)', () => {
+  // "i didnt design any robots, i integrated them"
+  for (const t of ['Automation Engineer Intern', 'Robotics Engineer Intern', 'Robotics Automation Engineer Intern']) {
+    const { spec } = applyPlan(buildSpec('automation', pool), { titles: { acme: t } }, { pool, job: OTHER });
+    assert.equal(spec.experience[1].title, 'Manufacturing Engineer Intern', `Acme Steel refuses "${t}"`);
+  }
+  const amat = applyPlan(buildSpec('automation', pool), { titles: { amat: 'Robotics Engineer Intern' } }, { pool, job: OTHER });
+  assert.notEqual(amat.spec.experience[0].title, 'Robotics Engineer Intern', 'the old robot-designer title is gone');
+  const ok = applyPlan(buildSpec('automation', pool), { titles: { amat: 'Robotics Automation Engineer Intern' } }, { pool, job: OTHER });
+  assert.equal(ok.spec.experience[0].title, 'Robotics Automation Engineer Intern');
+});
+
 test('anything outside the pool is dropped and said so', () => {
   const { spec, notes } = applyPlan(base(), {
-    titles: { amat: 'Senior Process Engineer', acme: 'Robotics Engineer Intern' },
+    titles: { amat: 'Senior Process Engineer', acme: 'Process Improvement Intern' },
     experience: { amat: ['vision-fixture', 'neuro-t', 'robodk', 'amr', 'iiot', 'plc-programming'], acme: ['robotic-line'], makerspace: ['production'], sae: ['baja'] },
     projects: ['drone-swarm', 'piston-fea'],
     coursework: ['Plasma Physics', 'Mechanical Design', 'Machine Design', 'Heat Transfer', 'Thermodynamics'],
-    skills: [{ key: 'cad', items: ['SolidWorks', 'CATIA'] }, { key: 'devops', items: ['Linux'] }, { key: 'process', items: ['Root Cause Analysis'] }],
+    skills: [{ key: 'cad', items: ['SolidWorks', 'KeyShot'] }, { key: 'devops', items: ['Linux'] }, { key: 'process', items: ['Root Cause Analysis'] }],
   }, { pool, job: OTHER });
   assert.equal(spec.experience[0].title, 'Manufacturing Engineer Intern', 'an unapproved title keeps the family default');
-  assert.equal(spec.experience[1].title, 'Robotics Engineer Intern');
+  assert.equal(spec.experience[1].title, 'Process Improvement Intern');
   assert.ok(!keysOf(spec, 'amat').includes('plc-programming'));
   assert.deepEqual(spec.projects.map((p) => p.key), ['piston-fea']);
   assert.ok(!/Plasma/.test(spec.education[0].bullets.find((b) => b.lead === 'Relevant Coursework').text));
   assert.equal(spec.skills.length, 2);
   assert.equal(spec.skills[0].text, 'SolidWorks');
-  for (const bad of ['Senior Process Engineer', 'plc-programming', 'drone-swarm', 'Plasma Physics', 'CATIA', 'devops']) {
+  for (const bad of ['Senior Process Engineer', 'plc-programming', 'drone-swarm', 'Plasma Physics', 'KeyShot', 'devops']) {
     assert.ok(notes.some((n) => n.includes(bad)), `must report "${bad}"`);
   }
 });
 
 test('the staples, the Applied Materials floor and the one-cell rule hold whatever is proposed', () => {
   const { spec, notes } = applyPlan(base(), {
-    experience: { amat: ['robodk', 'cobot-install', 'iiot'], acme: ['coil-savings'], makerspace: ['production', 'fabrication', 'supervise'], rover: [], sae: [] },
+    experience: { amat: ['robodk', 'cobot-cell', 'iiot'], acme: ['coil-savings'], makerspace: ['production', 'fabrication', 'supervise'], rover: [], sae: [] },
   }, { pool, job: OTHER });
   const amat = keysOf(spec, 'amat');
   // ONE staple since 2026-09-09: the mechanical-design fixture. Neuro-T is a
@@ -65,7 +77,7 @@ test('the staples, the Applied Materials floor and the one-cell rule hold whatev
   // elsewhere, not a fixture (F-437).
   assert.ok(amat.includes('vision-fixture'), 'the mechanical-design staple is restored');
   assert.ok(amat.length >= MIN_AMAT, `at least ${MIN_AMAT} Applied Materials bullets`);
-  assert.ok(!(amat.includes('robodk') && amat.includes('cobot-install')), 'the cell is described once');
+  assert.ok(!(amat.includes('robodk') && amat.includes('cobot-cell')), 'the cell is described once');
   assert.equal(keysOf(spec, 'makerspace').length, 2, 'a minor org is capped');
   // SAE is optional (2026-09-05): a plan that leaves it off leaves it off.
   assert.ok(!spec.experience.some((e) => e.orgKey === 'sae'), 'sae is optional — left off when the plan omits it');
@@ -102,14 +114,14 @@ test('AT APPLIED MATERIALS ITSELF only the official title is allowed, chosen by 
   assert.equal(ownCompanyTitle(amatOrg, { title: 'Process Engineer' }), 'Manufacturing Engineer Intern');
   assert.equal(ownCompanyTitle(amatOrg, { title: 'NPI Engineer' }), 'Manufacturing Engineer Intern');
 
-  const mech = applyPlan(buildSpec('mechanical', pool), { titles: { amat: 'Robotics Engineer Intern' } }, { pool, job: { company: 'Applied Materials', title: 'Mechanical Engineer NCG' } });
+  const mech = applyPlan(buildSpec('mechanical', pool), { titles: { amat: 'Robotics Automation Engineer Intern' } }, { pool, job: { company: 'Applied Materials', title: 'Mechanical Engineer NCG' } });
   assert.equal(mech.spec.experience[0].title, 'Mechanical Engineer Intern');
   assert.ok(mech.notes.some((n) => /official title/.test(n)));
   const proc = applyPlan(buildSpec('automation', pool), { titles: { amat: 'Automation Engineer Intern' } }, { pool, job: { company: 'Applied Materials', title: 'Manufacturing Automation Engineer' } });
   assert.equal(proc.spec.experience[0].title, 'Manufacturing Engineer Intern', 'an automation role at Applied is still the official manufacturing title');
   // …and Acme Steel's title is still free to match the job there.
-  const sc = applyPlan(buildSpec('automation', pool), { titles: { acme: 'Robotics Engineer Intern' } }, { pool, job: { company: 'Applied Materials', title: 'Robotics Engineer' } });
-  assert.equal(sc.spec.experience[1].title, 'Robotics Engineer Intern');
+  const sc = applyPlan(buildSpec('automation', pool), { titles: { acme: 'Process Improvement Intern' } }, { pool, job: { company: 'Applied Materials', title: 'Robotics Engineer' } });
+  assert.equal(sc.spec.experience[1].title, 'Process Improvement Intern');
 });
 
 test('no proposal, a null proposal and junk all keep the family base', () => {
@@ -144,9 +156,9 @@ test('A SPILL COSTS WORDS BEFORE IT COSTS CLAIMS: the longest full-form bullet t
 
 test('the reserve is what is left, in order, never the surplus line and never the other half of a pair', () => {
   const b = base();
-  const r = reserveFor(b, pool, ['acme.docs', 'amat.cobot-install', 'nope.x', 'acme.surplus']);
+  const r = reserveFor(b, pool, ['acme.docs', 'amat.cobot-cell', 'nope.x', 'acme.surplus']);
   assert.equal(r[0], 'acme.docs', 'the model\'s order is honoured');
-  assert.ok(!r.includes('amat.cobot-install'), 'robodk is on the page, so its twin is not offered');
+  assert.ok(!r.includes('amat.cobot-cell'), 'robodk is on the page, so the combined cell bullet is not offered');
   assert.ok(!r.includes('acme.surplus'));
   assert.ok(!r.includes('nope.x'));
   const used = new Set(b.experience.flatMap((e) => e.bullets.map((x) => x.provenanceKey)));
@@ -254,10 +266,10 @@ test('shortenOneProject spends the short form - unless the phrase is protected',
 
 test('a project that ends on a stub takes its short form, like a bullet', () => {
   const { spec } = applyPlan(base(), { projects: ['robotic-arm'] }, { pool, job: OTHER });
-  const tight = shortenBulletEnding(spec, '420 mm working reach.', []);
+  const tight = shortenBulletEnding(spec, 'fused 12 V power distribution.', []);
   assert.equal(tight.shortened, 'robotic-arm');
   assert.equal(tight.spec.projects[0].text, pool.projects['robotic-arm'].short);
-  assert.equal(shortenBulletEnding(spec, '420 mm working reach.', ['coordinated motion']).shortened, null, 'never at the cost of a protected phrase');
+  assert.equal(shortenBulletEnding(spec, 'fused 12 V power distribution.', ['coordinated motion']).shortened, null, 'never at the cost of a protected phrase');
 });
 
 test('protectedPhrases keeps only what his own wordings actually say', () => {
@@ -308,4 +320,29 @@ test('…even when the model proposes a Makerspace line first', () => {
   }, { pool, job: OTHER });
   const r = reserveFor(spec, pool, ['makerspace.fabrication', 'acme.coil-savings']);
   assert.ok(r.indexOf('acme.coil-savings') < r.indexOf('makerspace.fabrication'), r.join(', '));
+});
+
+// Alex, 2026-09-29: the RoboDK bullet and the rack bullet print separately,
+// and "combine them when space is tight and you still want to hit cobot work".
+test('a tight page says the RoboDK and rack bullets as one instead of dropping either', () => {
+  const b = applyPlan(base(), {
+    experience: { amat: ['vision-fixture', 'robodk', 'neuro-t', 'cobot-rack', 'iiot', 'amr'], acme: ['robotic-line'], makerspace: ['fabrication'], rover: [], sae: [] },
+  }, { pool, job: OTHER }).spec;
+  const out = mergeInsteadOf(b, 'amat.amr', pool);
+  assert.ok(out, 'a cut from Applied Materials merges when both halves are on the page');
+  assert.deepEqual(keysOf(out.spec, 'amat'), ['vision-fixture', 'cobot-cell', 'neuro-t', 'iiot', 'amr'], 'the merged bullet takes the first half\'s place; nothing else moves');
+  assert.equal(mergeInsteadOf(b, 'acme.robotic-line', pool), null, 'a cut from another organisation is left alone');
+  assert.equal(mergeInsteadOf(out.spec, 'amat.amr', pool), null, 'nothing left to merge');
+  const oneHalf = { ...b, experience: b.experience.map((e) => (e.orgKey === 'amat' ? { ...e, bullets: e.bullets.filter((x) => x.provenanceKey !== 'amat.cobot-rack') } : e)) };
+  assert.equal(mergeInsteadOf(oneHalf, 'amat.amr', pool), null, 'both halves must be on the page');
+});
+
+test('the combined cobot bullet never sits beside either half', () => {
+  for (const pair of [['robodk', 'cobot-cell'], ['cobot-rack', 'cobot-cell']]) {
+    const { spec } = applyPlan(base(), {
+      experience: { amat: ['vision-fixture', ...pair, 'neuro-t', 'iiot', 'amr'], acme: ['robotic-line'], makerspace: ['fabrication'], rover: [], sae: [] },
+    }, { pool, job: OTHER });
+    const amat = keysOf(spec, 'amat');
+    assert.ok(amat.includes(pair[0]) && !amat.includes('cobot-cell'), `${pair[0]} is kept, cobot-cell is not printed beside it`);
+  }
 });

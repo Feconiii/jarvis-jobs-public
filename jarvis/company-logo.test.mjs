@@ -14,7 +14,11 @@ test('the posting URL names the company before the name is guessed at', () => {
   assert.equal(first({ company: 'Dexterity', url: 'https://jobs.lever.co/dexterity/abc' }), 'dexterity.com');
   assert.equal(first({ company: 'Lam Research', url: 'https://careers.lamresearch.com/careers/job/1' }), 'lamresearch.com');
   assert.equal(first({ company: 'Eaton Corporation', url: 'https://careers.eaton.com/careers/job/1-x' }), 'eaton.com');
-  assert.equal(first({ company: 'Applied Materials', url: 'https://amat.eightfold.ai/careers/job/1' }), 'amat.com');
+  // A tenant that does not spell the company is not its domain (2026-10-03):
+  // Samsung's Workday tenant "sec" gave sec.com, a stranger's face as its logo.
+  assert.equal(first({ company: 'Applied Materials', url: 'https://amat.eightfold.ai/careers/job/1' }), 'appliedmaterials.com');
+  assert.ok(!domainCandidates({ company: 'Samsung Electronics America', url: 'https://sec.wd3.myworkdayjobs.com/Samsung_Careers/job/x' }).includes('sec.com'));
+  assert.equal(first({ company: 'Texas Instruments', url: 'https://ti.wd5.myworkdayjobs.com/x' }), 'ti.com', 'initials still count');
   // An aggregator's host says nothing; the name decides.
   assert.equal(first({ company: 'Boston Scientific', url: 'https://www.linkedin.com/jobs/view/1' }), 'bostonscientific.com');
 });

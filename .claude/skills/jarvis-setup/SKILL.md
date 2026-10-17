@@ -2,14 +2,15 @@
 name: jarvis-setup
 description: >
   Set up Jarvis Jobs for a new user by interviewing them. Runs the setup check,
-  then asks — section by section — for what the engine needs (goals, work
-  authorization, CV, application profile, companies, preferences), writes each
-  file as it goes, and ends with the first scan, the dashboard and the browser
+  asks for what `jarvis/setup.mjs` needs (field, work authorization, school,
+  graduation, pay floor, cities, assistant), runs it, then builds cv.md and the
+  resume pool from their resume, fills the application profile with them, finds
+  companies, and ends with the first scan, the dashboard and the browser
   extension. Use on a fresh clone, when `node jarvis/setup-check.mjs` reports
-  anything missing, or when the user says "set this up".
+  anything missing, or when the user says "set me up".
 ---
 
-# /jarvis-setup — the new-user interview
+# /jarvis-setup: the new-user interview
 
 You are setting up a job-search engine for the person in front of you. Every
 fact you write goes onto real job applications, so the one rule above all
@@ -25,62 +26,72 @@ them with the reason. A made-up answer is not fine.
    questions) per turn with AskUserQuestion when the answers are choices, plain
    questions when they are free text. Offer "skip for now" on everything that
    is not required.
-3. **Write the file at the end of each section**, show them what you wrote in
-   a few lines, and fix what they correct before moving on.
+3. **Show what you wrote** at the end of each section in a few lines, and fix
+   what they correct before moving on.
 4. **Keep their files out of git.** Every file below is already gitignored;
    never `git add` one, never move personal data into a tracked file.
 5. **Never press Submit** on anything, and never tell them the engine will.
 
-## 1. What they are looking for → `config/profile.yml`, `jarvis/preferences.md`
+## 1. Who they are and what they want → `jarvis/setup.mjs`
 
-Ask:
-- Which roles? (titles, 2–6) Which level — internship, new grad, early career, experienced?
-- Which industries or kinds of company do they want, and which do they refuse?
-- Where — cities, states, remote, willing to relocate?
-- Pay floor (annual), and currency.
-- Deal-breakers: night or rotating shifts, heavy travel, on-call, security clearance, specific employers?
-- Anything they especially want (a technology, a mission, a company size)?
+Ask for every field in `QUESTIONS` in `jarvis/setup.mjs` (read it; each `ask`
+is the question, and `required` marks the ones setup refuses to run without). The ones that change what they see:
 
-Write `config/profile.yml` from `config/profile.example.yml` (target roles, pay
-floor) and `jarvis/preferences.md` from `examples/preferences.example.md` —
-one rule per line in its syntax (`never`, `avoid`, `prefer`, `want`, with
-`in title` / `in location`). Prefer `avoid` over `never` for taste; `never` is
-for facts they cannot or will not accept. Read the rules back in plain words.
+- **Field** (`preset`): `hardware-engineering` (mechanical, manufacturing,
+  robotics, semiconductor) or `finance-data` (FP&A, financial, data, business,
+  BI analyst). If neither fits, say so: a new preset is a copy of one of these
+  (SETUP.md, "Adding a field").
+- **Work authorization**: `citizen`, `permanent_resident`, `f1`, `visa`
+  (another work visa), `no_sponsorship_needed`. This decides the visa screen.
+  If they are unsure, explain the choices and let them pick; do not decide for
+  them.
+- **Graduation** (month and year), degree level, major: the degree and
+  graduation-window checks read these.
+- **Pay floor**, preferred cities, relocation.
+- **Assistant** (`llm`): `claude` if they use Claude Code, `codex` if Codex.
 
-## 2. Work authorization → the `answers:` visa block of the profile
+Write the answers to `data/jarvis/setup-answers.json`, keys exactly as in
+`QUESTIONS`, and run:
 
-This decides what gets flagged, so get it exactly right. Ask:
-- Country of citizenship. Are they authorized to work in the target country now?
-- Will they need visa sponsorship now or in the future? Current status
-  (citizen, permanent resident, F-1/OPT/STEM OPT, H-1B, other)?
-- Have they held H-1B or J-1 status? Could they obtain a security clearance?
-- Are they a "U.S. person" under export-control rules (citizen, permanent
-  resident, protected individual)?
+```bash
+node jarvis/setup.mjs --answers data/jarvis/setup-answers.json --find-boards
+```
 
-If they are unsure, say what the question means and let them answer or skip —
-do not decide for them.
+It writes `config/profile.yml`, `data/jarvis/apply-profile.yml`,
+`jarvis/preferences.md` and `portals.yml`, then tracks the job boards of the
+field's starter companies it can verify. If it refuses an answer, ask again
+for that one. Read the starter rules in `jarvis/preferences.md` back in plain
+words and change what they disagree with (one rule per line: `never`, `avoid`,
+`prefer`, `want`, with `in title` / `in location`; `avoid` for taste, `never`
+for facts they cannot or will not accept).
 
-## 3. Their CV → `cv.md` (the source of truth)
+## 2. Their CV → `cv.md` (the source of truth)
 
-- Ask for their current resume: a file path, or paste it. Turn it into
-  `cv.md` using `examples/cv.example.md` as the shape.
+- Ask for their current resume: a file path, or paste it. Convert it
+  faithfully to Markdown (`examples/cv.example.md` shows the shape): every
+  role, date, bullet, number and skill exactly as they wrote it.
 - Then go role by role and project by project and ask for **more**: what they
-  built, the tools, the numbers, what went wrong and what they did about it.
-  `cv.md` should hold everything they would defend in an interview — it is
-  longer than a resume on purpose; the resume builder selects from it.
+  did, the tools, the numbers, what went wrong and what they did about it.
+  `cv.md` should hold everything they would defend in an interview; it is
+  longer than a resume on purpose, because the resume builder selects from it.
 - Ask for evidence for every number. If they cannot back a figure, leave it
   out. If they "used" a tool, do not write that they "built" it.
 - Optional, ask once: a one-page resume in their own words → `cv-short.md`;
   stories they would tell in an interview → `interview-prep/stories.md`.
 
+## 3. Resumes → `jarvis/resume-pool.json`
+
+Build the pool from `cv.md` by following `jarvis/RESUME-POOL.md`. Every
+bullet's `text` is copied **verbatim** from `cv.md`; `npm run jarvis:resumes`
+refuses a pool that has drifted. Ask which experience should lead and which is
+least important. Then `npm run jarvis:resumes`, show them the PNG beside each
+PDF, and ask what to change.
+
 ## 4. Application profile → `data/jarvis/apply-profile.yml`
 
-Copy `examples/apply-profile.example.yml` and fill it with them:
-- Identity: legal first/last name, the name they go by, email, phone, address,
-  city/state/zip/country, LinkedIn, portfolio or website (typed exactly as
-  they want it — some want the bare domain), GitHub.
-- Education and each education entry (school, degree, field, GPA if they want
-  it shown, years); graduation month and year.
+Setup already wrote identity, education and work authorization. Go through
+the rest with them (`examples/apply-profile.example.yml` shows every key):
+
 - Work history entries (title, company, location, start/end month and year,
   one-line description taken from `cv.md`).
 - Languages and proficiency.
@@ -88,56 +99,48 @@ Copy `examples/apply-profile.example.yml` and fill it with them:
   usually hear about jobs, salary expectation wording, notice period, over 18,
   previously employed at / applied to a company (default No), non-compete.
 - Skills: a comma-separated list taken from `cv.md` only.
-- **Consents — ask explicitly, do not assume:** should the engine tick "I
+- **Consents (ask explicitly, do not assume):** should the engine tick "I
   agree / I certify" boxes and AI-screening, SMS and talent-community opt-ins
   for them? They still review every form and press Submit themselves.
 - **Voluntary self-identification (gender, race, Hispanic/Latino, veteran,
-  disability):** entirely optional. Offer to leave every one blank; write only
-  what they choose to give, in their words.
+  disability):** setup leaves these blank. Entirely optional; write only what
+  they choose to give, in their words.
 
-## 5. Companies → `portals.yml`
+## 5. More companies → `portals.yml`
 
-- Copy `examples/portals.example.yml`; set the title, location and salary
-  filters from section 1.
-- Ask for companies they already want (any number). Resolve them to verified
-  boards: `npm run jarvis:discover -- --names "A,B,C" --write`.
+- Ask for companies they already want (any number):
+  `npm run jarvis:discover -- --names "A,B,C" --write`.
 - Offer the wider passes and run the ones they want:
-  `npm run jarvis:discover -- --seeds hardware --write` (hardware start-ups),
-  `npm run jarvis:discover-linkedin -- --write` (companies hiring for their
-  titles), `npm run jarvis:discover-sources` (Built In, HN, YC, The Muse,
-  Climatebase).
-- After adding boards, read their titles:
-  `npm run jarvis:audit-boards -- --since <copy of portals.yml before>` — a
-  name can resolve to a different company or a recruiting agency.
+  `npm run jarvis:discover-linkedin -- --write` (companies hiring in their
+  field), `npm run jarvis:discover-sources` (Built In, HN, YC, The Muse,
+  Climatebase), and for hardware `npm run jarvis:discover -- --seeds hardware --write`.
+- A board found by NAME is a claim. The finder lists "thin boards" (under 10
+  postings) at the end; those are usually a different company with the same
+  name. Turn them off with
+  `npm run jarvis:disable-board -- "<name>" --why "<reason>"`, and read the
+  titles on new boards with
+  `npm run jarvis:audit-boards -- --since <copy of portals.yml before>`.
 
-## 6. Resumes → `jarvis/resume-pool.json`
-
-- Generate the pool from `cv.md` using `examples/resume-pool.example.json` as
-  the shape. Every bullet's `text` must be copied **verbatim** from `cv.md`.
-- The layouts in `jarvis/resume-variants.mjs` and `jarvis/resume-plan.mjs`
-  name the sample persona's employers (`amat`, `acme`, `makerspace`, `rover`,
-  `sae`). Replace those keys with the user's org and bullet keys, and ask
-  which experience should lead and which is least important.
-- `npm run jarvis:resumes` builds the family resumes and runs the layout check.
-  Show them the PNG beside each PDF and ask what to change.
-
-## 7. First run
+## 6. First run
 
 ```bash
-npm install && npx playwright install chromium   # if setup-check said so
+npx playwright install chromium   # if setup-check said so
 npm run jarvis:scan
 npm run jarvis:enrich
-npm run jarvis:serve        # http://localhost:4300 — leave it running
+npm run jarvis:serve              # http://localhost:4300, leave it running
 ```
+
+If their assistant is Codex, `codex login` once; until then every resume,
+answer and letter fails with "Codex is not logged in".
 
 Then walk them through the extension: open their browser's extensions page,
 turn on Developer mode, **Load unpacked** → `jarvis/extension`. On an
 application page they press **Jarvis Apply**; it fills the form, attaches the
 tailored resume, and stops at Submit.
 
-Optional, ask once: connect Gmail (read-only) from the dashboard so the
-Applications board moves by itself; Adzuna keys in `.env`; Windows desktop
-shortcut (`npm run jarvis:shortcut`).
+Optional, ask once: connect Gmail (read-only, with their own Google OAuth
+client) from the dashboard so the Applications board moves by itself; Adzuna
+keys in `.env`; Windows desktop shortcut (`npm run jarvis:shortcut`).
 
 ## Finish
 

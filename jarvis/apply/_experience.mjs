@@ -104,6 +104,19 @@ export function workEntries(profile, { now = new Date(), limit = 4 } = {}) {
     });
 }
 
+// A MENU THAT SPELLS THE DEGREE ITS OWN WAY: HP's Workday reads "Bachelors
+// (±16 years of education)", which "Bachelor of Science" never matched
+// (2026-09-26, "could not set" twice). Tried after his own words.
+// …and a menu of ABBREVIATIONS: KION's tenant offers "B. A. | B. Eng. | B. Sc."
+// and nothing longer (2026-10-16, the step refused "Degree is required"). A
+// Bachelor of Science is "B. Sc." there, in every spacing of the dots.
+function degreeAlts(degree) {
+  if (!/bachelor/i.test(String(degree || ''))) return {};
+  const science = /\bscience\b/i.test(String(degree));
+  return { degreeAlts: ["Bachelor's", 'Bachelors', "Bachelor's Degree", 'Bachelor',
+    ...(science ? ['B. Sc.', 'B.Sc.', 'BSc', 'B.S.', 'BS'] : [])] };
+}
+
 /** Build the education entries to enter. */
 export function educationEntries(profile, { limit = 3 } = {}) {
   const list = Array.isArray(profile?.education_entries) ? profile.education_entries : [];
@@ -114,6 +127,7 @@ export function educationEntries(profile, { limit = 3 } = {}) {
       .map((e) => ({
         school: str(e.school),
         degree: str(e.degree),
+        ...degreeAlts(e.degree),
         fieldOfStudy: str(e.field_of_study),
         gpa: str(e.gpa),
         firstYear: yearOf(e.first_year),
@@ -133,6 +147,7 @@ export function educationEntries(profile, { limit = 3 } = {}) {
   return [{
     school: str(ed.school),
     degree: str(ed.degree),
+    ...degreeAlts(ed.degree),
     fieldOfStudy: str(ed.discipline),
     gpa: str(ed.gpa),
     firstYear: null,

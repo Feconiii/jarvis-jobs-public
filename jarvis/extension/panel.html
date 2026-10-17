@@ -107,7 +107,11 @@
   textarea:focus { outline: none; border-color: var(--accent); }
   input[type="text"], input:not([type]) { width: 100%; font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 8px; margin-top: 8px; }
   input:focus { outline: none; border-color: var(--accent); }
-  .letter-text { white-space: pre-wrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 6px; font-size: 12.5px; line-height: 1.5; max-height: 420px; overflow: auto; }
+  /* THE PANEL'S OWN WORDS ARE NOT PART OF ANY ANSWER (F-734). Slip Robotics'
+     letter went out headed "Jarvis 1.96.0 … 95 Strong fit … Filling…": a
+     select-all in the docked panel took the chrome with the letter. */
+  header, h2, .muted, nav, button, .tabs, .tab { user-select: none; }
+  .letter-text { user-select: text; white-space: pre-wrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 6px; font-size: 12.5px; line-height: 1.5; max-height: 420px; overflow: auto; }
   /* The report's own markup (report.js) carries its colours inline; this only
      gives its lists room in a 320px column. */
   #answers-body ul { margin: 4px 0 0 16px; padding: 0; }
@@ -165,8 +169,15 @@
         <button class="small" id="rebuild" hidden>Build it again</button>
         <span class="note" id="save-note"></span>
       </div>
+      <!-- THE NAME THE RECRUITER SEES, his to change (2026-09-27): "company
+           name is humanoid but the pdf resume says Thehumanoid". -->
+      <div class="row-btns" id="name-row" hidden>
+        <input id="file-name" type="text" maxlength="120" spellcheck="false" aria-label="File name the employer sees" style="flex:1;min-width:0">
+        <button class="small" id="save-name">Rename</button>
+        <span class="note" id="name-note"></span>
+      </div>
       <details class="how"><summary>What these buttons do</summary>
-        <p>It saves and opens under its own name: <b>Alex Rivera - Company - Role.pdf</b>. <b>Put it in the slot</b> attaches it to an empty file slot on the page you are on — a slot that already holds a file is left alone.</p></details>
+        <p>It saves and opens under its own name: <b id="file-name-example">Alex Rivera - Company - Role.pdf</b>. Change the name in the box above it and press <b>Rename</b>: the employer sees that name, for this posting only, wherever the file goes — attached by the fill, put in the slot, or downloaded. Empty the box and press Rename for the original. <b>Put it in the slot</b> attaches it to an empty file slot on the page you are on — a slot that already holds a file is left alone.</p></details>
       <!-- CHANGE IT lives with the resume it changes, folded (2026-09-23). It
            was a third tab of its own, for one text box. -->
       <details class="fold change" id="change-fold"><summary id="change-open">Change the resume</summary>

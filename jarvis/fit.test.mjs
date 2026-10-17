@@ -204,6 +204,18 @@ check('60 is good', bandFor(60).key, 'good');
 check('45 is fair', bandFor(45).key, 'fair');
 check('10 is low', bandFor(10).key, 'low');
 
+console.log('\n🧪 fit: the Apple Touch posting he called a perfect fit (2026-10-16)');
+const dim = (r, name) => r.breakdown.find((b) => b.dimension === name);
+const touchBody = 'Minimum Qualifications. Proficient in solid modeling tools such as SolidWorks. Low-volume prototyping. Minimum requirement of a bachelors degree. ' + LONG;
+const touch = scoreFit(job({ title: 'Tools and Automation Mechatronics Engineer', description: touchBody, location: 'Cupertino, California, United States' }),
+  { ...P, hubs: ['san francisco bay area (semiconductor cluster)'] });
+check('an automation discipline inside a longer engineer title is a primary role', dim(touch, 'role').points, 25);
+check('a degree and no years is reachable, not unknown', dim(touch, 'seniority').points, 17);
+check('Cupertino is in the Bay Area hub', dim(touch, 'location').points, 6);
+const yearsBody = 'Minimum requirement of a bachelors degree and 5+ years of experience. ' + LONG;
+check('…but a degree with years stated is not that', dim(scoreFit(job({ title: 'Automation Engineer', description: yearsBody }), P), 'seniority').points === 17, false);
+check('"automation" with no engineer in the title is not a primary role', dim(scoreFit(job({ title: 'Automation Technician' }), P), 'role').points === 25, false);
+
 console.log('\n🧪 fit: real profile loads');
 const real = loadProfile();
 checkTrue('skills are read from cv.md', real.skills.size > 10);

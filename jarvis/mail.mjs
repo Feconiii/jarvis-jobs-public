@@ -36,6 +36,7 @@ import path from 'path';
 import { randomBytes } from 'crypto';
 import { openDb } from './db.mjs';
 import { dbPath as storeDbPath, STORE_DIR } from './store.mjs';
+import { LINKEDIN_SEARCH, applyLinkedInEmails, isLinkedInMailSeen, linkedInMailSince, setLinkedInMailSince } from './linkedin-activity.mjs';
 
 export const SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -59,18 +60,23 @@ const RULES = [
   ['offer', /\b(pleased|delighted|happy|excited) to (extend|offer)\b|\boffer letter\b|\bformal offer\b|\bverbal offer\b/],
   // "This requisition has now been closed" (Applied Materials, 2026-08-29 and
   // 2026-09-09) is a no to that application, however warmly it is worded.
-  ['rejection', /\brequisition has (?:now )?been (?:closed|cancell?ed)\b|\bposition (?:has been|is now|was) (?:closed|cancell?ed)\b|\bunfortunately\b|\bnot (to )?(be )?mov(e|ing) forward\b|\bdecided (not to|to not) (move|proceed)|\b(pursue|move forward with|proceed with) other candidates\b|\bother candidates\b.{0,80}\b(closely|better) (match|align)|\bno longer (being )?considered\b|\bposition (has been|was|is now) filled\b|\bnot been selected\b|\bwere not selected\b|\bregret to inform\b|\bdifferent direction\b|\bwill not be (moving|proceeding)\b|\bunable to proceed with your application\b|\bdo(?:es)? not (?:currently )?meet the (?:minimum )?(?:criteria|qualifications|requirements)\b/],
-  ['interview', /\b(schedule|book|set up|arrange|find a time for)\b.{0,50}\b(interview|call|chat|conversation|phone screen|video call)\b|\binterview (invitation|request)\b|\binvite you to (an? )?(interview|call|phone screen)\b|\bavailability for (an? )?(interview|call|chat)\b|\bphone screen\b|\bnext (step|round) (is|will be) (an? )?(interview|call)\b/],
+  // "We are moving forward with another applicant for this role" (Applied
+  // Materials, 2026-10-12) read as a receipt (F-718).
+  ['rejection', /\brequisition has (?:now )?been (?:closed|cancell?ed)\b|\bposition (?:has been|is now|was) (?:closed|cancell?ed)\b|\bunfortunately\b|\bnot (to )?(be )?mov(e|ing) forward\b|\bdecided (not to|to not) (move|proceed)|\b(pursue|mov(e|ing) forward with|proceed(ing)? with|progress(ing)? with|go(ing)? (ahead )?with|continu(e|ing) with) (other|another) (candidates?|applicants?)\b|\bother candidates\b.{0,80}\b(closely|better) (match|align)|\bno longer (being )?considered\b|\bposition (has been|was|is now) filled\b|\bnot been selected\b|\bwere not selected\b|\bregret to inform\b|\bdifferent direction\b|\bwill not be (moving|proceeding)\b|\bunable to proceed with your application\b|\bdo(?:es)? not (?:currently )?meet the (?:minimum )?(?:criteria|qualifications|requirements)\b/],
+  ['interview', /\b(schedule|book|set up|arrange|find a time for)\b.{0,50}\b(interview|call|chat|conversation|phone screen|video call)\b|\binterview (invitation|request)\b|\binvite you to (an? )?(interview|call|phone screen)\b|\bavailability for (an? )?(interview|call|chat)\b|\bphone screen\b|\bnext (step|round) (is|will be) (an? )?(interview|call)\b|\binterview confirmation\b|\bconfirm(ing|ed)? (your|the) interview\b|\b(1st|2nd|3rd|first|second|final|onsite|on-site|panel) (round )?interview\b|\bmaking it to the next round\b/],
   ['assessment', /\b(online|technical|skills?) assessment\b|\bhackerrank\b|\bcodesignal\b|\bcodility\b|\bhirevue\b|\btake[- ]home\b|\bcomplete (the|a|this|your) (assessment|test|challenge|questionnaire)\b/],
-  ['received', /\bthank(s| you) for (applying|your application|submitting your application)\b|\b(we('ve| have)|has been) received your application\b|\bapplication (has been )?(received|submitted)\b|\bapplication confirmation\b|\bsuccessfully (submitted|applied)\b|\bthank you for your interest in\b/],
+  // "We received your job application for Mechanical Design Engineer - 40738"
+  // (Nokia and Ralliant on Oracle, 2026-10-16) matched nothing: no "have", and
+  // "job" between "your" and "application". Both cards stayed in Tracking.
+  ['received', /\bthank(s| you) for (applying|your application|submitting your application)\b|\b(we('ve| have)?|has been) received your (job )?application\b|\byour recent job application for\b|\bapplication (has been )?(received|submitted)\b|\bapplication confirmation\b|\bsuccessfully (submitted|applied)\b|\bthank you for your interest in\b/],
 ];
 
 const APPLICATION_CONTEXT = /\b(?:your (?:job )?application|(?:for|of) applying|you applied|applied (?:for|to)|application (?:for|to|update|status|received|confirmation)|your candidacy|your interest in (?:the|our|joining|working|a)\b|requisition|job id|hiring team|talent acquisition|recruiting team|recruitment team)\b/;
 const STANDS_ALONE = {
-  rejection: /\bnot (?:to )?(?:be )?mov(?:e|ing) forward\b|\b(?:pursue|move forward with|proceed with) other candidates\b|\bno longer (?:being )?considered\b|\bnot been selected\b|\bwere not selected\b|\brequisition has (?:now )?been (?:closed|cancell?ed)\b/,
+  rejection: /\bnot (?:to )?(?:be )?mov(?:e|ing) forward\b|\b(?:pursue|mov(?:e|ing) forward with|proceed(?:ing)? with|progress(?:ing)? with|go(?:ing)? (?:ahead )?with|continu(?:e|ing) with) (?:other|another) (?:candidates?|applicants?)\b|\bno longer (?:being )?considered\b|\bnot been selected\b|\bwere not selected\b|\brequisition has (?:now )?been (?:closed|cancell?ed)\b/,
   offer: /\boffer letter\b|\bformal offer\b|\bverbal offer\b|\boffer of employment\b|\bextend (?:you )?(?:an? )?(?:formal |verbal )?offer\b/,
 };
-const INVITES_HIM =/\b(?:we|i)(?:'d| would) (?:like|love) to (?:schedule|set up|book|arrange|invite|speak|chat|talk|meet)\b|\binvite you\b|\byour availability\b/;
+const INVITES_HIM =/\b(?:we|i)(?:'d| would) (?:like|love) to (?:schedule|set up|book|arrange|invite|speak|chat|talk|meet)\b|\binvite you\b|\byour availability\b|\binterview confirmation\b|\bconfirm(?:ing|ed)? your interview\b|\bmaking it to the next round\b/;
 
 /** @returns {'offer'|'rejection'|'interview'|'assessment'|'received'|null} */
 export function classifyMessage({ subject = '', body = '' } = {}) {
@@ -78,6 +84,13 @@ export function classifyMessage({ subject = '', body = '' } = {}) {
   // Site Update" (sign-in options turned off) said "thank you for your interest"
   // and read as a receipt.
   if (/\b(?:site update|newsletter|webinar|sign[- ]?in option|reset your password|verify your email|talent community|job alert|jobs? (?:for you|you may like)|recommended jobs)\b/i.test(subject)) return null;
+  // AN APPLICATION NOT FINISHED IS NOT A RECEIPT (F-739). "Continue to apply for
+  // the job Design Engineer 1" (Denso, Cummins, Dell), "Complete your
+  // application" (HPE), "Your Amazon job application is incomplete!" and
+  // Amazon's "Keep track of your application" — sent when he STARTS one —
+  // were read as "received" and could move a card to Applied. His rule,
+  // 2026-10-16: no confirmation email means he did not apply.
+  if (/\b(?:continue to apply|complete your (?:job )?application|finish your application|application (?:is|was) incomplete|incomplete (?:job )?application|keep track of your application|verify your candidate account|complete setup for your candidate account)\b/i.test(subject)) return null;
   const text = `${subject}\n${body}`.toLowerCase().replace(/\s+/g, ' ').slice(0, 8000);
   // NOT ABOUT AN APPLICATION, NOT A VERDICT ON ONE (F-541). A month of his inbox
   // read as five "rejections", an "offer" and an "interview" that were a storage
@@ -214,6 +227,94 @@ export function roleWords(title, location = '') {
 }
 
 /**
+ * ONE ROLE, WHEREVER AND HOWEVER OFTEN IT IS POSTED (2026-09-26).
+ *
+ * "theres some duplicate roles in the applications tab". Measured that day:
+ * Amazon's "Robotics Systems Engineer I, Tech Deployment" was five rows —
+ * five requisitions in Boston, Austin and North Reading, with a receipt for
+ * three of them — and Intuitive's "Manufacturing Engineer" two requisitions in
+ * Sunnyvale, both applied. None is a copy of another; each is its own
+ * application. What was wrong was drawing them as five identical lines. The
+ * sheet folds rows with this key into one line that expands to the postings.
+ *
+ * Company and the role's own words, with location and filler out: the same
+ * test the receipt matcher uses, so the sheet and the mail agree on what "the
+ * same role" means. A title with no role words left keys on its id, alone.
+ */
+/**
+ * The posting numbers in a card's link: 10418150, R2627688 → 2627688, 744000144811119.
+ *
+ * Not a LinkedIn link's (2026-10-01): its number is LinkedIn's listing, not the
+ * employer's requisition, so WeRide's Lever posting and LinkedIn's copy of it
+ * read as two requisitions and both receipts stayed unsure. A Lever or Ashby
+ * posting id is a UUID, one id — the digit runs inside it ("82955" in
+ * 82955de9-…) are not numbers.
+ */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const isLinkedIn = (j) => /(?:^|\/\/|\.)linkedin\.com\//i.test(String(j?.url || ''));
+function urlIds(job) {
+  if (isLinkedIn(job)) return new Set();
+  const url = String(job?.url || '');
+  const uuids = (url.match(UUID_RE) || []).map((u) => u.toLowerCase());
+  return new Set([...uuids, ...(url.replace(UUID_RE, ' ').match(/\d{5,}/g) || [])]);
+}
+
+/**
+ * LINKEDIN'S COPY OF A POSTING HE HAS ON THE BOARD (2026-10-01).
+ *
+ * "the same job i applied to is still on my list": WeRide's Application
+ * Engineer was a Lever card he applied to and the LinkedIn import of the same
+ * posting, still in Tracking. The copy is the same job, so it is not a second
+ * application for a receipt to choose between, and once the board card is
+ * applied it leaves his list (pointed at the board card, the way dedupe.mjs
+ * points a second spelling at its survivor — nothing deleted).
+ *
+ * Strict, because "Manufacturing Engineer" is one role word: the same company
+ * and role words, the LinkedIn card's city in the board card's location, and
+ * exactly one board card that fits.
+ *
+ * @returns Map(copyId → the board card it copies)
+ */
+const cityOf = (loc) => String(loc || '').split(/[,;(]/)[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const spaced = (s) => ` ${String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+// The company and the role's own words, location and filler out.
+const copyKey = (j) => {
+  const words = roleWords(j?.title, j?.location);
+  return words.length ? `${companyCore(j?.company)}|${[...words].sort().join(' ')}` : '';
+};
+export function linkedInCopies(jobs) {
+  const out = new Map();
+  const boards = (jobs || []).filter((j) => !isLinkedIn(j));
+  for (const li of (jobs || []).filter(isLinkedIn)) {
+    const key = copyKey(li);
+    const city = cityOf(li.location);
+    if (!key || !city) continue;
+    const hits = boards.filter((b) => copyKey(b) === key && spaced(b.location).includes(` ${city} `));
+    if (hits.length === 1) out.set(li.id, hits[0]);
+  }
+  return out;
+}
+
+/**
+ * The requisition numbers an email states AS an id — "(ID: 10418150)",
+ * "R2627688", "Job ID 3168805", "Req #44141434" — and not every long number in
+ * it, which would include zip codes and phone numbers.
+ */
+export function emailReqIds(text) {
+  const t = String(text || '');
+  const out = new Set();
+  for (const m of t.matchAll(/\b(?:job\s*id|req(?:uisition)?(?:\s*(?:id|number|no\.?))?|id)\s*[:#]?\s*(?:[A-Z]{1,3}-?)?(\d{5,})\b/gi)) out.add(m[1]);
+  for (const m of t.matchAll(/\b(?:R|JR|REQ)-?(\d{6,})\b/g)) out.add(m[1]);
+  return out;
+}
+
+export function sameRoleKey(job) {
+  const words = roleWords(job?.title, job?.location);
+  if (!words.length) return `id:${job?.id || ''}`;
+  return `${companyCore(job?.company)}|${[...words].sort().join(' ')}`;
+}
+
+/**
  * One card out of several equally good ones, or null. The same job saved twice
  * (Lam's Mechanical Engineer 2 under one req number; Sunday's board page and its
  * application page) is ONE application: the copy furthest along wins, then the
@@ -223,6 +324,15 @@ const STAGE = { new: 0, hidden: 0, inbox: 1, interested: 2, queued: 3, applied: 
 function pickOne(jobs) {
   if (!jobs.length) return null;
   if (jobs.length === 1) return jobs[0];
+  // TWO REQUISITIONS ARE TWO APPLICATIONS, however alike the titles (2026-09-26).
+  // Amazon's Tech Deployment role is five requisitions he applied to in three
+  // cities; "the copy furthest along" sent every receipt to one of them.
+  const reqs = jobs.map(urlIds).filter((s) => s.size);
+  for (let i = 0; i < reqs.length; i += 1) {
+    for (let k = i + 1; k < reqs.length; k += 1) {
+      if (![...reqs[i]].some((n) => reqs[k].has(n))) return null;
+    }
+  }
   const same = new Set(jobs.map((j) => roleWords(j.title, j.location).sort().join(' ')));
   const advanced = jobs.filter((j) => (STAGE[j.status] ?? 0) >= 4);
   if (same.size !== 1 && advanced.length !== 1) return null;
@@ -271,12 +381,29 @@ export function matchMessage(msg, jobs) {
   const fromDomain = String(msg.fromEmail || '').split('@')[1] || '';
   const at = { fromName: String(msg.fromName || ''), fromDomain, subject: String(msg.subject || '') };
   const scoredCo = jobs.map((j) => ({ j, len: companyAppears(j.company, at) })).filter((x) => x.len > 0);
-  if (!scoredCo.length) return null;
+  if (!scoredCo.length) {
+    // NO COMPANY NAMED, ONLY THE REQUISITION (2026-10-16). Oracle tenants send
+    // "Your recent job application for Associate Mechanical Engineer I - 10698"
+    // from ibwujb.fa.sender@workflow…oraclecloud.com — Ralliant appears
+    // nowhere. The requisition in the email, on exactly one of his cards, is
+    // that application.
+    const stated = emailReqIds(`${msg.subject || ''}\n${String(msg.body || '').slice(0, 2500)}`);
+    // …and Oracle's "<role> - 10698": a bare number in the SUBJECT, not a year.
+    for (const n of String(msg.subject || '').match(/\b\d{5,8}\b/g) || []) if (!/^(19|20)\d\d$/.test(n)) stated.add(n);
+    if (stated.size) {
+      const byReq = jobs.filter((j) => [...urlIds(j)].some((n) => stated.has(n)));
+      if (byReq.length === 1) return { jobId: byReq[0].id, company: byReq[0].company, why: `the requisition in the email (${[...stated][0]}), no company named` };
+    }
+    return null;
+  }
   // The longest name that matched wins: "Applied Intuition" is not "Applied Materials".
   const best = Math.max(...scoredCo.map((x) => x.len));
-  const atCompany = scoredCo.filter((x) => x.len === best).map((x) => x.j)
+  const found = scoredCo.filter((x) => x.len === best).map((x) => x.j)
     // …and one company at a time: two employers cannot share one email.
     .filter((j, _, arr) => companyCore(j.company) === companyCore(arr[0].company));
+  // LinkedIn's copy of a board card is that card, not another application.
+  const copies = linkedInCopies(found);
+  const atCompany = found.filter((j) => !copies.has(j.id));
   const company = atCompany[0].company;
   const named = roleNamed(msg);
   if (atCompany.length === 1) {
@@ -291,6 +418,28 @@ export function matchMessage(msg, jobs) {
   // Several applications at one company: the role's own words in the subject
   // and the opening of the body, or its req number.
   const text = `${msg.subject}\n${String(msg.body || '').slice(0, 2500)}`.toLowerCase();
+
+  // THE REQUISITION THE EMAIL STATES outranks the title it names (2026-09-26).
+  // Amazon's "Tech Deployment (ID: 10418150)" receipt went to the 10503216 card
+  // because five cards share that title and the title was read first.
+  const stated = emailReqIds(`${msg.subject}\n${String(msg.body || '').slice(0, 2500)}`);
+  if (stated.size) {
+    const byReq = atCompany.filter((j) => [...urlIds(j)].some((n) => stated.has(n)));
+    if (byReq.length === 1) return { jobId: byReq[0].id, company, why: `the requisition in the email (${[...stated][0]})` };
+    // An id that is none of his cards': the title may match a card, but that
+    // card is a different requisition. Left unsure, so the off-board lookup can
+    // find the posting the email is really about.
+    if (!byReq.length && named) {
+      const sameTitle = atCompany.filter((j) => {
+        const want = roleWords(named, j.location);
+        const have = roleWords(j.title, j.location);
+        return want.length && want.every((w) => have.includes(w));
+      });
+      if (sameTitle.length && sameTitle.every((j) => urlIds(j).size)) {
+        return { unsure: sameTitle.map((j) => j.id), company, named, why: `the email names requisition ${[...stated][0]}, which is none of your ${company} cards` };
+      }
+    }
+  }
 
   // THE ROLE THE EMAIL NAMES, compared with each card's title once the location
   // and filler are taken out of both (first real sync, 2026-09-17). "Gas Systems
@@ -348,6 +497,104 @@ export function nextStatus(current, kind) {
   if (target === 'rejected') return current === 'rejected' || current === 'offer' ? null : 'rejected';
   if (current === 'rejected') return null;
   return (RANK[target] ?? -1) > (RANK[current] ?? -1) ? target : null;
+}
+
+/**
+ * THE APPLICATION HE FILLED JUST BEFORE THE RECEIPT (2026-09-24).
+ *
+ * "Thank you for applying to Peak Energy" names no role, and he had two cards
+ * there; OpenAI sent two such receipts against three cards. Each stayed unsure,
+ * and the cards he had really applied to sat in Interested. But the engine
+ * records when it filled each form (applied_at), he presses Submit minutes
+ * later, and the receipt follows seconds after. So among the cards the email
+ * could be about, the one filled most recently before it — within three days,
+ * and not already marked applied or later — is the application it confirms.
+ * Receipts only: a rejection or an interview says nothing about when he
+ * applied.
+ *
+ * @param ids        the card ids the email could be about
+ * @param jobs       the store's cards ({ id, appliedAt | apply.at })
+ * @param date       the email's date (ISO)
+ * @param getStatus  (id) => current status
+ */
+const FILL_WINDOW_MS = 3 * 86400e3;
+const BEFORE_APPLIED = new Set(['', 'new', 'inbox', 'interested', 'queued']);
+export function pickByFill(ids, jobs, date, getStatus) {
+  const t = Date.parse(date || '');
+  if (!t) return null;
+  const want = new Set((ids || []).map(String));
+  const filled = jobs.filter((j) => want.has(String(j.id)))
+    .map((j) => ({ j, at: Date.parse(j.appliedAt || j.apply?.at || j.applied_at || ''), status: String(getStatus(j.id) || '') }))
+    // A minute of clock skew between his machine and the mail server.
+    .filter((x) => x.at && x.at <= t + 60e3 && t - x.at <= FILL_WINDOW_MS)
+    .sort((a, b) => b.at - a.at);
+  const ago = (x) => { const mins = Math.max(0, Math.round((t - x.at) / 60e3)); return mins < 90 ? `${mins} min` : `${Math.round(mins / 60)} h`; };
+  const cands = filled.filter((x) => BEFORE_APPLIED.has(x.status));
+  if (cands.length) return { job: cands[0].j, why: `the application you filled ${ago(cands[0])} before this email` };
+  // ALREADY MARKED APPLIED (2026-10-01). The page he submitted on often marks
+  // the card itself, so by the time the receipt is read the card it confirms is
+  // no longer "before applied" — WeRide's was marked the second the email came,
+  // Neuralink's, Gotion's and Lab37's a minute before. Such a receipt moves
+  // nothing; it is tied to that card so it stops reading as unsure. Tighter
+  // than the three days above, because nothing is being decided: filled
+  // within two hours of the email, and no other card filled within half an
+  // hour of it.
+  const done = filled.filter((x) => x.status !== 'rejected' && (STAGE[x.status] ?? 0) >= 4 && t - x.at <= SUBMIT_WINDOW_MS);
+  if (done.length && (done.length === 1 || done[0].at - done[1].at > 30 * 60e3)) {
+    return { job: done[0].j, why: `the application you sent ${ago(done[0])} before this email` };
+  }
+  return null;
+}
+const SUBMIT_WINDOW_MS = 2 * 3600e3;
+
+/**
+ * Receipts left unsure by an older matcher, decided again with pickByFill.
+ * Oldest first, so the second of two same-day receipts finds the first card
+ * already applied and takes the other one.
+ */
+export function resolveUnsure(store, { dbPath } = {}) {
+  const h = db(dbPath);
+  const rows = h.prepare("SELECT * FROM mail_events WHERE kind = 'received' AND job_id = '' AND unsure != '' ORDER BY sent_at ASC").all();
+  if (!rows.length) return [];
+  const jobs = store.jobs();
+  const fix = h.prepare('UPDATE mail_events SET job_id = ?, from_status = ?, to_status = ?, unsure = ?, why = ? WHERE msg_id = ?');
+  const moved = [];
+  for (const e of rows) {
+    const pick = pickByFill(e.unsure.split(','), jobs, e.sent_at, store.getStatus);
+    if (!pick) continue;
+    const from = store.getStatus(pick.job.id);
+    const to = nextStatus(from, 'received');
+    if (to) store.setStatus(pick.job.id, to);
+    fix.run(String(pick.job.id), from || '', to || '', '', pick.why, e.msg_id);
+    if (to) moved.push({ jobId: pick.job.id, company: e.company, kind: 'received', from, to, subject: e.subject });
+  }
+  return moved;
+}
+
+/**
+ * LinkedIn copies still on his list whose board card he has applied to (see
+ * linkedInCopies). Pure: the pairs, nothing written.
+ */
+export function appliedCopies(jobs, getStatus = (id) => jobs.find((j) => j.id === id)?.status) {
+  const out = [];
+  const byId = new Map(jobs.map((j) => [j.id, j]));
+  for (const [copyId, keep] of linkedInCopies(jobs)) {
+    const copyStatus = String(getStatus(copyId) || '');
+    const keepStatus = String(getStatus(keep.id) || '');
+    if (keepStatus === 'hidden' || (STAGE[keepStatus] ?? 0) < 4 || !BEFORE_APPLIED.has(copyStatus)) continue;
+    out.push({ copy: byId.get(copyId), keep });
+  }
+  return out;
+}
+
+/** …and each one pointed at its board card, off his list. Nothing is deleted. */
+export function foldAppliedCopies(store, { dbPath } = {}) {
+  const pairs = appliedCopies(store.jobs(), store.getStatus);
+  if (!pairs.length) return [];
+  let mark;
+  try { mark = db(dbPath).prepare('UPDATE jobs SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL'); } catch { return []; }
+  return pairs.filter((p) => mark.run(String(p.keep.id), String(p.copy.id)).changes)
+    .map((p) => ({ copyId: p.copy.id, keepId: p.keep.id, company: p.keep.company, title: p.keep.title }));
 }
 
 // ── the event ledger ─────────────────────────────────────────────────
@@ -423,6 +670,10 @@ export function applyMessages(messages, store, { dbPath, now = new Date() } = {}
     if (match.unsure && 'named' in match && typeof store.jobsAtCompany === 'function') {
       const found = matchOffBoard(m, match.named, store.jobsAtCompany(match.company));
       if (found) match = found;
+    }
+    if (match.unsure && kind === 'received') {
+      const byFill = pickByFill(match.unsure, jobs, m.date, store.getStatus);
+      if (byFill) match = { jobId: byFill.job.id, company: match.company, why: byFill.why };
     }
     if (match.unsure) {
       put.run(m.id, '', match.company, kind, m.subject || '', sender, m.date || null, snippet, '', '', match.unsure.join(','), match.why, now.toISOString());
@@ -515,7 +766,17 @@ async function accessToken({ dir, fetchImpl = fetch }) {
     body: new URLSearchParams({ client_id: client.client_id, client_secret: client.client_secret, refresh_token: token.refresh_token, grant_type: 'refresh_token' }),
   });
   const j = await r.json();
-  if (!r.ok || !j.access_token) throw new Error(`Gmail refused the saved connection (${j.error || r.status}) — connect it again`);
+  // invalid_grant SEVEN DAYS AFTER CONNECTING IS GOOGLE'S RULE, NOT A BUG
+  // (2026-09-24: connected 09-17, refused 09-24). An OAuth app left in
+  // "Testing" gets refresh tokens that expire after 7 days. Say so, and say
+  // the one setting that stops it, instead of a bare "connect it again".
+  if (!r.ok || !j.access_token) {
+    if (j.error === 'invalid_grant') {
+      throw new Error('Gmail refused the saved connection (invalid_grant). Google expires the connection every 7 days while your Google Cloud app is in "Testing" — '
+        + 'connect it again, and to stop it recurring set Google Cloud → APIs & Services → OAuth consent screen → Publishing status to "In production".');
+    }
+    throw new Error(`Gmail refused the saved connection (${j.error || r.status}) — connect it again`);
+  }
   return j.access_token;
 }
 
@@ -550,13 +811,63 @@ export function parseGmailMessage(m) {
 }
 
 /**
+ * A DROPPED CONNECTION IS RETRIED, NOT RECORDED AS THE DAY'S RESULT (F-717,
+ * 2026-10-09). Node reports any network failure as a bare "fetch failed"; one
+ * Wi-Fi blip or a machine waking from sleep cost every half-hourly sync from
+ * 6 AM to 11 AM while Google itself was fine. A request that never got an
+ * answer is tried twice more, a few seconds apart. Google's own refusals
+ * (an HTTP status) are answers and are never retried here.
+ *
+ * The answer includes its BODY (F-725). A connection that drops after the
+ * headers fails in `r.json()` with "terminated", not in fetch(); retrying
+ * only the fetch let that one through to the half-hour wait. So the body is
+ * read here, inside the retry, and handed back already read.
+ */
+export function withNetRetry(fetchImpl, { tries = 3, delays = [2000, 6000], sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  return async (...args) => {
+    for (let i = 0; ; i++) {
+      try {
+        const r = await fetchImpl(...args);
+        const body = typeof r.text === 'function' ? await r.text() : typeof r.json === 'function' ? JSON.stringify(await r.json()) : '';
+        return { ok: r.ok, status: r.status, headers: r.headers, text: async () => body, json: async () => JSON.parse(body) };
+      } catch (e) {
+        if (i >= tries - 1 || !isNetworkError(e)) throw e;
+        await sleep(delays[Math.min(i, delays.length - 1)]);
+      }
+    }
+  };
+}
+
+/**
+ * A request that never got a whole answer: no connection ("fetch failed"),
+ * one cut mid-body ("terminated"), a socket reset or a timeout. An HTTP
+ * status, or a reply that is not JSON, is an answer and is not one of these.
+ */
+const NET_CODES = /^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EPIPE|UND_ERR_\w+)$/;
+export function isNetworkError(e) {
+  if (!e) return false;
+  if (e.name === 'AbortError' || e.name === 'TimeoutError') return true;
+  if (NET_CODES.test(String(e.code || e.cause?.code || ''))) return true;
+  return e.name === 'TypeError' && /fetch failed|terminated|network|socket/i.test(String(e.message || ''));
+}
+
+/** "fetch failed" says nothing; its cause (ENOTFOUND, ECONNRESET, ETIMEDOUT…) does. */
+export function netErrorText(e) {
+  const msg = String(e?.message || e);
+  const cause = e?.cause?.code || e?.cause?.message || '';
+  if (isNetworkError(e)) return `could not reach Google${cause ? ` (${cause})` : msg && !/fetch failed/i.test(msg) ? ` (${msg})` : ''}: the network dropped; the next check retries`;
+  return msg;
+}
+
+/**
  * Fetch what is new since the last sync (or the last `days`), apply it, and
  * record the result. Never throws: the failure is the result.
  */
-export async function syncMail(store, { dir, dbPath, days = 60, fetchImpl = fetch, maxMessages = 400 } = {}) {
+export async function syncMail(store, { dir, dbPath, days = 60, fetchImpl: rawFetch = fetch, maxMessages = 400, retry = {} } = {}) {
   const f = files(dir);
   const state = readJson(f.state) || {};
   const started = new Date();
+  const fetchImpl = withNetRetry(rawFetch, retry);
   try {
     const token = await accessToken({ dir, fetchImpl });
     const auth = { headers: { authorization: `Bearer ${token}` } };
@@ -582,10 +893,44 @@ export async function syncMail(store, { dir, dbPath, days = 60, fetchImpl = fetc
       messages.push(parseGmailMessage(await r.json()));
     }
     const result = applyMessages(messages, store, { dbPath });
-    writeJson(f.state, { lastSyncAt: started.toISOString(), lastResult: { read: result.read, moved: result.moved.length, unsure: result.unsure.length }, lastError: '' });
-    return { ok: true, ...result };
+    result.moved.push(...resolveUnsure(store, { dbPath }));
+    result.folded = foldAppliedCopies(store, { dbPath });
+
+    // LINKEDIN'S EMAILS, a separate search: they sit in Gmail's Social tab,
+    // which the application search above leaves out on purpose. Accepted
+    // invitations and InMail replies tie to the Outreach tab's people
+    // (linkedin-activity.mjs). A failure here never costs the application sync.
+    let linkedin = null;
+    try {
+      const liSince = linkedInMailSince();
+      const after = liSince ? Math.floor(Date.parse(liSince) / 1000) - 86400 : Math.floor(Date.now() / 1000) - 90 * 86400;
+      const liIds = []; let lpt = '';
+      do {
+        const q = new URLSearchParams({ q: `${LINKEDIN_SEARCH} after:${after}`, maxResults: '100', ...(lpt ? { pageToken: lpt } : {}) });
+        const r = await fetchImpl(`${API}/messages?${q}`, auth);
+        const j = await r.json();
+        if (!r.ok) throw new Error(`Gmail search failed (${j.error?.message || r.status})`);
+        for (const m of j.messages || []) liIds.push(m.id);
+        lpt = j.nextPageToken || '';
+      } while (lpt && liIds.length < maxMessages);
+      const liMessages = [];
+      for (const id of liIds.slice(0, maxMessages)) {
+        if (isLinkedInMailSeen(id)) continue;
+        const r = await fetchImpl(`${API}/messages/${id}?format=full`, auth);
+        if (r.ok) liMessages.push(parseGmailMessage(await r.json()));
+      }
+      linkedin = applyLinkedInEmails(liMessages);
+      setLinkedInMailSince(started.toISOString());
+    } catch (e) {
+      linkedin = { error: String(e?.message || e) };
+    }
+
+    writeJson(f.state, { lastSyncAt: started.toISOString(), lastResult: { read: result.read, moved: result.moved.length, unsure: result.unsure.length, linkedin: linkedin?.error ? 0 : (linkedin?.tied || 0) }, lastError: linkedin?.error ? `LinkedIn emails: ${linkedin.error}` : '' });
+    return { ok: true, ...result, linkedin };
   } catch (e) {
-    writeJson(f.state, { ...state, lastError: String(e?.message || e), lastErrorAt: started.toISOString() });
-    return { ok: false, error: String(e?.message || e), read: 0, moved: [], unsure: [] };
+    const error = netErrorText(e);
+    const network = isNetworkError(e);
+    writeJson(f.state, { ...state, lastError: error, lastErrorAt: started.toISOString() });
+    return { ok: false, error, network, read: 0, moved: [], unsure: [] };
   }
 }

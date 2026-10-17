@@ -1,7 +1,7 @@
 // Tests for the two checks that decide whether a discovered ATS board is
 // really the company we asked for. Both exist because of real failures.
 
-import { nameEvidence, slugCandidates, isCareersHomePayload } from './discover-ats.mjs';
+import { nameEvidence, slugCandidates, isCareersHomePayload, leverCaseVariants, isBambooPlaceholder } from './discover-ats.mjs';
 
 let pass = 0, fail = 0;
 function check(label, got, want) {
@@ -226,6 +226,9 @@ check('reads a Workday triple, localisation segment and all',
 check('the API path prefix is not a site id',
   workdayLinksIn('https://kla.wd1.myworkdayjobs.com/wday/cxs/kla/Search/jobs'), []);
 check('no Workday link, no result', workdayLinksIn('<p>we are hiring</p>'), []);
+check('the host-first form is read too (Magna, 2026-10-04)',
+  workdayLinksIn('<a href="https://wd3.myworkdaysite.com/recruiting/magna/Magna">Jobs</a>'),
+  [{ tenant: 'magna', instance: 'wd3', site: 'Magna' }]);
 
 // The curated sites must be usable as-is: resolveViaCareersPage builds a URL
 // from each one, and a value it cannot parse is a silent no-op.
@@ -383,4 +386,37 @@ console.log('🧪 the branded iCIMS careers-home board (F-454)');
 
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
+// Lever slugs are case-sensitive: `PhoenixTailings` is a board, `phoenixtailings` a 404.
+check('Lever: the company\'s own capitalisation is tried after the lowercase slug',
+  leverCaseVariants('phoenixtailings', 'Phoenix Tailings'), ['phoenixtailings', 'PhoenixTailings']);
+check('…as written, and word-capitalised when written lowercase',
+  leverCaseVariants('kaptaspace', 'kapta space'), ['kaptaspace', 'KaptaSpace']);
+check('…never another spelling (a fragment slug gets no variant)',
+  leverCaseVariants('phoenix', 'Phoenix Tailings'), ['phoenix']);
+
+console.log('\n🧪 discover-ats: BambooHR placeholder board (F-637)');
+// Verbatim shape of what culture./curative./andai./xylem./mte.bamboohr.com all returned on 2026-10-01.
+const placeholder = [
+  { id: '15', jobOpeningName: 'IT Security Engineer', departmentLabel: 'IT', location: { city: 'Mayfair', state: 'London, City of' } },
+  { id: '20', jobOpeningName: 'Software Engineer', location: { city: 'Berlin' } },
+];
+check('the shared demo board is no board', isBambooPlaceholder(placeholder), true);
+check('a real board with an IT Security Engineer elsewhere is kept',
+  isBambooPlaceholder([{ id: '15', jobOpeningName: 'IT Security Engineer', location: { city: 'Denver', state: 'Colorado' } }]), false);
+check('a real engineering board is kept',
+  isBambooPlaceholder([{ id: '42', jobOpeningName: 'Mechanical Engineer', location: { city: 'Wichita', state: 'Kansas' } }]), false);
+
+console.log('\n🧪 discover-ats: websites a company published, for --names (F-657)');
+{
+  const { parseSitesFile } = await import('./discover-ats.mjs');
+  const m = parseSitesFile(JSON.stringify([
+    { name: 'NASA Jet Propulsion Laboratory', site: 'https://www.jpl.nasa.gov/' },
+    { name: 'Vertex Pharmaceuticals', site: 'https://www.vrtx.com/about?x=1' },
+    { name: 'Bad', site: 'javascript:alert(1)' },
+    { name: '', site: 'https://nameless.example' },
+  ]));
+  check('looked up by lower-cased name, reduced to the origin',
+    [...m], [['nasa jet propulsion laboratory', 'https://www.jpl.nasa.gov'], ['vertex pharmaceuticals', 'https://www.vrtx.com']]);
+  check('a file that is not JSON is no websites, not a crash', parseSitesFile('not json').size, 0);
+}
 process.exit(fail ? 1 : 0);

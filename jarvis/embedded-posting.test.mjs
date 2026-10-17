@@ -1,7 +1,7 @@
 // Tests for postings read out of a careers page's own data. The fixtures are
 // built in the exact shape Apple and Google served on 2026-09-20.
 
-import { applePosting, googlePosting, embeddedPosting } from './embedded-posting.mjs';
+import { applePosting, googlePosting, embeddedPosting, phenomPosting } from './embedded-posting.mjs';
 
 let pass = 0, fail = 0;
 function check(label, got, want) {
@@ -66,6 +66,21 @@ console.log('\n🧪 embedded-posting: the dispatcher');
   check('Apple page → Apple reader', embeddedPosting(applePage(APPLE)).title, 'Advanced Manufacturing Engineer');
   check('Google page → Google reader', embeddedPosting(googlePage(ROW)).title, 'Mechanical Engineer, Robotics, DeepMind');
   check('anything else → null', embeddedPosting('<html><body>Careers</body></html>'), null);
+}
+
+console.log('\n🧪 Phenom: the posting page\'s own record (2026-10-07)');
+{
+  // The shape careers.quest-global.com served: phApp.ddo carries the job.
+  const ddo = { siteConfig: { status: 'success' }, jobDetail: { status: 'success', data: { job: {
+    title: 'ATE Test Engineer', description: '<p><strong>Job Requirements</strong> {braces} and "quotes"</p>',
+    postedDate: '2026-10-01T00:00:00.000+0000', city: 'Andover', state: 'Massachusetts', country: 'United States', category: 'Engineering',
+  } } } };
+  const page = `<html><script>var phApp = phApp || {}; phApp.ddo = ${JSON.stringify(ddo)}; phApp.experimentData = {};</script></html>`;
+  const jp = phenomPosting(page);
+  check('title and description', [jp?.title, jp?.description.includes('{braces}')], ['ATE Test Engineer', true]);
+  check('where it is', jp?.jobLocation?.[0]?.address?.addressLocality, 'Andover');
+  check('embeddedPosting finds it too', embeddedPosting(page)?.title, 'ATE Test Engineer');
+  check('a home page (no job) gives nothing', phenomPosting('<script>phApp.ddo = {"siteConfig":{}};</script>'), null);
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

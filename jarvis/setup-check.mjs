@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // jarvis/setup-check.mjs — what is set up, what is missing, what still holds
-// the example's values. Claude runs this first on a new clone (see CLAUDE.md
-// and .claude/skills/jarvis-setup/SKILL.md) and asks only about what is left.
+// the example's values. The assistant runs this first on a new clone (see
+// AGENTS.md and .claude/skills/jarvis-setup/SKILL.md) and asks only about what is left.
 //
 // Usage: node jarvis/setup-check.mjs [--json]
 // Built-ins only, so it runs before `npm install`.
@@ -25,9 +25,12 @@ function check() {
   const major = Number(process.versions.node.split('.')[0]);
   add('node', major >= 24, `Node.js ${process.versions.node}`, 'install Node.js 24 or newer');
   add('deps', fs.existsSync(at('node_modules/js-yaml')), 'npm packages', 'npm install');
-  let claude = false;
-  try { execSync(process.platform === 'win32' ? 'where claude' : 'command -v claude', { stdio: 'ignore' }); claude = true; } catch { /* not on PATH */ }
-  add('claude', claude, 'Claude Code CLI (`claude`) for the writers and daily curation', 'install Claude Code and sign in once');
+  // The writers run on whichever assistant setup recorded (targeting.llm).
+  const llm = /^\s*llm:\s*["']?codex/m.test(read('config/profile.yml') || '') ? 'codex' : 'claude';
+  let cli = false;
+  try { execSync(process.platform === 'win32' ? `where ${llm}` : `command -v ${llm}`, { stdio: 'ignore' }); cli = true; } catch { /* not on PATH */ }
+  add('assistant', cli, llm === 'codex' ? 'Codex CLI (`codex`) for the writers and daily curation' : 'Claude Code CLI (`claude`) for the writers and daily curation',
+    llm === 'codex' ? 'install the Codex CLI, then `codex login` once' : 'install Claude Code and sign in once');
 
   const file = (key, p, what, fix, { minBytes = 1, check = null } = {}) => {
     const t = read(p);
@@ -37,16 +40,16 @@ function check() {
     return add(key, !extra, `${p} — ${what}${extra ? ` (${extra})` : ''}`, extra ? fix : '');
   };
 
-  file('cv', 'cv.md', 'your CV, the source of truth for everything written', 'build it with the user (skill: jarvis-setup, "Your CV")', { minBytes: 400 });
-  file('apply-profile', 'data/jarvis/apply-profile.yml', 'what forms are filled with', 'copy examples/apply-profile.example.yml and fill it with the user', {
+  file('cv', 'cv.md', 'your CV, the source of truth for everything written', 'convert their resume faithfully (AGENTS.md, first-run step 3)', { minBytes: 400 });
+  file('apply-profile', 'data/jarvis/apply-profile.yml', 'what forms are filled with', 'npm run jarvis:setup writes it; fill the rest with the user (examples/apply-profile.example.yml shows every key)', {
     check: (t) => (/^\s*email:\s*"?\s*"?\s*$/m.test(t) ? 'email is empty' : null),
   });
-  file('portals', 'portals.yml', 'the companies you track', 'copy examples/portals.example.yml, then run discovery', {
+  file('portals', 'portals.yml', 'the companies you track', 'npm run jarvis:setup -- --find-boards, then npm run jarvis:discover -- --names "A,B" --write', {
     check: (t) => ((t.match(/^\s*-\s*name:/gm) || []).length < 5 ? 'fewer than 5 companies tracked' : null),
   });
-  file('preferences', 'jarvis/preferences.md', 'your plain-English rules', 'copy examples/preferences.example.md and write the rules with the user');
-  file('profile', 'config/profile.yml', 'target roles and pay floor', 'copy config/profile.example.yml and fill it with the user');
-  file('resume-pool', 'jarvis/resume-pool.json', 'the resume bullet pool (verbatim from cv.md)', 'generate it from cv.md, then adjust resume-variants.mjs / resume-plan.mjs keys');
+  file('preferences', 'jarvis/preferences.md', 'your plain-English rules', 'npm run jarvis:setup writes starter rules; go through them with the user');
+  file('profile', 'config/profile.yml', 'who you are, your field, target roles and pay floor', 'npm run jarvis:setup (or the assistant-led setup in AGENTS.md)');
+  file('resume-pool', 'jarvis/resume-pool.json', 'the resume bullet pool (verbatim from cv.md)', 'build it from cv.md by following jarvis/RESUME-POOL.md');
 
   const db = fs.existsSync(at('data/jarvis/jobs.db'));
   add('store', db, 'a job store with at least one scan', 'npm run jarvis:scan');

@@ -149,17 +149,40 @@ export const NOT_RESUME_RE = /cover.?letter|portfolio|transcript|writing.?sample
  *
  * So the identifier is checked FIRST and it is decisive in both directions.
  */
+/**
+ * WHAT THE WORDS ABOVE A GENERIC SLOT CALL IT (Boom Supersonic's Rippling
+ * form, 2026-09-25). Both of its file inputs label as "Drop or select (.doc /
+ * .docx / .pdf)" — the résumé and the cover letter — and only the heading in
+ * the box says which: "Résumé*Total 0 file selected…" / "Cover letterTotal 0
+ * file selected…". With two identical slots nothing took the resume. Read only
+ * when the label itself names neither, and only the words the box OPENS with.
+ */
+export function slotNamedNear(field) {
+  const label = String(field?.label || '');
+  if (/\b(resume|résumé|cv)\b|cover.?letter/i.test(label)) return null;
+  const head = String(field?.near || '').trim().slice(0, 40);
+  if (/^(résumé|resume|cv)\b/i.test(head)) return 'resume';
+  if (COVER_LETTER_FIELD_RE.test(head.slice(0, 20))) return 'letter';
+  return null;
+}
+
 export function isResumeField(field) {
   const ident = `${field?.id || ''} ${field?.name || ''} ${field?.key || ''}`;
   const label = String(field?.label || '');
   if (NOT_RESUME_RE.test(ident)) return false;
   if (RESUME_FIELD_RE.test(ident)) return true;
+  const near = slotNamedNear(field);
+  if (near) return near === 'resume';
+  // "Resume/CV/Cover Letter" is ONE slot for both, and it is the resume's
+  // (Viavi, 2026-09-24) — the cover-letter word must not disqualify it.
+  if (/\b(resume|résumé|cv)\s*[/,&]|\b(resume|résumé|cv)\s+(and|or)\s+cover/i.test(label) && /cover.?letter/i.test(label)
+    && !/portfolio|transcript|writing.?sample|photo|passport|easy apply|auto-?fill|prefill/i.test(label)) return true;
   if (NOT_RESUME_RE.test(label)) return false;
   return RESUME_FIELD_RE.test(label) || !label.trim();
 }
 
 /** A slot that wants the cover letter as a file. */
-export const COVER_LETTER_FIELD_RE = /cover.?letter|covering.?letter|letter.?of.?(?:interest|motivation)|motivation.?letter/i;
+export const COVER_LETTER_FIELD_RE = /cover.?(?:letter|note)|covering.?letter|letter.?of.?(?:interest|motivation)|motivation.?letter/i;
 
 /**
  * Is this file input the COVER LETTER slot? (F-410)
@@ -175,6 +198,12 @@ export function isCoverLetterField(field) {
   const label = String(field?.label || '');
   if (COVER_LETTER_FIELD_RE.test(ident)) return true;
   if (RESUME_FIELD_RE.test(ident)) return false;
+  const near = slotNamedNear(field);
+  if (near) return near === 'letter';
+  // ONE SLOT FOR BOTH is the resume's. Viavi's Workday "Resume/CV/Cover Letter —
+  // Upload a file" got the cover letter and he attached the resume by hand
+  // (2026-09-24). A letter only goes where the slot asks for a letter alone.
+  if (/\b(resume|résumé|cv)\b/i.test(label)) return false;
   return COVER_LETTER_FIELD_RE.test(label);
 }
 
@@ -300,8 +329,12 @@ export const SITE_FURNITURE_SRC = `(el) => {
 
   // 3. No enclosing form at all, so judge by the names on the chain. This is
   //    where AGCO's job-alert widget lands — div#savesearch, sitting in a bare
-  //    div with no form around it.
-  for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+  //    div with no form around it. <body> is not on the chain: its classes
+  //    describe the PAGE, and SmartRecruiters' chat widget sets
+  //    "has-winston-chat-mobile-apply" there, which made every control
+  //    outside the form furniture — Western Digital's privacy consent box
+  //    went unticked and unreported (F-567, 2026-09-24).
+  for (let n = el; n && n !== document.documentElement && n !== document.body; n = n.parentElement) {
     if (named(n)) return true;
   }
   return false;
@@ -680,8 +713,77 @@ export function proficiencyRung(text) {
   return n ? Number(n[1]) : null;
 }
 
+/** A menu's empty entry: SuccessFactors' "No Selection", "Select…", "--". */
+export const PLACEHOLDER_OPTION_RE = /^\s*(no\s+selection|none\s+selected|nothing\s+selected|select|choose|please\s+(select|choose)|select\s+(one|an?\s+option|a\s+value)|choose\s+(one|an?\s+option)|-+|—)\s*[.:…-]*\s*$/i;
+
+/** Dollar amounts in a string: "$50, 000", "$90000/year", "80k", "$1.2M". */
+function amountsIn(s) {
+  const t = String(s || '').replace(/(\d)[,\s]+(?=\d{3}\b)/g, '$1');
+  const out = [];
+  for (const m of t.matchAll(/(\d+(?:\.\d+)?)\s*([km])?\b/gi)) {
+    let v = Number(m[1]);
+    if (/k/i.test(m[2] || '')) v *= 1000;
+    if (/m/i.test(m[2] || '')) v *= 1e6;
+    out.push(v);
+  }
+  return out;
+}
+
+/**
+ * The option whose range holds the amount `want` names, or -1. Money only:
+ * the want must be one amount of at least 1,000 (or carry a $), and two or
+ * more options must read as ranges — "A - B", "Under A", "A+ / A and above".
+ */
+export function moneyRangeIndex(want, options) {
+  const w = String(want || '');
+  const amounts = amountsIn(w);
+  if (amounts.length !== 1) return -1;
+  const W = amounts[0];
+  if (!(W >= 1000 || /\$/.test(w))) return -1;
+  const ranges = (options || []).map((o) => {
+    const t = String(o || '');
+    const a = amountsIn(t).filter((v) => v >= 100);
+    if (a.length >= 2) return [Math.min(a[0], a[1]), Math.max(a[0], a[1])];
+    if (a.length === 1 && /\b(under|below|less\s+than|up\s+to)\b|^\s*</i.test(t)) return [0, a[0]];
+    if (a.length === 1 && /\+|\b(above|over|more\s+than|or\s+more|and\s+up)\b|^\s*>/i.test(t)) return [a[0], Infinity];
+    return null;
+  });
+  if (ranges.filter(Boolean).length < 2) return -1;
+  // Inclusive both ends; where two share a boundary ($100,000 in "50–100" and
+  // "100–150") the lower range wins, the one that does not over-ask.
+  return ranges.findIndex((r) => r && W >= r[0] && W <= r[1]);
+}
+
+const STREET_ABBR = {
+  north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+  street: 'st', avenue: 'ave', road: 'rd', boulevard: 'blvd', drive: 'dr', lane: 'ln', court: 'ct', place: 'pl',
+  parkway: 'pkwy', highway: 'hwy', circle: 'cir', terrace: 'ter', way: 'way', square: 'sq', trail: 'trl',
+};
+const streetWords = (s) => String(s || '').toLowerCase().replace(/[.,#()]/g, ' ').split(/\s+/).filter(Boolean).map((t) => STREET_ABBR[t] || t);
+/** Which option is this street address (house number first), or -1. */
+function streetIndex(want, texts) {
+  const w = streetWords(want);
+  if (w.length < 3 || !/^\d+[a-z]?$/.test(w[0]) || !w.slice(1).some((t) => Object.values(STREET_ABBR).includes(t))) return -1;
+  const hits = [];
+  texts.forEach((t, i) => {
+    if (!t) return;
+    const lead = streetWords(String(t).split(',')[0]);
+    if (lead.length === w.length && lead.every((x, k) => x === w[k])) hits.push(i);
+  });
+  if (!hits.length) return -1;
+  const plain = hits.find((i) => !/\b(apt|unit|suite|ste|#)\b/i.test(texts[i]));
+  return plain ?? hits[0];
+}
+
 export function chooseOption(want, options) {
-  const texts = (options || []).map((t) => (t == null ? '' : String(t).trim()));
+  // A PLACEHOLDER IS NEVER AN ANSWER. TSMC's SuccessFactors menus open on "No
+  // Selection", and "No" chose it — it starts with "no", and polarity read it
+  // as the denial (2026-09-24). Blanked, so every step below skips it.
+  // An option that is a CODE, not words — BambooHR sends "notVeteran",
+  // "declineToAnswer" (Lunar Outpost, 2026-09-25) — is read as the words it
+  // spells. Only a single token in camelCase is split; real text is untouched.
+  const uncamel = (t) => (/^[a-z]+(?:[A-Z][a-z]+)+$/.test(t) ? t.replace(/([a-z])([A-Z])/g, '$1 $2') : t);
+  const texts = (options || []).map((t) => (t == null ? '' : uncamel(String(t).trim()))).map((t) => (PLACEHOLDER_OPTION_RE.test(t) ? '' : t));
   // Drop a trailing dial code so "United States of America" can match
   // "United States of America (+1)". The old pattern required the code to be
   // the last characters on the line, so the PARENTHESISED form — which is how
@@ -693,6 +795,72 @@ export function chooseOption(want, options) {
   if (!nw) return -1;
 
   const find = (pred) => clean.findIndex((t, i) => texts[i] && pred(t));
+
+  // 00. AN AMOUNT AGAINST A LIST OF RANGES (Phoenix Tailings, 2026-09-25): his
+  //     "$90000/year" against "$50, 000 - $100, 000" / "$100, 000 - $150, 000"
+  //     matched nothing, so the question was left for him. The range the
+  //     amount falls in; only when the want is ONE amount and at least two
+  //     options read as ranges, so nothing else ever takes this path.
+  {
+    const range = moneyRangeIndex(w, texts);
+    if (range >= 0) return range;
+  }
+  // 00a. A STREET ADDRESS IN THE POST OFFICE'S SPELLING (Optomec's Paylocity
+  //      form, F-691): "123 North Main Street" against an address lookup that
+  //      offers "123 N Main St, Springfield, WA 12345" matched nothing, and the
+  //      required Address Line 1 was left. Same number and street once both
+  //      are abbreviated; the row with no apartment of its own first.
+  {
+    const street = streetIndex(w, texts);
+    if (street >= 0) return street;
+  }
+  // 01. "WEST (E.G., CALIFORNIA)" — a region whose example is what a list
+  //     names ("California - San Jose/Milpitas/Fremont/Roseville", Western
+  //     Digital 2026-09-24). Only when the whole answer matches nothing.
+  {
+    const eg = w.match(/\((?:e\.?g\.?,?|for example,?|such as)\s*([^)]+)\)/i);
+    if (eg) {
+      // The region itself first ("West"), as any other answer; then the
+      // example, only where an option BEGINS with it.
+      const region = chooseOption(w.replace(eg[0], '').trim(), options);
+      if (region >= 0) return region;
+      const hit = texts.findIndex((t) => t && norm(t).startsWith(norm(eg[1].trim())));
+      if (hit >= 0) return hit;
+    }
+  }
+
+  // 0a. "I REQUIRE SPONSORSHIP" AGAINST A LIST OF STATEMENTS. Lyft's Greenhouse
+  //     "Work Authorization" offers "I am authorized to work for any employer…"
+  //     / "I require/will require Lyft's sponsorship to obtain work
+  //     authorization" (2026-09-24) — no Yes, no No, so his answer matched
+  //     nothing. The one option that says sponsorship IS required, and only
+  //     when exactly one does.
+  if (/^i\s+(?:will\s+)?require\s+sponsorship$/i.test(w.trim())) {
+    const says = texts.map((t, i) => [t, i]).filter(([t]) => /\b(?:require|need)\w*\b[^.]{0,40}\bsponsor/i.test(t)
+      && !/\b(?:not|never|no|without)\b[^.]{0,20}\b(?:require|need)|n['’]t\s+(?:require|need)|\bwithout\b[^.]{0,30}\bsponsor/i.test(t));
+    if (says.length === 1) return says[0][1];
+  }
+
+  // 0. A PLACE, "City, State", against a list that abbreviates the state:
+  //    "Springfield, Washington" is "Springfield, WA, US" (SmartRecruiters' location
+  //    search, Western Digital, 2026-09-24 — Office and School location were
+  //    left for him with the right row on screen). City and state must BOTH
+  //    agree; a bare state is not a place.
+  const stateCode = (s) => {
+    const t = String(s || '').trim();
+    if (/^[A-Za-z]{2}$/.test(t) && US_STATES[t.toUpperCase()]) return t.toUpperCase();
+    return Object.keys(US_STATES).find((k) => norm(US_STATES[k]) === norm(t)) || null;
+  };
+  const place = w.match(/^\s*([A-Za-z][A-Za-z .'-]+?)\s*,\s*([A-Za-z][A-Za-z .]+?)\s*(?:,\s*(?:US|USA|U\.S\.A?\.?|United States(?: of America)?))?\s*$/);
+  if (place && stateCode(place[2])) {
+    const city = norm(place[1]);
+    const st = stateCode(place[2]);
+    const hit = texts.findIndex((t) => {
+      const m = t.match(/^\s*([^,]+?)\s*,\s*([^,]+?)\s*(?:,|$)/);
+      return m && norm(m[1]) === city && stateCode(m[2]) === st;
+    });
+    if (hit >= 0) return hit;
+  }
 
   // 1. Yes/no answers are decided by polarity, first and last.
   const yn = yesNo(w);
@@ -737,6 +905,23 @@ export function chooseOption(want, options) {
         const narrow = live.filter((i) => /\bonly\b/.test(clean[i]));
         if (yn === 'yes' && wide.length === 1) hit = wide[0];
         else if (yn === 'no' && narrow.length === 1) hit = narrow[0];
+      }
+    }
+    // 1d. A BARE YES OR NO AGAINST SEVERAL QUALIFIED ONES (Spirit AeroSystems,
+    //     2026-10-02): "Are you a current Boeing (Spirit) Employee?" offers "No,
+    //     Former Employee", "No, Former Contractor", "No, Never worked at Boeing
+    //     (Spirit)", and "No" took the first — a claim he worked there. A plain
+    //     option still wins; a No otherwise takes the one that says never or
+    //     none; anything else is a guess between facts, and is left.
+    if (hit === -1 && /^\s*(yes|no)\s*$/i.test(w)) {
+      const pol = yn === 'yes' ? affirms : denies;
+      const all = clean.map((t, i) => [t, i]).filter(([t, i]) => texts[i] && pol(t));
+      if (all.length > 1) {
+        const plain = all.find(([t]) => /^(yes|no|y|n)$/.test(t));
+        const never = yn === 'no' ? all.filter(([t]) => /\bnever\b|\bnone\b|\bnot\s+(?:a|an|any)\b/.test(t)) : [];
+        if (plain) hit = plain[1];
+        else if (never.length === 1) hit = never[0][1];
+        else return -1;
       }
     }
     if (hit === -1) hit = find(yn === 'yes' ? affirms : denies);
@@ -836,6 +1021,16 @@ export function chooseOption(want, options) {
   //    says exactly what he answered always wins, and a longer option is
   //    treated as carrying extra meaning he did not ask for.
   let idx = clean.findIndex((t, i) => texts[i] && t === nw);
+  // 2a. THE SAME WORDS IN ANOTHER ORDER are the same answer: "Mechanical
+  //     Engineering" is "Engineering, Mechanical" and "Engineering -
+  //     Mechanical". Without this the looser steps below took "Mechanical
+  //     Engineering Technology" — a different degree — or nothing at all
+  //     (HP's field of study, 2026-09-26). Two words or more; the words exactly.
+  if (idx === -1) {
+    const bag = (t) => t.split(' ').filter(Boolean).sort().join(' ');
+    const want = bag(nw);
+    if (want.includes(' ')) idx = clean.findIndex((t, i) => texts[i] && bag(t) === want);
+  }
   // 2b. "Open" and "No preference" are the same answer.
   //
   // Placed before the loose containment below on purpose: "Open" is a
@@ -1017,8 +1212,11 @@ export function chooseOption(want, options) {
   }
 
   // 5. Veteran status: "not a veteran" ≡ "not a protected veteran".
+  //    …but never an option that says he IS one: "I IDENTIFY AS A VETERAN,
+  //    JUST NOT A PROTECTED VETERAN" has "not" and "veteran" in it and was
+  //    taken for "I am not a Veteran." (HP, F-618).
   if (idx === -1 && /veteran/i.test(w)) {
-    if (/\bnot\b/i.test(w)) idx = find((t) => /veteran/.test(t) && /\bnot\b/.test(t) && !/wish/.test(t));
+    if (/\bnot\b/i.test(w)) idx = find((t) => /veteran/.test(t) && /\bnot\b/.test(t) && !/wish/.test(t) && !/\bidentify\s+as\b|\bi\s+am\s+a\s+veteran\b/.test(t));
     else if (/identify/i.test(w)) idx = find((t) => /identify/.test(t) && /veteran/.test(t));
   }
 
@@ -1098,7 +1296,34 @@ export function chooseOption(want, options) {
     }
   }
 
+  // 1e. THE KIND OF THE ANSWER, WHEN THE LIST NAMES KINDS (2026-10-03, "how
+  //     do we make this robust"). A rule that found the right topic answered
+  //     with a VALUE where the list wants its KIND: Plug Power's "Is this rate
+  //     of pay Hourly or Salary?" got "$90000/year", "preferred method of
+  //     communication — Email | Phone | Text" got his email address. Every
+  //     rewording of those questions lands here; last resort on purpose.
+  if (idx === -1) idx = kindIndex(w, texts);
+
   return idx;
+}
+
+// [what the value looks like, what an option naming its kind looks like]
+const KIND_OF_VALUE = [
+  [/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i, /^(e-?mail(\s+address)?|by\s+e-?mail)\b/i],
+  [/^\+?[\d\s().-]{10,}$/, /^(phone(\s+call)?|telephone|call|mobile|cell(\s+phone)?|by\s+phone)\b/i],
+  [/(\/|\bper\s+|\ba\s+)\s*(year|yr|annum)\b|^\$?\s*\d{2,3}(,\d{3}|k)\s*$/i, /^(salary|salaried|yearly|annual(ly)?|per\s+year|per\s+annum)\b/i],
+  [/(\/|\bper\s+|\ban\s+)\s*(hour|hr)\b/i, /^(hourly|per\s+hour)\b/i],
+  [/^https?:\/\/\S+$|^(www\.)?[\w-]+\.(com|io|ai|dev|net|org|me|co)(\/\S*)?$/i, /^(website|web\s*site|url|link|portfolio)\b/i],
+];
+function kindIndex(value, texts) {
+  const v = String(value ?? '').trim();
+  if (!v) return -1;
+  for (const [valueRe, optionRe] of KIND_OF_VALUE) {
+    if (!valueRe.test(v)) continue;
+    const i = texts.findIndex((t) => t && optionRe.test(String(t).trim()));
+    if (i >= 0) return i;
+  }
+  return -1;
 }
 
 // Exported so the plan the browser extension executes recognises a consent box
@@ -1150,7 +1375,9 @@ export const CERT_NOT_RE = /\bcitizen(ship)?\b|\bnaturaliz|permanent resident|gr
  * CERT_NOT_RE still vetoes both — it runs first, and it is what keeps
  * "I certify that I am a U.S. citizen" out of reach of this rule.
  */
-export const CERT_RE = /i\s+(?:[\w,]+[\s,]+){0,3}(certify|acknowledge|agree|consent|understand|confirm|authoriz\w+)|terms\s+(of|and)|privacy\s+(policy|notice)|accuracy\s+of/i;
+// "Check the box below to finalize your submission of interest." — JPL's
+// required box on its last step (2026-10-02); pressing Submit stays his.
+export const CERT_RE = /i\s+(?:[\w,]+[\s,]+){0,3}(certify|acknowledge|agree|consent|understand|confirm|authoriz\w+)|terms\s+(of|and)|privacy\s+(policy|notice)|accuracy\s+of|\bfinali[sz]e\s+your\s+(submission|application)\b/i;
 
 /**
  * Fill the application form.

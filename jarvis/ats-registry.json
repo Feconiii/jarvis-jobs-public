@@ -1,0 +1,846 @@
+{
+  "_about": "Every application platform Jarvis has met. Hand-curated facts; the numbers (postings, runs, fill rates, fault status) are computed by jarvis/ats-report.mjs from the store, the answer log and FAULTS.md, and written to jarvis/ATS.md. Order matters: the first vendor whose host pattern matches a URL owns it. difficulty: easy | medium | hard | wall. automation: works | partial | wall | listing-only | untested.",
+  "vendors": [
+    {
+      "key": "workday",
+      "name": "Workday",
+      "hosts": [
+        "\\.myworkday(jobs|site)\\.com$"
+      ],
+      "sources": [
+        "workday"
+      ],
+      "scanner": "providers/workday.mjs — POST /wday/cxs/<tenant>/<site>/jobs",
+      "apply": "extension + own Playwright driver (jarvis/apply/workday.mjs)",
+      "architecture": [
+        "six-step wizard; Next and Submit are the same footer button, told apart by text",
+        "prompt widgets: menus of menus, options rendered three times, virtualised lists (F-390)",
+        "My Experience sections added by Add buttons (entries)",
+        "sign-in per tenant; some want a Talent Profile account",
+        "page CSP blocks calls to localhost"
+      ],
+      "walls": [
+        "sign-in (Google SSO pressed for him)",
+        "account creation (his)"
+      ],
+      "difficulty": "hard",
+      "automation": "works",
+      "faults": [
+        "F-06",
+        "F-124",
+        "F-128",
+        "F-267",
+        "F-325",
+        "F-390",
+        "F-555",
+        "F-553"
+      ],
+      "notes": "Biggest pool by far. Fills well once he is signed in; the wall, not the form, is the cost."
+    },
+    {
+      "key": "careerpuck",
+      "name": "CareerPuck (wraps Greenhouse)",
+      "hosts": [
+        "^app\\.careerpuck\\.com$"
+      ],
+      "sources": [],
+      "scanner": "via the Greenhouse adapter",
+      "apply": "extension — the Greenhouse form in an iframe",
+      "architecture": [
+        "posting page with an Apply button; the form is Greenhouse's embed in an iframe that can load late"
+      ],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "works",
+      "faults": [
+        "F-571",
+        "F-572"
+      ],
+      "notes": "Lyft. A frame that never loaded froze the press until F-571."
+    },
+    {
+      "key": "greenhouse",
+      "name": "Greenhouse",
+      "hosts": [
+        "(^|\\.)greenhouse\\.io$"
+      ],
+      "urlMatch": "[?&]gh_jid=",
+      "sources": [
+        "greenhouse",
+        "greenhouse-manual"
+      ],
+      "scanner": "providers/greenhouse.mjs — boards-api.greenhouse.io/v1/boards/<slug>/jobs",
+      "apply": "extension + thin Playwright driver (jarvis/apply/greenhouse.mjs)",
+      "architecture": [
+        "plain HTML form or react-select comboboxes",
+        "on company sites the form is an iframe embed (job_app) that loads late",
+        "custom questions per employer; statements instead of Yes/No (F-572)",
+        "question API: boards-api …/jobs/<id>?questions=true lists every question and option"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [
+        "F-571",
+        "F-572",
+        "F-575",
+        "F-576"
+      ],
+      "notes": "The easiest large pool. Company-site wrappers (Waymo, Formlabs, AST, ASM, Lucid) are Greenhouse underneath."
+    },
+    {
+      "key": "ashby",
+      "name": "Ashby",
+      "hosts": [
+        "^jobs\\.ashbyhq\\.com$"
+      ],
+      "urlMatch": "[?&]ashby_jid=",
+      "sources": [
+        "ashby"
+      ],
+      "scanner": "providers/ashby.mjs — api.ashbyhq.com/posting-api/job-board/<slug>",
+      "apply": "extension + Playwright driver (jarvis/apply/ashby.mjs)",
+      "architecture": [
+        "single-page React form",
+        "an 'Autofill from resume' parser beside the real resume slot"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [
+        "F-191"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "lever",
+      "name": "Lever",
+      "hosts": [
+        "^jobs(\\.eu)?\\.lever\\.co$"
+      ],
+      "sources": [
+        "lever"
+      ],
+      "scanner": "providers/lever.mjs — api.lever.co/v0/postings/<slug>",
+      "apply": "extension + Playwright driver (jarvis/apply/lever.mjs)",
+      "architecture": [
+        "single page; custom questions named cards[<uuid>][fieldN] with the question in .application-label"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [],
+      "notes": "No runs in the current answer-log window."
+    },
+    {
+      "key": "smartrecruiters",
+      "name": "SmartRecruiters",
+      "hosts": [
+        "smartrecruiters\\.com$"
+      ],
+      "sources": [
+        "smartrecruiters"
+      ],
+      "scanner": "providers/smartrecruiters.mjs — api.smartrecruiters.com/v1/companies/<slug>/postings",
+      "apply": "extension in HIS browser only (DataDome blocks automated browsers)",
+      "architecture": [
+        "spl-*/oc-* web components inside shadow roots (F-327)",
+        "two dropzones: Easy Apply parser and the real resume slot (F-352)",
+        "multi-step; each step a new document; Back redraws entries",
+        "experience/education entries via Add buttons",
+        "location search lists 'City, ST, US'"
+      ],
+      "walls": [
+        "DataDome bot check (his to clear)"
+      ],
+      "difficulty": "hard",
+      "automation": "works",
+      "faults": [
+        "F-113",
+        "F-119",
+        "F-562",
+        "F-563",
+        "F-567"
+      ],
+      "notes": "Western Digital's form fills end to end in his Chrome (2026-09-24)."
+    },
+    {
+      "key": "successfactors",
+      "name": "SAP SuccessFactors",
+      "hosts": [
+        "\\.(successfactors|sapsf)\\.(com|eu)$",
+        "\\.ns2cloud\\.com$"
+      ],
+      "sources": [
+        "successfactors"
+      ],
+      "scanner": "providers/successfactors.mjs — <host>/sitemap.xml",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "account required before the form",
+        "the form is collapsed sections (F-577)",
+        "menus are text inputs with a 'No Selection' placeholder (F-578)",
+        "radios with the question outside the group (F-561)",
+        "career sites (RMK/jobs2web) send Apply to an email or sign-in step"
+      ],
+      "walls": [
+        "account sign-in (his)"
+      ],
+      "difficulty": "hard",
+      "automation": "works",
+      "faults": [
+        "F-78",
+        "F-89",
+        "F-561",
+        "F-577",
+        "F-578"
+      ],
+      "notes": "TSMC fills completely once he is signed in (2026-09-24). Teradyne, Veeco, Skyworks and Qorvo career sites stop at their email/sign-in step."
+    },
+    {
+      "key": "oracle",
+      "name": "Oracle Recruiting Cloud",
+      "hosts": [
+        "\\.oraclecloud\\.com$",
+        "^careers\\.ti\\.com$"
+      ],
+      "sources": [
+        "oracle-orc"
+      ],
+      "scanner": "providers/oracle-orc.mjs — /hcmRestApi/resources/latest/recruitingCEJobRequisitions",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "email, then an emailed code, before any form (F-345)",
+        "Apply button without a link (F-112)"
+      ],
+      "walls": [
+        "email + one-time code (his)"
+      ],
+      "difficulty": "wall",
+      "automation": "wall",
+      "faults": [
+        "F-345",
+        "F-112"
+      ],
+      "notes": "Honeywell, Emerson, TI, onsemi."
+    },
+    {
+      "key": "taleo",
+      "name": "Oracle Taleo",
+      "hosts": [
+        "\\.taleo\\.net$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [
+        "account"
+      ],
+      "difficulty": "hard",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "icims",
+      "name": "iCIMS",
+      "hosts": [
+        "\\.icims\\.com$"
+      ],
+      "sources": [
+        "icims",
+        "icims-careers"
+      ],
+      "scanner": "providers/icims.mjs (sitemap, blocked for servers since F-448) + icims-careers (<origin>/api/jobs, F-454)",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "form in an iframe (#icims_content_iframe); the flow can also load top-level",
+        "Apply lands on a /login \"Enter Your Information\" screen: email, a residency box (CA or EU/UK), a privacy \"I accept\" hidden until the residency box is ticked, and hCaptcha",
+        "human-verification pages are refused on purpose (F-114)"
+      ],
+      "walls": [
+        "hCaptcha on the email screen (his)",
+        "Next on the email screen, then any emailed code or password (his)",
+        "human check pages (his)"
+      ],
+      "difficulty": "wall",
+      "automation": "wall",
+      "faults": [
+        "F-114",
+        "F-448",
+        "F-454",
+        "F-583"
+      ],
+      "notes": "Rivian, Quanta, Joby, AMD, Marvell, Werfen. Since F-583 the email screen is filled (email, residency box by job location, privacy consent) and he does the captcha and Next. The pages after it have never been driven — the next step is one live pass past the captcha."
+    },
+    {
+      "key": "jibe",
+      "name": "Jibe (Google-hosted career sites)",
+      "hosts": [
+        "\\.jibeapply\\.com$",
+        "^careers\\.amd\\.com$"
+      ],
+      "sources": [
+        "jibeapply"
+      ],
+      "scanner": "providers/jibeapply.mjs — /api/jobs",
+      "apply": "hands off to the employer's ATS (AMD: iCIMS login)",
+      "architecture": [
+        "listing layer only"
+      ],
+      "walls": [
+        "the underlying ATS's login"
+      ],
+      "difficulty": "wall",
+      "automation": "wall",
+      "faults": [],
+      "notes": "AMD."
+    },
+    {
+      "key": "eightfold",
+      "name": "Eightfold",
+      "hosts": [
+        "\\.eightfold\\.ai$",
+        "^(careers\\.micron\\.com|careers\\.lamresearch\\.com|careers\\.qualcomm\\.com|jobs\\.infineon\\.com|careers\\.gf\\.com|careers\\.deere\\.com|apply\\.careers\\.microsoft\\.com|jobs\\.careers\\.microsoft\\.com|careers\\.appliedmaterials\\.com)$"
+      ],
+      "sources": [
+        "eightfold"
+      ],
+      "scanner": "sitemap (eightfold style); the PCSX API answers 'Not authorized' (F-428)",
+      "apply": "extension + Playwright driver (jarvis/apply/eightfold.mjs)",
+      "architecture": [
+        "entry point is a resume upload that parses into the form (F-152)",
+        "reCAPTCHA helper frame on every page (F-318)",
+        "sign-in with Google/Microsoft/LinkedIn on GF, Micron, Microsoft, Lam"
+      ],
+      "walls": [
+        "SSO sign-in (his)"
+      ],
+      "difficulty": "hard",
+      "automation": "partial",
+      "faults": [
+        "F-152",
+        "F-318",
+        "F-428",
+        "F-465"
+      ],
+      "notes": "His most important employers (Applied Materials, Lam, Micron, Qualcomm). Micron is the hardest form met (F-465)."
+    },
+    {
+      "key": "radancy",
+      "name": "Radancy (listing only)",
+      "hosts": [
+        "^jobs\\.appliedmaterials\\.com$"
+      ],
+      "sources": [],
+      "scanner": "sitemap (radancy)",
+      "apply": "Apply goes to Eightfold (careers.appliedmaterials.com)",
+      "architecture": [
+        "posting pages only"
+      ],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "listing-only",
+      "faults": [
+        "F-366"
+      ],
+      "notes": "Applied Materials."
+    },
+    {
+      "key": "phenom",
+      "name": "Phenom (listing layer)",
+      "hosts": [],
+      "sources": [
+        "phenom"
+      ],
+      "scanner": "providers/phenom.mjs — POST /widgets",
+      "apply": "the underlying ATS (mostly Workday or SuccessFactors)",
+      "architecture": [
+        "company-branded search over another ATS"
+      ],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "listing-only",
+      "faults": [],
+      "notes": "Thermo Fisher, GE HealthCare, Zimmer Biomet."
+    },
+    {
+      "key": "rippling",
+      "name": "Rippling",
+      "hosts": [
+        "(^|\\.)(ats\\.rippling\\.com|rippling-ats\\.com)$"
+      ],
+      "sources": [
+        "rippling"
+      ],
+      "scanner": "providers/rippling.mjs — api.rippling.com …/board/<slug>/jobs",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "hidden native inputs behind styled Yes/No boxes",
+        "random field names per load (F-569)",
+        "knockout questions handled outside the page",
+        "location field suggests as you type"
+      ],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "works",
+      "faults": [
+        "F-565",
+        "F-569"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "bamboohr",
+      "name": "BambooHR",
+      "hosts": [
+        "\\.bamboohr\\.com$"
+      ],
+      "sources": [
+        "bamboohr"
+      ],
+      "scanner": "providers/bamboohr.mjs — /careers/list",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "single page; date masks (mm/dd/yyyy)"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [
+        "F-565"
+      ],
+      "notes": "Experience questions left for him when his files say nothing."
+    },
+    {
+      "key": "breezy",
+      "name": "Breezy HR",
+      "hosts": [
+        "\\.breezy\\.hr$"
+      ],
+      "sources": [
+        "breezy"
+      ],
+      "scanner": "providers/breezy.mjs — /json",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "resume parse adds work-history rows; dates bound by ng-model",
+        "honeypot field hp_<hash>"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [
+        "F-565"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "recruitee",
+      "name": "Recruitee",
+      "hosts": [
+        "\\.recruitee\\.com$"
+      ],
+      "sources": [
+        "recruitee"
+      ],
+      "scanner": "providers/recruitee.mjs — /api/offers/",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "single page"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [
+        "F-565"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "workable",
+      "name": "Workable",
+      "hosts": [
+        "^(apply|jobs)\\.workable\\.com$"
+      ],
+      "sources": [
+        "workable"
+      ],
+      "scanner": "providers/workable.mjs — /<slug>/jobs.md",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "the scanner's link is a text page; the form lives at /j/<id>/apply/",
+        "entries saved with a Save button"
+      ],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "works",
+      "faults": [
+        "F-565"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "dover",
+      "name": "Dover",
+      "hosts": [
+        "^app\\.dover\\.com$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "labels are plain <div> lines",
+        "Autofill-from-resume parser beside the real slot"
+      ],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [
+        "F-570"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "firststage",
+      "name": "firststage (OpenDigital)",
+      "hosts": [
+        "\\.firststage\\.co$"
+      ],
+      "sources": [],
+      "scanner": "none (Greenhouse ids in the URL)",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "Upload CV → Enter details → Review, on one path under one heading",
+        "the CV upload creates a draft under the email in the CV"
+      ],
+      "walls": [
+        "'application in progress' page once a draft exists (his)"
+      ],
+      "difficulty": "medium",
+      "automation": "partial",
+      "faults": [
+        "F-573",
+        "F-574"
+      ],
+      "notes": "Wayve. A draft under his email exists from testing."
+    },
+    {
+      "key": "kula",
+      "name": "Kula",
+      "hosts": [
+        "(^|\\.)kula\\.ai$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "extension (generic reader)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "works",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "tesla",
+      "name": "Tesla (custom)",
+      "hosts": [
+        "(^|\\.)tesla\\.com$"
+      ],
+      "sources": [
+        "browser-assist"
+      ],
+      "scanner": "browser-assist only (servers get 403)",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "403 to anything but a real browser",
+        "its 'Next' can submit — guarded"
+      ],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "works",
+      "faults": [
+        "F-88"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "amazon",
+      "name": "Amazon (custom)",
+      "hosts": [
+        "(^|\\.)amazon\\.jobs$"
+      ],
+      "sources": [
+        "amazon-jobs"
+      ],
+      "scanner": "providers/amazon-jobs.mjs — /en/search.json",
+      "apply": "extension (generic reader)",
+      "architecture": [
+        "sign-in at passport.amazon.jobs before the form (F-233)"
+      ],
+      "walls": [
+        "Amazon sign-in (his)"
+      ],
+      "difficulty": "wall",
+      "automation": "wall",
+      "faults": [
+        "F-233",
+        "F-380"
+      ],
+      "notes": ""
+    },
+    {
+      "key": "apple",
+      "name": "Apple (custom)",
+      "hosts": [
+        "^jobs\\.apple\\.com$"
+      ],
+      "sources": [],
+      "scanner": "sitemap",
+      "apply": "generic reader (never driven)",
+      "architecture": [
+        "Apple ID sign-in"
+      ],
+      "walls": [
+        "Apple ID"
+      ],
+      "difficulty": "wall",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "google",
+      "name": "Google (custom)",
+      "hosts": [
+        "^careers\\.google\\.com$"
+      ],
+      "sources": [],
+      "scanner": "sitemap",
+      "apply": "generic reader (never driven)",
+      "architecture": [
+        "Google sign-in"
+      ],
+      "walls": [
+        "Google account"
+      ],
+      "difficulty": "wall",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "linkedin",
+      "name": "LinkedIn",
+      "hosts": [
+        "(^|\\.)linkedin\\.com$"
+      ],
+      "sources": [
+        "linkedin"
+      ],
+      "scanner": "discover-linkedin (company names) + import-linkedin (postings with no readable board)",
+      "apply": "none — the apply link is behind a login",
+      "architecture": [],
+      "walls": [
+        "LinkedIn login"
+      ],
+      "difficulty": "wall",
+      "automation": "listing-only",
+      "faults": [],
+      "notes": "Used to find companies, not to apply."
+    },
+    {
+      "key": "handshake",
+      "name": "Handshake",
+      "hosts": [
+        "joinhandshake\\.com$"
+      ],
+      "sources": [
+        "handshake"
+      ],
+      "scanner": "import-handshake (a harvest he runs in his browser)",
+      "apply": "none",
+      "architecture": [
+        "university SSO"
+      ],
+      "walls": [
+        "SSO"
+      ],
+      "difficulty": "wall",
+      "automation": "listing-only",
+      "faults": [],
+      "notes": "One-off by his choice."
+    },
+    {
+      "key": "teamtailor",
+      "name": "Teamtailor",
+      "hosts": [
+        "\\.teamtailor\\.com$"
+      ],
+      "sources": [
+        "teamtailor"
+      ],
+      "scanner": "provider exists",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "pinpoint",
+      "name": "Pinpoint",
+      "hosts": [
+        "\\.pinpointhq\\.com$"
+      ],
+      "sources": [
+        "pinpoint"
+      ],
+      "scanner": "provider exists",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "comeet",
+      "name": "Comeet",
+      "hosts": [
+        "comeet\\.(co|com)$"
+      ],
+      "sources": [
+        "comeet"
+      ],
+      "scanner": "provider exists",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "personio",
+      "name": "Personio",
+      "hosts": [
+        "\\.jobs\\.personio\\.(de|com)$"
+      ],
+      "sources": [
+        "personio"
+      ],
+      "scanner": "provider exists",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "easy",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "jobvite",
+      "name": "Jobvite",
+      "hosts": [
+        "^jobs\\.jobvite\\.com$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "ukg",
+      "name": "UKG / UltiPro",
+      "hosts": [
+        "\\.(ultipro\\.(com|ca)|rec\\.pro\\.ukg\\.net)$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "adp",
+      "name": "ADP",
+      "hosts": [
+        "\\.adp\\.com$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "avature",
+      "name": "Avature",
+      "hosts": [
+        "\\.avature\\.net$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "brassring",
+      "name": "BrassRing (Kenexa)",
+      "hosts": [
+        "\\.brassring\\.com$"
+      ],
+      "sources": [],
+      "scanner": "none",
+      "apply": "generic reader (never driven)",
+      "architecture": [],
+      "walls": [
+        "account"
+      ],
+      "difficulty": "hard",
+      "automation": "untested",
+      "faults": [],
+      "notes": ""
+    },
+    {
+      "key": "company-site",
+      "name": "Company-site sitemaps (Teradyne, Qorvo, Veeco …)",
+      "hosts": [],
+      "sources": [
+        "sitemap-jobs"
+      ],
+      "scanner": "sitemap-jobs (plain)",
+      "apply": "whatever the Apply button leads to (often SuccessFactors)",
+      "architecture": [],
+      "walls": [],
+      "difficulty": "medium",
+      "automation": "listing-only",
+      "faults": [],
+      "notes": ""
+    }
+  ]
+}

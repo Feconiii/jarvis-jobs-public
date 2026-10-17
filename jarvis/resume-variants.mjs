@@ -35,9 +35,16 @@ import path from 'path';
 import yaml from 'js-yaml';
 import { fileURLToPath } from 'url';
 import { ALL_FAMILIES, familyByKey } from './resume-family.mjs';
+import { person, DEFAULT_PRESET } from './targeting.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const POOL_PATH = path.join(HERE, 'resume-pool.json');
+/**
+ * The bullet pool. JARVIS_RESUME_POOL points at another file — a second
+ * person's pool kept outside the tracked one (see jarvis/RESUME-POOL.md).
+ */
+export const POOL_PATH = process.env.JARVIS_RESUME_POOL
+  ? path.resolve(process.env.JARVIS_RESUME_POOL)
+  : path.join(HERE, 'resume-pool.json');
 
 export const PROFILE_PATH = path.join(HERE, '..', 'config', 'profile.yml');
 
@@ -359,21 +366,54 @@ const SECTION_ORDER = ['education', 'experience', 'projects', 'skills'];
 const fail = (msg) => { throw new Error(msg); };
 
 /**
+ * A plan for a pool that has no hand-written one: EVERYTHING, in pool order.
+ *
+ * PLANS above are keyed into his pool (amat, acme, makerspace…) and mean nothing
+ * against anyone else's. Another person's total-experience base is their whole
+ * pool — every organisation and bullet in the order the pool lists them, every
+ * project, every skills category, every course — and the per-posting pass and
+ * the fit loop choose and trim from there. A pool may carry its own
+ * `plans: { "total-experience": { … } }` in the PLANS shape to fix that order.
+ */
+export function derivedPlan(pool) {
+  return {
+    coursework: [...(pool?.education?.coursework || [])],
+    courseworkFill: [],
+    experience: Object.entries(pool?.orgs || {}).map(([org, o]) => ({ org, bullets: Object.keys(o.bullets || {}) })),
+    projects: Object.keys(pool?.projects || {}),
+    reserve: [],
+    skills: Object.keys(pool?.skills || {}),
+  };
+}
+
+/**
+ * The plan a family is built from. His preset reads the hand-written PLANS,
+ * exactly as before; any other preset reads the pool's own `plans`, or the
+ * derived everything-in-pool-order plan for the total-experience base.
+ */
+export function planFor(familyKey, pool, presetKey = person.preset) {
+  if (presetKey === DEFAULT_PRESET) return PLANS[familyKey] || null;
+  if (pool?.plans?.[familyKey]) return pool.plans[familyKey];
+  return familyKey === 'total-experience' ? derivedPlan(pool) : null;
+}
+
+/**
  * Turn a family key + the pool into a render-ready spec for jarvis/resume.mjs.
  * Throws on any key the pool does not define, so a typo can never silently drop
  * a bullet (or, worse, a whole job) off a resume that then goes out.
  */
 export function buildSpec(familyKey, pool = loadPool()) {
   const family = familyByKey(familyKey) || fail(`unknown resume family "${familyKey}" — known: ${ALL_FAMILIES.map(f => f.key).join(', ')}`);
-  const plan = PLANS[family.key] || fail(`no content plan for family "${family.key}" — add one to PLANS`);
+  const plan = planFor(family.key, pool) || fail(`no content plan for family "${family.key}" — add one to PLANS`);
 
   const edu = pool.education;
-  const known = new Set(edu.coursework);
+  const known = new Set(edu.coursework || []);
   for (const c of [...plan.coursework, ...(plan.courseworkFill || [])]) if (!known.has(c)) fail(`${family.key}: coursework "${c}" is not in the pool (and therefore not in cv.md)`);
 
   const experience = plan.experience.map(({ org: orgKey, bullets }) => {
     const org = pool.orgs[orgKey] || fail(`${family.key}: unknown org "${orgKey}"`);
-    const title = org.titles[family.key] || fail(`${family.key}: org "${orgKey}" has no approved title for this family`);
+    // `title` is the one-title form a pool with no lanes may use instead of `titles`.
+    const title = org.titles?.[family.key] || org.title || fail(`${family.key}: org "${orgKey}" has no approved title for this family`);
     return {
       orgKey,
       org: org.org,
@@ -450,11 +490,12 @@ export function buildSpec(familyKey, pool = loadPool()) {
       location: edu.location,
       degree: edu.degree,
       date: edu.date,
+      // GPA, honors and coursework are optional in a pool; his has all three.
       bullets: [
         edu.gpa,
         edu.honors,
-        { lead: 'Relevant Coursework', text: plan.coursework.join(', ') },
-      ],
+        plan.coursework.length ? { lead: 'Relevant Coursework', text: plan.coursework.join(', ') } : null,
+      ].filter(Boolean),
     }],
     experience,
     projects,
@@ -513,8 +554,8 @@ export function verifyPoolAgainstCv(
   };
 
   const edu = pool.education || {};
-  check('education.gpa', `${edu.gpa?.lead} ${edu.gpa?.text}`);
-  check('education.honors', `${edu.honors?.lead} ${edu.honors?.text}`);
+  if (edu.gpa) check('education.gpa', `${edu.gpa.lead} ${edu.gpa.text}`);
+  if (edu.honors) check('education.honors', `${edu.honors.lead} ${edu.honors.text}`);
   for (const c of edu.coursework || []) check('coursework', c);
 
   for (const [orgKey, org] of Object.entries(pool.orgs || {})) {
@@ -523,6 +564,7 @@ export function verifyPoolAgainstCv(
     check(`${orgKey}.group`, org.group);
     // The approved-title list in cv.md is the ONLY place a title may come from.
     for (const [fam, title] of Object.entries(org.titles || {})) check(`${orgKey}.titles.${fam}`, title);
+    check(`${orgKey}.title`, org.title);
     for (const title of org.approvedTitles || []) check(`${orgKey}.approvedTitles`, title);
     for (const [role, title] of Object.entries(org.atOwnCompany || {})) check(`${orgKey}.atOwnCompany.${role}`, title);
     for (const [k, b] of Object.entries(org.bullets || {})) {
@@ -556,7 +598,7 @@ export function titlesForFamily(familyKey, pool = loadPool()) {
   if (!family) return new Map();
   const out = new Map();
   for (const org of Object.values(pool.orgs)) {
-    const title = org.titles?.[family.key];
+    const title = org.titles?.[family.key] || org.title;
     if (title) out.set(org.org, title);
   }
   return out;
@@ -679,6 +721,6 @@ export const VARIANTS = [
 /** One lane's spec under one variant. Everything else about the build is shared. */
 export function buildVariantSpec(familyKey, variantKey, pool = loadPool()) {
   const variant = VARIANTS.find((v) => v.key === variantKey) || VARIANTS[0];
-  const plan = PLANS[familyKey] || fail(`unknown family "${familyKey}"`);
+  const plan = planFor(familyKey, pool) || fail(`unknown family "${familyKey}"`);
   return variant.transform(buildSpec(familyKey, pool), { plan, pool });
 }

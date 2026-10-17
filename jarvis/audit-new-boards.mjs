@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 
 import { guardArgs } from './cli.mjs';
+import { discovery } from './targeting.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -36,11 +37,17 @@ const USAGE = `
   scanner captured and flag boards with no engineering work on them.
 `;
 
-/** Titles that mean a company makes or runs physical things. Deliberately wide. */
-export const ENGINEERING_RE = /\b(?:engineer(?:ing)?|technician|machinist|mechanic(?:al)?|robotic|mechatronic|manufactur|hardware|firmware|embedded|electrical|controls?|automation|cad\b|designer|r&d|scientist|metrology|welder|assembler|fabricat|tooling|npi\b|quality|test\b|reliability|process|avionics|propulsion|thermal|optic|semiconductor|wafer)/i;
+/**
+ * Titles that mean the company employs the person's role family at all
+ * (hardware preset: makes or runs physical things). Deliberately wide. From
+ * the preset, as is the narrower field test below it.
+ */
+export const ENGINEERING_RE = discovery.auditFamilyRe;
 
+/** Titles that are the person's field specifically: a same-name board of another kind has none. */
+export const HARDWARE_TITLE_RE = discovery.auditFieldRe;
 /** Titles that mean the board belongs to an agency or a sales floor. */
-export const AGENCY_RE = /\((?:confidential)\)|\bconfidential\b|\bour client\b|\baccount executive\b|\brecruit(?:er|ing|ment)\b|\bstaffing\b/i;
+export const AGENCY_RE =/\((?:confidential)\)|\bconfidential\b|\bour client\b|\baccount executive\b|\brecruit(?:er|ing|ment)\b|\bstaffing\b/i;
 
 /**
  * Judge one board from its titles. Pure, so the tests need no store.
@@ -60,7 +67,14 @@ export function judgeBoard(titles) {
   if (agency >= 3 && agency / total >= 0.25 && agency > engineering) return { verdict: 'suspect', engineering, agency, total, why: `${agency} of ${total} titles read like an agency or a sales floor` };
   // Three postings with no engineer among them is a small company hiring an
   // office manager. Thirty is a different kind of company.
-  if (total >= 8 && share < 0.1) return { verdict: 'suspect', engineering, agency, total, why: `${engineering} of ${total} titles are engineering or technical work` };
+  if (total >= 8 && share < 0.1) return { verdict: 'suspect', engineering, agency, total, why: discovery.auditNoFamilyWhy(engineering, total) };
+  // ENGINEERS, BUT NOT ONE IN HARDWARE (2026-10-02, F-657b). The checks
+  // above pass a same-name SOFTWARE company — "engineer" is half of every
+  // startup's board — and discovery only ever went looking for hardware
+  // employers. 256 of 1,772 discovered boards had six or more postings and no
+  // mechanical, manufacturing, robotics, test or equipment title at all.
+  const hardware = titles.filter(t => HARDWARE_TITLE_RE.test(t)).length;
+  if (total >= 6 && hardware === 0) return { verdict: 'suspect', engineering, agency, total, why: discovery.auditNoFieldWhy(total, engineering) };
   return { verdict: 'ok', engineering, agency, total, why: '' };
 }
 
@@ -86,7 +100,7 @@ async function main(argv) {
   if (args.includes('--json')) { console.log(JSON.stringify(rows, null, 1)); return 0; }
   const suspect = rows.filter(r => r.verdict === 'suspect');
   const unscanned = rows.filter(r => r.verdict === 'unscanned');
-  console.log(`\n  ${added.length} companies added. ${rows.length - suspect.length - unscanned.length} read as real engineering employers, ${suspect.length} suspect, ${unscanned.length} not scanned yet.\n`);
+  console.log(`\n  ${added.length} companies added. ${rows.length - suspect.length - unscanned.length} read as real ${discovery.auditOkNoun}, ${suspect.length} suspect, ${unscanned.length} not scanned yet.\n`);
   for (const r of suspect) {
     console.log(`  ⚠ ${r.name} — ${r.why}`);
     console.log(`      ${r.sample.join(' · ')}`);

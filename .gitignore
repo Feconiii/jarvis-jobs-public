@@ -1,5 +1,7 @@
 # Personal data (user fills these)
 cv.md
+# His past application answers, read by the answer writer (jarvis/apply/corpus.mjs)
+Alex_Open_Ended_Application_Answer_Corpus.md
 data/applications.md
 data/applications.db
 data/follow-ups.md
@@ -15,9 +17,9 @@ data/.pipeline-liveness-temp.txt
 data/jarvis/
 # Rendered resumes and their sources carry a home address and phone number.
 # The .md/.json specs are versioned; the documents themselves never are.
-
-
-
+AlexRiveraResume.docx
+AlexRiveraResumeTotalExperience.docx
+.github/AlexRiveraResume.pdf
 cv-short.md
 reports/*.md
 !reports/.gitkeep
@@ -148,9 +150,9 @@ logs/
 sweep-light-out.txt
 Unofficial Transcript*.pdf
 
-# Your own files (templates in examples/)
+# This copy's own person (written by setup, never shared)
+voice-dna.md
 jarvis/preferences.md
 jarvis/resume-pool.json
-article-digest.md
-voice-dna.md
-jarvis-backup/
+jarvis/PENDING-CLAIMS.md
+config/profile.yml.bak-*

@@ -173,7 +173,15 @@ export const MAX_GROWTH = 1.35;
  * is still refused, by the word rather than by a list of names.
  */
 /** The Applied Materials robot work that must never be called commissioning (2026-09-23). */
-export const NOT_COMMISSIONED = /^amat\.(?:robodk|cobot-install|cobot-rack|amr)\b/;
+export const NOT_COMMISSIONED = /^amat\.(?:robodk|cobot-cell|cobot-rack|amr)\b/;
+
+/**
+ * His one design of experiments (Alex, 2026-10-12): the Neuro-T model settings
+ * at Applied Materials. DOE left FORBIDDEN that day, so the vocabulary allows it
+ * on any bullet; only the vision model's bullet may say it.
+ */
+export const DOE_WORK = /^amat\.neuro-t\b/;
+const DOE_RE = /\bdesign of experiments\b|\bDOE\b/i;
 
 export const FORBIDDEN = [
   [/\bPLCs?\b/, 'PLC experience'],
@@ -199,8 +207,9 @@ export const FORBIDDEN = [
   // entirely — that file is the whole allowed vocabulary, so listing them there
   // to forbid them would allow them — and the refusal lives here instead.
   // He can promote any of them by saying he has done it; that is one line in
-  // cv.md and one line deleted from this list.
-  [/\bdesign of experiments\b|\bDOE\b/i, 'a design of experiments'],
+  // cv.md and one line deleted from this list. DOE was promoted that way
+  // (Alex, 2026-10-12: "i fiddled with neurocle settings in amat thats doe
+  // right there"); its row is in cv.md's frameworks table.
   [/\bstatistical process control\b|\bSPC\b|\bcontrol charts?\b/i, 'SPC'],
   [/\bC?pk\b|\bPpk\b|\bprocess capabilit/i, 'a process capability study'],
   [/\bgau?ge r\s*&?\s*r\b|\bMSA\b|\bmeasurement system analysis\b/i, 'a Gage R&R'],
@@ -209,7 +218,81 @@ export const FORBIDDEN = [
   [/\bOEE\b|\boverall equipment effectiveness\b/i, 'OEE'],
   // The Yellow Belt is his (cv.md, Certifications). The two above it are not.
   [/\b(?:green|black) belt\b/i, 'a Six Sigma Green or Black Belt'],
+  // Alex, 2026-09-28: "can we remove minitab and jmp i was just larping".
+  // JMP had been on the skills line for an hour; his quote still sits in a
+  // cv.md comment, so the refusal has to be here.
+  [/\bJMP\b/, 'JMP'],
+  [/\bminitab\b/i, 'Minitab'],
+  // ONE ARM (Alex, 2026-09-29: never mention the earlier arm, or that an arm
+  // was unfinished). cv.md no longer names it, and naming it there to forbid
+  // it would allow it, so the refusal lives here.
+  [/\bMG ?90S?\b|\b(?:4|four)[- ]?(?:DOF|degrees? of freedom)\b/i, 'an earlier robotic arm', 'everywhere'],
+  // Alex, 2026-10-03, on the Baja "member retention increased 50%": "that was alrp".
+  [/\b(?:member(?:ship)?|club) retention\b|\bretention (?:by|rate|increase|grew|rose)\b/i, 'a member retention figure', 'everywhere'],
+  // THE ARM WAS DESIGNED IN FUSION 360 (Alex, 2026-10-03: "never ever mention
+  // python cad or build123d because its meant to be i designed it in fusion").
+  // Python itself stays his skill; only code-built CAD is refused.
+  [/\bbuild ?123d\b|\bCadQuery\b|\b(?:python|code)[- ](?:generated |built |based )?CAD\b|\bmodell?ed (?:parametrically )?in (?:python|code)\b/i, 'CAD modelled in code', 'everywhere'],
 ];
+
+/**
+ * The FORBIDDEN claims a text makes, as their descriptions. One check for every
+ * writer — resume rewrites, form answers, cover letters, outreach — because
+ * the rules are his everywhere ("never ever mention python cad"), not only on
+ * the page. A claim already in `allowed` (the source bullet, or cv.md) is his.
+ * cv.md's HTML comments are notes ABOUT his record — one lists the posting
+ * frequency of Gage R&R and OEE — so they allow nothing.
+ *
+ * `prose`: a letter or an answer may name a method as the role's work or as
+ * what he wants to learn ("to build depth in process capability work"), and
+ * that is no claim. So in prose the tool and method entries read only the
+ * CLAUSES where he states his own work. The entries marked 'everywhere' (the
+ * earlier arm, code-built CAD, the retention figure) are never true in any
+ * sentence and read all of them.
+ *
+ * Never pass the posting as `allowed`. A posting asking for PLCs is exactly
+ * when a writer reaches for "I programmed PLCs" (F-723); naming the role's
+ * methods is already free, because only his own clauses are read.
+ */
+// A wish tied to him: "I'd like", "I would", "eager to", "to learn". A bare
+// "would" is not one — "ladder logic that would stop the press" is a claim.
+const ASPIRATION = /\b(?:I|we)(?:'d|'ll| would| will| want| hope| plan| aim| look forward)\b|\b(?:I|we)(?:'m| am| are|'re) (?:eager|excited|interested|curious|hoping|looking forward|keen|drawn)\b|\b(?:wants?|hope|hoping|eager|excited|keen|look(?:ing)? forward|plan|aim|like|love)\s+to\b|\b(?:interested|curious)\s+(?:in|about)\b|\bto (?:learn|grow|build depth|develop)\b|\b(?:learn|learning|grow|growing|build depth|my interest|draws me|appeals to me)\b/i;
+// He is the subject: I, my, we, our — or the clause names his own work.
+const OWN_WORK = /\b(?:I|[Mm]y|[Ww]e|[Oo]ur)\b|\b(?:Acme Steel|Applied Materials|AMAT|Makerspace|Mars Rover|Baja)\b/;
+// The clause is about them: the role, the team, the company.
+const THEIR_WORK = /\b(?:you|your|this role|the role|this position|the position|this team|the job|they|their)\b/i;
+// "I'd built" is "I had built"; only "I'd like", "I'd bring" is a wish.
+const HAD = /\b(I|we)'d (?=(?:(?!(?:need|proceed|succeed|exceed|feed)\b)\w+ed|built|done|made|led|written|taken|seen|been|gotten|got|spent|kept|held|brought|taught|found|shown|set up|run)\b)/gi;
+
+/**
+ * The parts of `text` where he states his own work, joined. A sentence splits
+ * at commas, semicolons, dashes and an "and"/"but" that starts a new subject;
+ * a clause with no subject of its own continues the one before it, so
+ * "I programmed the cell, including its PLC" is read whole. A wish clause is
+ * left out, and so is anything that continues it.
+ */
+export function ownClaims(text) {
+  const out = [];
+  for (const sentence of String(text || '').replace(/[’‘]/g, "'").replace(HAD, '$1 had ').split(/(?<=[.!?])\s+|\n+/)) {
+    let state = 'other';
+    for (const clause of sentence.split(/[,;:()]|\s[—–-]\s|[—–]|\s(?:and|but|so|while|because)\s(?=(?:I|we|my|our)\b)/i)) {
+      if (ASPIRATION.test(clause)) state = 'wish';
+      else if (OWN_WORK.test(clause)) state = 'own';
+      else if (THEIR_WORK.test(clause)) state = 'other';
+      if (state === 'own') out.push(clause);
+    }
+  }
+  return out.join(' ');
+}
+
+export function forbiddenClaims(text, allowed = '', { prose = false } = {}) {
+  const said = String(text || '');
+  const sources = (Array.isArray(allowed) ? allowed : [allowed]).map((s) => String(s).replace(/<!--[\s\S]*?-->/g, ' '));
+  const claims = prose ? ownClaims(said) : said;
+  return [...new Set(FORBIDDEN
+    .filter(([re, , scope]) => re.test(scope === 'everywhere' ? said : claims) && !sources.some((src) => re.test(src)))
+    .map(([, what]) => what))];
+}
 
 /**
  * Filler that gives ownership away. A rewrite may not START with one of these
@@ -317,9 +400,7 @@ export function checkRewrite({ text, source, vocab, label = 'bullet' }) {
   }
 
   // 5 — claims he cannot make, in any wording
-  for (const [re, what] of FORBIDDEN) {
-    if (re.test(rewritten) && !sources.some((src) => re.test(src))) problems.push(`${label}: claims ${what}, which he does not have`);
-  }
+  for (const what of forbiddenClaims(rewritten, sources)) problems.push(`${label}: claims ${what}, which he does not have`);
 
   // 6 — never weaker than his own words
   if (WEAK_OPENERS.test(rewritten) && !sources.every((src) => WEAK_OPENERS.test(src))) {
@@ -331,6 +412,9 @@ export function checkRewrite({ text, source, vocab, label = 'bullet' }) {
   // else". The cobot cell was installed and integrated, not commissioned.
   if (NOT_COMMISSIONED.test(label) && /\bcommission/i.test(rewritten) && !sources.some((src) => /\bcommission/i.test(src))) {
     problems.push(`${label}: says commissioning — the cobot and AMR work was integration and deployment, not commissioning`);
+  }
+  if (DOE_RE.test(rewritten) && !DOE_WORK.test(label) && !sources.some((src) => DOE_RE.test(src))) {
+    problems.push(`${label}: claims a design of experiments — his is the Neuro-T model settings at Applied Materials, not this work`);
   }
 
   // 7 — a literal mistake. His pool is proofread clean, so a rewrite that

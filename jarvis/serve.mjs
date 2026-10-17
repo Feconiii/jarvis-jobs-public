@@ -18,7 +18,8 @@
 // Usage: node jarvis/serve.mjs [--port 4300]   then open http://localhost:4300
 
 import http from 'http';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, createReadStream, mkdirSync, appendFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, createReadStream, copyFileSync, mkdirSync, appendFileSync, unlinkSync } from 'fs';
+import os from 'os';
 import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
@@ -32,14 +33,18 @@ import {
   findByUrl,
   // The board + heading match for a form whose URL names no posting (F-330).
   findByHeading,
+  // A SuccessFactors portal form, matched to its posting by title (TSMC).
+  findSuccessFactorsPosting,
   // jobByRequisition scans URLs for a posting id — see /api/apply-page.
   db,
 } from './store.mjs';
 import { resumeForJob, tailorReport, personFile } from './resume-for-job.mjs';
 import { jdKey, sourcesVersion, saveBuild, findReusableBuild, restoreBuild, makeSiblingIndex } from './reuse.mjs';
-import { writeCoverLetter, sourcesFor as coverLetterSources } from './cover-letter.mjs';
+import { writeCoverLetter, sourcesFor as coverLetterSources, letterWordsFrom, letterWordsRequest, withLetterWords } from './cover-letter.mjs';
 import { writeAnswer, answerKind, offLimits, WRITER_VERSION } from './apply/essay.mjs';
 import { loadCompanyBrief } from './company-context.mjs';
+import { pageCompanyKeys, pageTitleHints, tabOrPage, titleParts, employerKey, sameEmployer } from './page-company.mjs';
+import { syncToOneDrive } from './onedrive-resumes.mjs';
 import { contentDisposition } from './text.mjs';
 // The letter as a page an ATS can take: his letterhead, the date, the
 // recipient, and a one-page PDF (F-410).
@@ -49,28 +54,37 @@ import { LogoCache, logoKey } from './company-logo.mjs';
 import { titlesFromSpec } from './resume-variants.mjs';
 import { importDescriptions } from './import-descriptions.mjs';
 import { READABLE_SOURCES, BROWSER_ONLY } from './detail-sources.mjs';
+import { Worker } from 'node:worker_threads';
 import { sweep as assistSweep, planSweep } from './assist-liveness.mjs';
 import { targetSpec, writeOutreach, emailPattern, domainFrom, candidateEmail, CHANNELS } from './outreach.mjs';
-import { startLeadRun, getLeadRun, leadSummary } from './leads.mjs';
-import { mailStatus, saveClient, authUrl, finishAuth, disconnect as disconnectMail, syncMail, latestByJob, recentEvents, undoEvent, companyNames } from './mail.mjs';
+import { startLeadRun, getLeadRun, leadSummary, removeFromOutreach, removedFromOutreach, samePerson } from './leads.mjs';
+import { runningScanPid } from './scan-pid.mjs';
+import { importExport, exportInDownloads, lastImport, untiedOutreach, tiePerson, eventsForJob, linkedInSummary } from './linkedin-activity.mjs';
+import { mailStatus, saveClient, authUrl, finishAuth, disconnect as disconnectMail, syncMail, latestByJob, recentEvents, undoEvent, companyNames, sameRoleKey } from './mail.mjs';
 import {
   contactId, canContact, saveContact, getContact, forJob, allContacts,
-  markSent, markReplied, markDoNotContact, dueFollowUps, outreachStats,
+  markSent, markReplied, markDoNotContact, dueFollowUps, outreachStats, removeUnsent,
 } from './contacts.mjs';
 // Matches an archived resume back to its store row — see sentArchive().
-import { jobId, getJobByUrl, storeVersion, db as storeDb, checkpointWal } from './store.mjs';
+import { jobId, getJobByUrl, storeVersion, db as storeDb, checkpointWal, appliedElsewhereAt } from './store.mjs';
+import { getResumeName, setResumeName } from './resume-names.mjs';
 import { loadedExtension } from './chrome-extension-state.mjs';
 // The resume variants, so /api/resumes knows which folders to look in.
-import { ALL_FAMILIES } from './resume-family.mjs';
+import { ALL_FAMILIES, resumeFileName } from './resume-family.mjs';
+import { person, screen } from './targeting.mjs';
 import { openInChrome } from './open-in-chrome.mjs';
 // Refuses to tailor a resume for a posting that answers 404 — see /api/apply.
-import { definitelyGone, fetchPostingMeta, checkLivenessViaApi } from '../liveness-api.mjs';
-import { planForm, loadApplyProfile, EXPECTED_EXTENSION, extensionIsStale, chooseBand } from './apply-plan.mjs';
-import { logPlan, logWritten, logSnapshot, logReport, logRequest } from './answer-log.mjs';
+import { definitelyGone, fetchPostingMeta, checkLivenessViaApi, isAtsPosting, oraclePosting } from '../liveness-api.mjs';
+import { planForm, loadApplyProfile, EXPECTED_EXTENSION, extensionIsStale, chooseBand, chooseDelay } from './apply-plan.mjs';
+import { applicationPace } from './application-pace.mjs';
+import { logPlan, logWritten, logSnapshot, logReport, logRequest, pastAnswers } from './answer-log.mjs';
+import { logPageErrors } from './page-errors.mjs';
+import { crossTenant } from './req-id.mjs';
 import { whichRule } from './apply/_answers.mjs';
 import { recordUnanswered } from './unanswered.mjs';
 import vm from 'vm';
 import { chooseOption } from './apply/_form.mjs';
+import { polarity } from './apply/_facts.mjs';
 import { scoreFit, getProfile, skillLabel } from './fit.mjs';
 import { triage } from './triage.mjs';
 import { spreadRows } from './deck.mjs';
@@ -79,6 +93,24 @@ import { learnFromSkips, learnFromApplyForms } from './skip-learn.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const HTML_PATH = path.join(HERE, 'dashboard.html');
+
+/**
+ * WHOSE JARVIS THIS IS, for the pages that cannot import targeting.mjs — the
+ * dashboard (stamped into its <head> as window.__JARVIS_PERSON) and the
+ * extension (GET /api/person, and the same block on /api/apply-token). Names
+ * and the preset only: nothing a page needs beyond what goes on a file name
+ * and a badge. `fieldLabels` is the preset's own badge text per field key when
+ * it has one; the dashboard title-cases any key it has no label for.
+ */
+function personPayload() {
+  return {
+    fullName: person.fullName,
+    firstName: person.firstName,
+    preset: person.preset,
+    resumeFileName: resumeFileName(person.fullName),
+    fieldLabels: screen?.fieldLabels || null,
+  };
+}
 const PROGRESS_PATH = path.join(STORE_DIR, 'enrich-progress.json');
 /** Cover letters written for postings, by job id — kept for the panel and on disk. */
 const LETTERS = new Map();
@@ -185,6 +217,20 @@ function jobForRequest(id, page) {
   const onPage = jobForPage(page.pageUrl, { heading: page.heading, pageTitle: page.pageTitle });
   if (!onPage) return remembered;
   if (remembered && String(onPage.id) === String(remembered.id)) return remembered;
+  // …UNLESS THE PAGE CANNOT TELL THEM APART EITHER (Intel, 2026-09-26): the
+  // tab held his Phoenix "Module Engineer", the page matched Intel's Penang
+  // "Module Engineer", and "using the page" put the wrong posting — blocked,
+  // "never Malaysia" — in front of him mid-application. Same company, same
+  // title: the tab, which knows which one he pressed, stands.
+  // …and when the page's own address IS one posting's address, the page wins
+  // even over a look-alike (Lab37, 2026-09-30, F-633): see tabOrPage.
+  // …and a page SmartRecruiters itself named (its publication uuid answered
+  // with this posting's id) is that posting, look-alike or not: Intuitive's
+  // two NPI Manufacturing Engineers, 2026-09-25.
+  const pub = srPublicationOf(page.pageUrl);
+  const efp = eightfoldPidOf(page.pageUrl);
+  const named = (pub && SR_PUB.get(pub.uuid) === String(onPage.id)) || (efp && EF_PID.get(efp.key) === String(onPage.id));
+  if (!named && tabOrPage(remembered, onPage, page.pageUrl) === 'tab') return remembered;
   if (remembered) {
     console.log(`  tab said ${remembered.company} — ${remembered.title}, but this page is ${onPage.title}; using the page`);
   }
@@ -258,7 +304,7 @@ function answersWrittenFor(id, exceptKey) {
  * written goes back on his list with the reason, which is exactly where it was
  * before this existed.
  */
-function startAnswer(key, question, { job = null, jd = null, field = null, kind = null, request = '', context = '', stem = '', seriesIndex = 0, seriesOf = 0, avoid = [], previous = '', feedback = [], warn = '' } = {}) {
+function startAnswer(key, question, { job = null, jd = null, field = null, kind = null, request = '', context = '', stem = '', seriesIndex = 0, seriesOf = 0, allInOne = 0, avoid = [], previous = '', feedback = [], warn = '' } = {}) {
   const entry = {
     status: 'writing', at: new Date().toISOString(), question: String(question || ''),
     kind: kind || null, text: '', problems: [], notices: [], why: '', request: String(request || ''),
@@ -269,7 +315,7 @@ function startAnswer(key, question, { job = null, jd = null, field = null, kind 
   ANSWERS.set(key, entry);
   // His words, kept the moment he asks (answer-log `request` rows).
   try { logRequest({ job, what: 'answer', question, request, previous }); } catch { /* a record, never the answer */ }
-  writeAnswer(question, { job, jd, field, kind, request, context, stem, seriesIndex, seriesOf, avoid, previous, feedback, companyBrief: loadCompanyBrief(job), alsoWritten: answersWrittenFor(String(job?.id || ''), key) }).then((r) => {
+  writeAnswer(question, { job, jd, field, kind, request, context, stem, seriesIndex, seriesOf, allInOne, avoid, previous, feedback, companyBrief: loadCompanyBrief(job), alsoWritten: answersWrittenFor(String(job?.id || ''), key) }).then((r) => {
     Object.assign(entry, {
       status: r.text ? 'ready' : 'failed',
       text: r.text, problems: r.problems, notices: [...(r.notices || []), ...(warn ? [warn] : [])], why: r.why, reading: r.reading || '', writer: r.writer || null,
@@ -293,6 +339,11 @@ function startAnswer(key, question, { job = null, jd = null, field = null, kind 
   return entry;
 }
 
+/** His name, so a LinkedIn export can tell his messages from theirs. */
+const PROFILE_NAME = () => {
+  try { return coverLetterSources().candidate?.full_name || loadApplyProfile()?.identity?.full_name || ''; } catch { return ''; }
+};
+
 /**
  * Render one letter onto his letterhead and keep the PDF beside the text.
  *
@@ -314,7 +365,10 @@ async function renderLetterFile(id, job, text) {
   }
   const head = letterHead({ candidate, job, jd: getDescription(id) || '' });
   const bit = (v) => String(v || '').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const name = [bit(candidate.full_name || 'Alex Rivera'), bit(job.company), bit(job.title).slice(0, 60), 'Cover Letter']
+  // A long title is shortened at a word, never inside one: Zipline's letter
+  // went out as "… Battery and Power Electronic - Cover Letter" (2026-09-25).
+  const short = (s, n) => (s.length <= n ? s : (s.slice(0, n + 1).replace(/\s+\S*$/, '') || s.slice(0, n)).replace(/[\s,;&-]+$/, ''));
+  const name = [bit(candidate.full_name || person.fullName), bit(job.company), short(bit(job.title), 80), 'Cover Letter']
     .filter(Boolean).join(' - ');
   mkdirSync(LETTER_DIR, { recursive: true });
   return writeLetterPdf({ head, body: text, outPath: path.join(LETTER_DIR, `${name}.pdf`) });
@@ -392,13 +446,27 @@ let enrichChild = null, scanChild = null, livenessChild = null, retireChild = nu
 function kickEnrich() {
   if (!AUTO || enrichChild) return;
   enrichChild = spawn(process.execPath, [path.join(HERE, 'enrich.mjs'), '--auto', '--limit', String(ENRICH_BATCH)], { cwd: ROOT, stdio: 'ignore' });
+  background(enrichChild);
   enrichChild.on('exit', () => { enrichChild = null; });
   enrichChild.on('error', () => { enrichChild = null; });
 }
+/**
+ * BACKGROUND WORK YIELDS TO HIM (2026-10-04). "they were making my league of
+ * legends game laggy as hell": scans, readers and discovery run for minutes to
+ * hours and nothing waits on them, so each child drops below normal priority
+ * (idle for discovery, which runs longest). Windows children inherit it.
+ */
+function background(child, priority = os.constants.priority.PRIORITY_BELOW_NORMAL) {
+  try { if (child?.pid) os.setPriority(child.pid, priority); } catch { /* not permitted: run anyway */ }
+}
+
 function kickScan() {
-  if (!AUTO || scanChild) return;
+  // A scan this process did not start — a previous server's, or one run from
+  // the command line — is still a scan. Two at once fight over the write lock.
+  if (!AUTO || scanChild || runningScanPid()) return;
   lastAutoScanAt = new Date().toISOString();
   scanChild = spawn(process.execPath, [path.join(HERE, 'scan.mjs')], { cwd: ROOT, stdio: 'ignore' });
+  background(scanChild);
   scanChild.on('exit', () => { scanChild = null; });
   scanChild.on('error', () => { scanChild = null; });
 }
@@ -417,12 +485,23 @@ function kickScan() {
  * and the rule that ONLY a definitive 404/410 retires anything is what makes
  * running this unattended safe at all.
  */
+// A TURN SKIPPED IS A TURN RETRIED (F-736). The sweep gave way to any scan or
+// enrich that was running and then waited the whole interval again — six hours
+// for his picks — so on a machine where those run most of the day, dead
+// postings sat in his inbox: Verustruct, CB&I and Arthrex on 2026-10-16, and a
+// hand-run sweep that night retired seven more.
+let retireRetry = { true: null, false: null };
 function kickRetire(picks) {
-  if (!AUTO || retireChild || enrichChild || scanChild) return;   // never two readers at once
+  if (!AUTO || retireChild) return;
+  if (enrichChild || scanChild) {   // never two readers at once — so come back soon
+    if (!retireRetry[picks]) retireRetry[picks] = setTimeout(() => { retireRetry[picks] = null; kickRetire(picks); }, 15 * 60 * 1000);
+    return;
+  }
   retireChild = spawn(process.execPath,
     [path.join(HERE, 'liveness-sweep.mjs'), ...(picks ? ['--picks'] : []), '--no-browser',
       '--limit', String(picks ? 400 : 1500), '--concurrency', '4'],
     { cwd: ROOT, stdio: 'ignore' });
+  background(retireChild);
   retireChild.on('exit', () => { retireChild = null; });
   retireChild.on('error', () => { retireChild = null; });
 }
@@ -443,8 +522,41 @@ function kickCurate() {
   if (!AUTO || curateChild || scanChild) return;
   curateChild = spawn(process.execPath, [path.join(HERE, 'curate.mjs'), '--limit', '30', '--target', '50'],
     { cwd: ROOT, stdio: 'ignore', windowsHide: true });
+  background(curateChild);
   curateChild.on('exit', () => { curateChild = null; });
   curateChild.on('error', () => { curateChild = null; });
+}
+
+/**
+ * COVERAGE, WITHOUT BEING ASKED (2026-10-03). "how tf dont we have anything
+ * for those????" — Garmin, Corning, Teradyne, Komatsu, all hiring, none on the
+ * list, because widening it was a pass a person ran by hand and nobody had
+ * since 2026-09-20. Once a day the ledger (universe.mjs) reads LinkedIn's last
+ * two days for companies hiring engineers, adds the ones it has not seen, and
+ * looks for the boards of 1,500 employers due a check — so the backlog is
+ * worked off daily and its size is printed, not discovered the night he runs
+ * out. The ledger refuses to start while another resolve holds its lock.
+ */
+const DISCOVER_EVERY_MS = 24 * 60 * 60 * 1000;
+let discoverChild = null;
+function kickDiscover() {
+  if (!AUTO || discoverChild) return;
+  discoverChild = spawn(process.execPath, [path.join(HERE, 'universe.mjs'), 'daily'],
+    { cwd: ROOT, stdio: 'ignore', windowsHide: true });
+  background(discoverChild, os.constants.priority.PRIORITY_LOWEST);
+  discoverChild.on('exit', () => { discoverChild = null; });
+  discoverChild.on('error', () => { discoverChild = null; });
+}
+/** When the ledger last ran its daily pass, from its own log. */
+function lastDiscoverAt() {
+  try {
+    const lines = readFileSync(path.join(ROOT, 'data', 'jarvis', 'coverage-log.jsonl'), 'utf8').trim().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const e = JSON.parse(lines[i]);
+      if (e.cmd === 'daily') return Date.parse(e.at);
+    }
+  } catch { /* never run */ }
+  return 0;
 }
 
 function kickLiveness() {
@@ -452,6 +564,7 @@ function kickLiveness() {
   livenessChild = spawn(process.execPath,
     [path.join(HERE, 'enrich.mjs'), '--stale', String(LIVENESS_STALE_DAYS), '--limit', String(LIVENESS_BATCH)],
     { cwd: ROOT, stdio: 'ignore' });
+  background(livenessChild);
   livenessChild.on('exit', () => { livenessChild = null; });
   livenessChild.on('error', () => { livenessChild = null; });
 }
@@ -466,7 +579,9 @@ const mailStore = {
   jobs() {
     const byId = new Map();
     for (const f of [{ status: MAIL_STATUSES }, { prepared: true }]) {
-      for (const j of query(f, { limit: 2000 }).rows || []) byId.set(j.id, { id: j.id, company: j.company, title: j.title, status: j.status, url: j.url, location: j.location || '' });
+      // appliedAt: when the engine filled the form — what places a receipt
+      // that names no role (mail.mjs pickByFill).
+      for (const j of query(f, { limit: 2000 }).rows || []) byId.set(j.id, { id: j.id, company: j.company, title: j.title, status: j.status, url: j.url, location: j.location || '', appliedAt: j.appliedAt || j.apply?.at || null });
     }
     return [...byId.values()];
   },
@@ -488,11 +603,16 @@ function kickMailSync() {
   mailSyncing = syncMail(mailStore).then((r) => {
     if (r.ok && (r.moved.length || r.unsure.length)) console.log(`  mail → read ${r.read}, moved ${r.moved.length} card(s)${r.unsure.length ? `, ${r.unsure.length} unsure` : ''}`);
     if (!r.ok) console.error(`  mail → ${r.error}`);
+    // A dropped network is checked again in 5 minutes, not left for the next
+    // half-hour (F-717): a recruiter's reply should not wait out an outage.
+    if (!r.ok && r.network && !mailRetry) mailRetry = setTimeout(() => { mailRetry = null; kickMailSync(); }, MAIL_RETRY_MS);
     return r;
   }).finally(() => { mailSyncing = null; });
   return mailSyncing;
 }
 const MAIL_EVERY_MS = 30 * 60 * 1000;
+const MAIL_RETRY_MS = 5 * 60 * 1000;
+let mailRetry = null;
 
 if (AUTO) {
   setTimeout(kickMailSync, 45 * 1000);
@@ -500,9 +620,27 @@ if (AUTO) {
   setTimeout(kickEnrich, 5000);
   setInterval(kickEnrich, ENRICH_EVERY_MS);
   setInterval(kickScan, SCAN_EVERY_MS);
+  // A RESTART MUST NOT RESET THE CLOCK (2026-09-24). The scan only ran six
+  // hours after the server started, and a night of restarts meant none ran
+  // for twenty hours: no new postings, and dead ones never noticed. Two
+  // minutes in, if the store's newest sighting is older than the interval,
+  // the scan runs now.
+  setTimeout(() => {
+    try {
+      // The scan's OWN record, not the newest last_seen: the description
+      // reader and the liveness sweep touch last_seen too, and made a
+      // 21-hour-old scan look twenty minutes old.
+      const last = getScans()?.[0]?.at;
+      if (!last || Date.now() - Date.parse(last) > SCAN_EVERY_MS) kickScan();
+    } catch { /* the interval still runs */ }
+  }, 2 * 60 * 1000);
   // Twenty minutes in, so a restart mid-afternoon still tops the list up today.
   setTimeout(kickCurate, 20 * 60 * 1000);
   setInterval(kickCurate, CURATE_EVERY_MS);
+  // Daily, and a restart does not reset the clock: half an hour in, if the
+  // last daily pass is older than a day, it runs now.
+  setTimeout(() => { if (Date.now() - lastDiscoverAt() > DISCOVER_EVERY_MS) kickDiscover(); }, 30 * 60 * 1000);
+  setInterval(kickDiscover, DISCOVER_EVERY_MS);
   setTimeout(kickLiveness, 90 * 1000);          // once shortly after boot
   setInterval(kickLiveness, LIVENESS_EVERY_MS);
   // His own lists first, and often; the deck behind them, and rarely.
@@ -553,16 +691,37 @@ if (AUTO) {
 // not blocked, then every 10 minutes, and skipped entirely while a scan,
 // enrich or retire child is running — those are the moments the store is
 // busiest and the aggregate would be stale by the time it finished anyway.
+// In a worker thread since 2026-09-25 — see overviewNow. The children no
+// longer need to be waited out: the worker blocks nobody.
 const warmOverview = () => {
-  if (retireChild || enrichChild || scanChild) return;
   const began = Date.now();
-  try {
-    buildOverview();
+  refreshOverviewHeavy().then(() => {
     const ms = Date.now() - began;
-    if (ms > 2000) trace(`home tiles recomputed in ${(ms / 1000).toFixed(1)}s — off the request path`);
-  } catch (e) { trace(`could not warm the home tiles: ${e.message}`); }
+    if (ms > 2000) trace(`home tiles recomputed in ${(ms / 1000).toFixed(1)}s — in a worker thread`);
+  }).catch((e) => trace(`could not warm the home tiles: ${e.message}`));
 };
 setTimeout(warmOverview, 20 * 1000);
+
+// A FROZEN SERVER SAYS SO (2026-09-25). Every freeze found tonight — the home
+// tiles (31.8 s), a Workday lookup (10.9 s), the mail matcher's filled-rows
+// query (1.1 s) — was invisible in the request log, because the request that
+// waited was not the one doing the work. Any stall over a second is written
+// to the trace with the time, so the next "it's slow" has a timestamp to
+// match against what was running.
+const INFLIGHT = new Map();
+{
+  let last = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const lag = now - last - 500;
+    if (lag > 1000) {
+      // …and what was running: the requests that began before the freeze.
+      const during = [...INFLIGHT.values()].filter((r) => r.at <= last + 500).map((r) => `${r.what} (${((now - r.at) / 1000).toFixed(1)}s)`);
+      trace(`server blocked for ${(lag / 1000).toFixed(1)}s${during.length ? ` — in flight: ${during.slice(0, 6).join('; ')}` : ' — no request in flight at the tick (a timer, a background job, or a request that finished inside the freeze: see any "slow request" line beside this)'}`);
+    }
+    last = now;
+  }, 500).unref();
+}
 setInterval(warmOverview, 10 * 60 * 1000);
 
 // Which sources a body can be read from now comes from detail-sources.mjs
@@ -596,6 +755,40 @@ const IMPORT_TOKEN_PATH = path.join(STORE_DIR, 'import-token');
  * stops. Restarting mid-application costs one click on Apply.
  */
 const APPLY_CONTEXT = new Map();
+// Words a posting's form asks to see in the cover letter, by job id, read off
+// the form when it is planned (letterWordsFrom, PsiQuantum 2026-09-25).
+const LETTER_WORDS = new Map();
+
+/**
+ * START THE COVER LETTER, once per posting (F-410, widened 2026-10-03). The
+ * form's slot used to be the only trigger, so a letter began when the fill
+ * reached the slot — on a later step, or as the step's last action — and he
+ * saw "the cover letter slot is there but there is no cover letter yet". Any
+ * mention now starts it: the slot, a label, the page's text, or the posting's
+ * own description. Nothing starts twice; a letter on disk is never rewritten.
+ */
+function startLetterFor(id, job, why) {
+  if (!id || !job) return null;
+  const had = LETTERS.get(String(id));
+  if (had) return had;
+  if (existsSync(path.join(LETTER_DIR, `${id}.md`))) return null;
+  const entry = { status: 'writing', at: new Date().toISOString(), request: '', text: '', problems: [], notices: [], why: '' };
+  LETTERS.set(String(id), entry);
+  const ctx0 = APPLY_CONTEXT.get(String(id));
+  const words0 = LETTER_WORDS.get(String(id)) || [];
+  writeCoverLetter(job, { jd: getDescription(String(id)), request: letterWordsRequest(words0, ''), resumeLines: ctx0?.resumeLines || [] }).then(async (r) => {
+    if (r.text) r.text = withLetterWords(r.text, words0);
+    Object.assign(entry, { status: r.text ? 'ready' : 'failed', text: r.text, problems: r.problems, notices: r.notices, why: r.why, error: r.text ? null : r.why });
+    if (r.text) {
+      try { mkdirSync(LETTER_DIR, { recursive: true }); writeFileSync(path.join(LETTER_DIR, `${id}.md`), `${r.text}\n`); } catch { /* memory holds it */ }
+      const made2 = await renderLetterFile(String(id), job, r.text).catch(() => null);
+      if (made2) { entry.pdfPath = made2.path; entry.pdfName = path.basename(made2.path); }
+    }
+    console.log(`  letter → ${job.company} — ${job.title}: ${r.why} (${why})`);
+  }).catch((e) => { Object.assign(entry, { status: 'failed', error: String(e?.message || e) }); });
+  return entry;
+}
+const MENTIONS_LETTER_RE = /cover[\s_-]?(letter|note)|letter\s+of\s+(interest|motivation)|motivation(al)?\s+letter/i;
 
 /** The job he is applying to right now, used only when nothing better matches. */
 let LAST_APPLY = null;
@@ -695,14 +888,45 @@ function jobByRequisition(url) {
   // a new ATS cannot quietly break it. A token too short to filter on, or one
   // carrying LIKE's own wildcards, still takes the full walk.
   const raw = String(want).replace(/^[a-z0-9-]+:/i, '');
-  if (raw.length >= 4 && !/[%_\\]/.test(raw)) {
-    for (const row of db().prepare('SELECT id, url FROM jobs WHERE url LIKE ?').iterate(`%${raw}%`)) {
-      if (ATS.reqToken(row.url) === want) return getJob(row.id);
+  // EVERY WORKDAY TOKEN HAS AN UNDERSCORE ("Nothing-Here_JR0287…"), and `_`
+  // is LIKE's own wildcard, so every Workday page fell to the walk below: all
+  // 390,000 URLs parsed in JavaScript, 10.9 s with the whole server blocked
+  // (2026-09-25, "takes like 30s to recognize a page"). Escaped, it is one
+  // LIKE like any other token.
+  if (raw.length >= 4) {
+    const esc = raw.replace(/[\\%_]/g, (c) => `\\${c}`);
+    // A REQUISITION THAT ONLY LIVES ON ITS OWN HOST is looked for there: a
+    // Workday, Lever, Ashby or iCIMS id is never published under another
+    // domain, and a host prefix is an index range (1 ms) where %token% is a
+    // scan of every URL (250 ms). Thirty unknown pages at once queued for
+    // 12.8 s behind those scans (2026-09-25 load test). Greenhouse ids do
+    // travel (gh_jid on a company's own site), so they keep the full look.
+    let host = '';
+    try { host = new URL(String(url)).hostname.toLowerCase(); } catch { host = ''; }
+    if (/(^|\.)(myworkdayjobs\.com|lever\.co|ashbyhq\.com|icims\.com)$/.test(host)) {
+      const hostEsc = host.replace(/[\\%_]/g, (c) => `\\${c}`);
+      for (const row of db().prepare("SELECT rowid AS rid, url FROM jobs INDEXED BY jobs_url_nocase WHERE url LIKE ? ESCAPE '\\' AND url LIKE ? ESCAPE '\\'")
+        .iterate(`https://${hostEsc}/%`, `%${esc}%`)) {
+        if (ATS.reqToken(row.url) === want) {
+          const hit = db().prepare('SELECT id FROM jobs WHERE rowid = ?').get(row.rid);
+          return hit ? getJob(hit.id) : null;
+        }
+      }
+      return null;
+    }
+    // Over the URL index, which holds only the URLs: 250 ms against 430 for
+    // the table, whose rows are wide (2026-09-25).
+    for (const row of db().prepare("SELECT rowid AS rid, url FROM jobs INDEXED BY jobs_url_nocase WHERE url LIKE ? ESCAPE '\\'").iterate(`%${esc}%`)) {
+      // The same number on another employer's tenant is another posting (F-714).
+      if (ATS.reqToken(row.url) === want && !crossTenant(url, row.url)) {
+        const hit = db().prepare('SELECT id FROM jobs WHERE rowid = ?').get(row.rid);
+        return hit ? getJob(hit.id) : null;
+      }
     }
     return null;
   }
   for (const row of db().prepare('SELECT id, url FROM jobs').iterate()) {
-    if (ATS.reqToken(row.url) === want) return getJob(row.id);
+    if (ATS.reqToken(row.url) === want && !crossTenant(url, row.url)) return getJob(row.id);
   }
   return null;
 }
@@ -720,8 +944,74 @@ function jobByRequisition(url) {
  * audit copy is filed under; an ATS's or an identity provider's name there
  * is worse than nothing.
  */
-const NOT_A_TITLE_RE = /^(?:my information|my experience|application questions|voluntary disclosures|self[- ]identify|review|sign in|log in|create account|candidate (?:profile|home)|apply(?: now)?|careers?|jobs?|search(?: jobs)?|job search|open (?:roles|positions|jobs)|current openings|welcome|home|thank you.*|error|page not found)$/i;
+const NOT_A_TITLE_RE = /^(?:my information|my experience|application questions|voluntary disclosures|self[- ]identify|review|sign in|log in|create account|candidate (?:profile|home)|apply(?: now)?|careers?|jobs?|search(?: jobs)?|job search|open (?:roles|positions|jobs)|current openings|welcome|home|thank you.*|error|page not found|(?:careers?|jobs?|open (?:roles|positions)|join us|work) (?:at|with) .{1,40})$/i;
 const NOT_A_COMPANY_RE = /^(?:workday|greenhouse|lever|ashby|eightfold|icims|smartrecruiters|successfactors|taleo|oracle|jobvite|workable|ukg|ultipro|adp|google|microsoft|linkedin|apple|okta|facebook|indeed|glassdoor)\b/i;
+
+/**
+ * THE EMPLOYER'S NAME FOR A PAGE WE RECORD (2026-10-02).
+ *
+ * "these new companies jarvis recognize like none of them legit". Of 43 cards
+ * recorded from pages, five had no company and others carried what the page's
+ * JSON-LD calls the hiring organisation: "0001 Applied Materials, Inc" and
+ * "US01 Wolfspeed, Inc." (Workday legal-entity codes), "Vertex
+ * Pharmaceuticals Inc (" cut mid-bracket. A record under a name nothing else
+ * in the store uses is a second company: no dedupe, no receipt matched to it.
+ *
+ * So the store answers first: the name the scanner gives the postings at the
+ * same board (host, plus the board's slug on a shared ATS host and the site
+ * on Workday, where one tenant holds several employers — cat.wd5 is
+ * Caterpillar and Solar Turbines). Only when it has none is the page's own
+ * name used, with the entity code and a cut-off bracket taken off.
+ */
+const SHARED_BOARD_HOST = /(^|\.)(greenhouse\.io|lever\.co|ashbyhq\.com|smartrecruiters\.com|workable\.com|bamboohr\.com|rippling\.com|pinpointhq\.com|breezy\.hr|recruitee\.com)$/i;
+function tidyCompanyName(raw) {
+  return String(raw || '')
+    .replace(/^\s*[A-Z]{0,3}\d{2,5}\s+(?=[A-Za-z])/, '')
+    .replace(/\s*\([^)]*$/, '')
+    .replace(/,\s*(?:inc|llc|ltd|corp|co)\.?$/i, '')
+    .replace(/\s+/g, ' ').trim();
+}
+function companyForPage(pageUrl, raw) {
+  const fallback = tidyCompanyName(raw);
+  let u;
+  try { u = new URL(String(pageUrl)); } catch { return fallback; }
+  const host = u.hostname.toLowerCase();
+  const segs = u.pathname.split('/').filter(Boolean);
+  const esc = (s) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const pats = [];
+  if (/(^|\.)myworkday(jobs|site)\.com$/.test(host)) {
+    const site = segs.find((s, i) => !(i === 0 && /^[a-z]{2}-[A-Z]{2}$/.test(s)));
+    if (!site) return fallback;
+    pats.push(`https://${esc(host)}/${esc(site)}/%`, `https://${esc(host)}/%/${esc(site)}/%`);
+  } else if (SHARED_BOARD_HOST.test(host)) {
+    if (!segs[0] || /^(oneclick-ui|embed|jobs|apply)$/i.test(segs[0])) return fallback;
+    pats.push(`https://${esc(host)}/${esc(segs[0])}/%`);
+  } else {
+    pats.push(`https://${esc(host)}/%`);
+  }
+  try {
+    const counts = new Map();
+    for (const p of pats) {
+      for (const r of db().prepare("SELECT company, count(*) AS n FROM jobs INDEXED BY jobs_url_nocase WHERE url LIKE ? ESCAPE '\\' AND source != 'extension' AND company != '' GROUP BY company").all(p)) {
+        counts.set(r.company, (counts.get(r.company) || 0) + r.n);
+      }
+    }
+    const best = [...counts].sort((a, b) => b[1] - a[1])[0];
+    if (best) return best[0];
+    // Nothing at that address, and the page named nobody: the employer whose
+    // name IS the site's (openai.com → "OpenAI", whose postings are on Ashby).
+    if (!fallback) {
+      const flat = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (const key of pageCompanyKeys(pageUrl)) {
+        if (key.length < 3) continue;
+        const hit = db().prepare("SELECT DISTINCT company FROM jobs WHERE company LIKE ? AND source != 'extension' LIMIT 40").all(`${key.slice(0, 3)}%`)
+          .find((r) => flat(r.company) === key);
+        if (hit) return hit.company;
+      }
+    }
+    return fallback;
+  } catch { return fallback; }
+}
 
 function pageReadPostingIsRecordable(posting, title, description) {
   if (!title || NOT_A_TITLE_RE.test(title)) return false;
@@ -813,6 +1103,23 @@ function callerMayHaveToken(req) {
   }
   const dest = String(req.headers['sec-fetch-dest'] || '');
   return dest === '' || dest === 'empty';
+}
+
+/**
+ * Recognise a plan's leftover questions (apply/recognise.mjs): cached verdicts
+ * at once; new wordings go to Haiku in the background, cached by wording in
+ * data/jarvis/question-topics.json (readable — a wrong verdict can be deleted).
+ */
+async function recogniseLeftovers(plan, fields, profile, planOpts) {
+  const { recogniseLeftovers: recognise } = await import('./apply/recognise.mjs');
+  const { run } = await import('./tailor-llm.mjs');
+  const { STORE_DIR } = await import('./store.mjs');
+  const ask = async (prompt) => (await run('claude', ['-p'], { input: prompt, timeout: 90_000, models: ['haiku'] })).stdout;
+  // `later`: the plan uses verdicts already cached and never waits on the
+  // model; new wordings are asked after it has gone back (27 s for twelve).
+  return recognise(plan, fields, profile, planOpts, {
+    ask, planForm, later: true, cacheFile: path.join(STORE_DIR, 'question-topics.json'),
+  });
 }
 
 function noteExtension(version, pageUrl) {
@@ -939,6 +1246,9 @@ function startResumeBuild(job, key, { chrome = null, makeCurrent = true, request
     // context built from a page match can arrive with no company at all, and
     // its name then goes missing from everything the panel says (2026-09-07).
     company: job.company || (job.id ? getJob(String(job.id))?.company : '') || '',
+    // …and where the job is, for "desired work location" menus (Western
+    // Digital, 2026-09-24: the plan had the company from here and no place).
+    location: job.location || (job.id ? getJob(String(job.id))?.location : '') || '',
     title: job.title,
     jobUrl: job.url,
     familyKey: null,
@@ -981,7 +1291,7 @@ function startResumeBuild(job, key, { chrome = null, makeCurrent = true, request
     if (found) {
       try {
         const r = found.record;
-        const pdfPath = found.sameJob ? r.pdfPath : path.join(path.dirname(r.pdfPath), personFile(r.person || 'Alex Rivera', job));
+        const pdfPath = found.sameJob ? r.pdfPath : path.join(path.dirname(r.pdfPath), personFile(r.person || person.fullName, job));
         restoreBuild(found, pdfPath);
         Object.assign(ctx, {
           status: 'ready', familyKey: r.familyKey, family: r.family, titles: r.titles || [],
@@ -1039,7 +1349,7 @@ function startResumeBuild(job, key, { chrome = null, makeCurrent = true, request
     try {
       saveBuild(BUILD_DIR, key, {
         jdKey: reuseKey, sources, request: ctx.request, company: ctx.company, title: job.title,
-        person: built.spec?.name || 'Alex Rivera',
+        person: built.spec?.name || person.fullName,
         familyKey: ctx.familyKey, family: ctx.family, titles: ctx.titles,
         pdfPath: ctx.pdfPath, auditPath: ctx.auditPath, resumeLines: ctx.resumeLines,
         tailoring: ctx.tailoring, qa: ctx.qa,
@@ -1143,14 +1453,27 @@ function findByAnyUrl(urls) {
   const esc = (u) => u.replace(/[\\%_]/g, (c) => `\\${c}`);
   const likes = [...want].map(esc);
   const sql = `SELECT id, url FROM jobs WHERE ${likes.map(() => "url LIKE ? ESCAPE '\\'").join(' OR ')}`;
+  // …BUT A POSTING NAMED IN THE QUERY IS NOT EVERY POSTING ON ITS PATH
+  // (2026-10-16). ADP Workforce Now serves every employer's every posting at
+  // one path, /mascsr/default/mdf/recruitment/recruitment.html, and says which
+  // in ?cid=…&jobId=…; with the query dropped, Therm-X's form matched whichever
+  // of 6,062 ADP rows came first (EXALTA's CNC Operator). The same holds for
+  // any board that names its posting in the query (gh_jid, ?id=, ?job=). Where
+  // both URLs carry one of these and they differ, it is a different posting.
+  const ID_PARAM = /^(cid|jobid|job_id|jid|gh_jid|id|job|jobreqid|reqid|req|requisitionid|pid|postingid)$/i;
+  const idsOf = (u) => { try { return [...new URL(String(u)).searchParams].filter(([k]) => ID_PARAM.test(k)).map(([k, v]) => [k.toLowerCase(), String(v).toLowerCase()]); } catch { return []; } };
+  const pageIds = new Map(urls.flatMap(idsOf));
+  const conflicts = (rowUrl) => idsOf(rowUrl).some(([k, v]) => pageIds.has(k) && pageIds.get(k) !== v);
   for (const row of db().prepare(sql).iterate(...likes.map((l) => `${l}%`))) {
-    if (want.has(norm(row.url))) return getJob(row.id);
+    if (want.has(norm(row.url)) && !conflicts(row.url)) return getJob(row.id);
   }
   return null;
 }
 
 /** The answer for one page, kept until the store changes (F-402). */
 const PAGE_JOB = new Map();
+/** Pages that were not a posting, and until when that answer stands. */
+const PAGE_MISS = new Map();
 
 function jobForPage(pageUrl, hint = {}) {
   if (!pageUrl) return null;
@@ -1163,11 +1486,33 @@ function jobForPage(pageUrl, hint = {}) {
     const hit = id ? getJob(id) : null;
     if (id === null || hit) return hit;
   }
-  const found = jobForPageUncached(pageUrl, hint);
+  // A "NO" IS KEPT FOR 45 SECONDS WHATEVER THE STORE DOES (2026-09-25: "takes
+  // like 30s to recognize a page is there"). The key above changes with every
+  // write, and the enricher, the mail reader and the scan write all the time,
+  // so every tab's repeated question about a page that is not a posting paid
+  // the full miss again — about a second of blocking work each, over a
+  // 390,000-row store — and every other request queued behind it. A posting
+  // recorded from the page itself is returned by the recording path, never
+  // looked up through this cache.
+  const missKey = `${pageUrl}|${hint.heading || ''}|${hint.pageTitle || ''}`;
+  if ((PAGE_MISS.get(missKey) || 0) > Date.now()) return null;
+  let found = jobForPageUncached(pageUrl, hint);
+  // A SECOND SPELLING HANDS OVER TO ITS SURVIVOR, whichever lookup found it.
+  // Only the URL lookup did: Joby's /jobs/5165/job copy was returned by
+  // requisition while his decision sat on the row it points at (2026-10-02).
+  for (let hops = 0; found?.supersededBy && hops < 3; hops += 1) {
+    const next = getJob(String(found.supersededBy));
+    if (!next) break;
+    found = next;
+  }
   if (PAGE_JOB.size > 400) PAGE_JOB.clear();
   PAGE_JOB.set(key, found ? String(found.id) : null);
+  if (!found) { if (PAGE_MISS.size > 400) PAGE_MISS.clear(); PAGE_MISS.set(missKey, Date.now() + 45000); }
   return found;
 }
+
+/** A SuccessFactors-hosted application portal: a session token, never a posting id. */
+const SF_PORTAL_RE = /^https?:\/\/[^/]*\.(?:successfactors\.(?:com|eu)|sapsf\.(?:com|eu))\/(?:portalcareer|career|careers|sfcareer)\b/i;
 
 function jobForPageUncached(pageUrl, hint = {}) {
   const bare = String(pageUrl).replace(/[?#].*$/, '');
@@ -1184,8 +1529,63 @@ function jobForPageUncached(pageUrl, hint = {}) {
     bare.replace(/\/(apply|application)\/?$/i, ''),
   ];
   for (const t of [...tries]) { const w = twin(t); if (w) tries.push(w); }
-  const byUrl = findByAnyUrl([...new Set(tries.filter(Boolean))]);
+  // A SUCCESSFACTORS PORTAL NAMES ITS POSTING ONLY BY TITLE — see
+  // findSuccessFactorsPosting. Asked FIRST: with its session token stripped,
+  // every portal page on the tenant is the same URL, and the URL match found
+  // the blank row an earlier visit recorded there (F-559).
+  if (SF_PORTAL_RE.test(String(pageUrl))) {
+    const headings = [hint.heading, hint.pageTitle].filter(Boolean);
+    try { const hit = headings.length ? findSuccessFactorsPosting(headings) : null; if (hit) return hit; } catch { /* fall through */ }
+  }
+  let byUrl = findByAnyUrl([...new Set(tries.filter(Boolean))]);
+  // …AND A PORTAL ROW FOUND BY URL IS ONLY THIS POSTING IF ITS TITLE IS THE
+  // PAGE'S (F-741). Every portal page on a tenant is one URL once the token is
+  // stripped, so "Mechanical Engineer (13234)" (2026-10-16) was filed under the
+  // row an earlier visit recorded for "Engineer, Manufacturing Process 1
+  // (138250)" — its resume, its answers, its activity line.
+  if (byUrl && SF_PORTAL_RE.test(String(pageUrl)) && (hint.heading || hint.pageTitle)) {
+    const t = (s) => String(s || '').toLowerCase().replace(/\s*\(\s*\d{3,7}\s*\)\s*$/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+    const said = [hint.heading, hint.pageTitle].filter(Boolean).map(t);
+    if (!said.some((h) => h && (h === t(byUrl.title) || h.includes(t(byUrl.title)) || t(byUrl.title).includes(h)))) byUrl = null;
+  }
+  // A superseded row hands over to the row that replaced it.
+  if (byUrl?.supersededBy) { const next = getJob(String(byUrl.supersededBy)); if (next) return next; }
   if (byUrl) return byUrl;
+  // SMARTRECRUITERS' ONE-CLICK FORM, by the posting its publication uuid was
+  // resolved to (resolveSmartRecruitersPublication, run before this).
+  const srPub = srPublicationOf(pageUrl);
+  if (srPub && SR_PUB.get(srPub.uuid)) { const hit = getJob(SR_PUB.get(srPub.uuid)); if (hit) return hit; }
+  // SUCCESSFACTORS CAREER SITES APPLY AT /talentcommunity/apply/<id>/ (TSMC,
+  // 2026-10-02): the posting is ro.careers.tsmc.com/job/<slug>/1052759766/,
+  // the form the same host's /talentcommunity/apply/1052759766/. Same host,
+  // same number — the posting.
+  {
+    const rmk = String(pageUrl).match(/^(https:\/\/[^/]+)\/talentcommunity\/apply\/(\d{6,})\b/i);
+    if (rmk) {
+      try {
+        const host = rmk[1].replace(/[\\%_]/g, (c) => `\\${c}`);
+        const row = db().prepare("SELECT id, superseded_by FROM jobs INDEXED BY jobs_url_nocase WHERE url LIKE ? ESCAPE '\\' AND url LIKE ? ESCAPE '\\' LIMIT 1")
+          .get(`${host}/job/%`, `%/${rmk[2]}/%`);
+        if (row) { const hit = getJob(String(row.superseded_by || row.id)); if (hit) return hit; }
+      } catch { /* fall through */ }
+    }
+  }
+  // An Eightfold form whose posting was stored from another front (AMAT).
+  const efPid = eightfoldPidOf(pageUrl);
+  if (efPid && EF_PID.get(efPid.key)) { const hit = getJob(EF_PID.get(efPid.key)); if (hit) return hit; }
+  // JIBEAPPLY FRONTS ICIMS (AMD, 2026-10-02): the posting is careers.amd.com/
+  // jobs/87118, the form careers-amd.icims.com/jobs/87118/login — same number,
+  // and the iCIMS lookup only searches iCIMS's own host. The employer comes
+  // from the tenant ("careers-amd") and must be the row's company.
+  const jibe = String(pageUrl).match(/^https:\/\/careers-([a-z0-9-]+)\.icims\.com\/jobs\/(\d{3,})(?:[/?#]|$)/i);
+  if (jibe) {
+    try {
+      const flat = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const rows = db().prepare("SELECT id, company, superseded_by FROM jobs WHERE source = 'jibeapply' AND (url LIKE ? OR url LIKE ?)").all(`%/jobs/${jibe[2]}`, `%/jobs/${jibe[2]}?%`)
+        .filter((r) => flat(r.company) === flat(jibe[1]) || flat(r.company).startsWith(flat(jibe[1])));
+      if (rows.length === 1) { const hit = getJob(String(rows[0].superseded_by || rows[0].id)); if (hit) return hit; }
+    } catch { /* fall through */ }
+  }
   // TESLA'S FORM IS /careers/search/job/apply/<number>, AND ITS POSTING IS
   // /careers/search/job/<title-slug>-<number> (2026-09-24: "extension does not
   // detect tesla posting on the application page, but it does on jd page").
@@ -1199,20 +1599,236 @@ function jobForPageUncached(pageUrl, hint = {}) {
       if (hit) return hit;
     } catch { /* fall through */ }
   }
+  // THE POSTING'S OWN ID IN THE URL FIRST (?gh_jid=…, /jobs/<id>, Workday's
+  // _JR0286648): it names one posting. The heading below names a TITLE, and
+  // Intel's Phoenix form was matched by "Module Engineer" to the Penang row
+  // before this ever ran (2026-09-26).
+  try { const hit = jobByRequisition(pageUrl); if (hit) return hit; } catch { /* fall through */ }
   // THE PAGE NAMES THE JOB BY BOARD AND HEADING when its URL does not (F-330):
   // SmartRecruiters' form carries a publication uuid the store never saw,
   // and above it the job's title. Same board, same title: that posting.
-  const board = boardPrefix(pageUrl);
   const headings = [hint.heading, hint.pageTitle].filter(Boolean);
+  const roleKey = (s) => String(s || '').toLowerCase()
+    .replace(/^\s*(now\s+)?(applying|apply|application)\s+(for|to)\s*:?\s*/i, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+  const wanted = new Set(headings.map(roleKey).filter((k) => k.length > 6));
+  // ADP WORKFORCE NOW IS ONE PATH FOR EVERY EMPLOYER (2026-10-16): its board
+  // is the `cid` in the query, so a heading is matched only among that
+  // employer's rows — never across all 6,062 ADP postings.
+  let cid = null;
+  try { const u = new URL(String(pageUrl)); if (/(^|\.)adp\.com$/i.test(u.hostname)) cid = u.searchParams.get('cid'); } catch { /* not a URL */ }
+  if (cid && wanted.size) {
+    const rows = db().prepare("SELECT id, title, superseded_by FROM jobs WHERE url LIKE ? AND gone_at IS NULL")
+      .all(`%cid=${cid.replace(/[%_]/g, '')}%`).filter((r) => wanted.has(roleKey(r.title)));
+    if (rows.length === 1) { const hit = getJob(String(rows[0].superseded_by || rows[0].id)); if (hit) return hit; }
+  }
+  // Every ADP employer shares the board prefix below, so a heading there
+  // would name any ADP posting with that title.
+  const board = cid ? null : boardPrefix(pageUrl);
   if (board && headings.length) {
     try {
       const hit = findByHeading(board, headings) || (twin(board) ? findByHeading(twin(board), headings) : null);
       if (hit) return hit;
-    } catch { /* fall through to the requisition id */ }
+    } catch { /* fall through */ }
   }
-  // The posting's own id in the URL (?gh_jid=…, /jobs/<id>), whatever host
-  // carries it — a full scan, once per page.
-  try { return jobByRequisition(pageUrl); } catch { return null; }
+  // iCIMS spells the role in its URL, and its sign-in and candidate pages show
+  // no job heading at all (Applied Medical, F-630).
+  const linkHeads = [...headings, ...pageTitleHints(pageUrl)];
+  if (linkHeads.length) {
+    try { const hit = findLinkedInCopy(pageUrl, linkHeads); if (hit) return hit; } catch { /* fall through */ }
+  }
+  // A PAGE THAT NAMES ONLY A TITLE, AND ONE OF HIS OWN PICKS HAS IT (2026-10-16).
+  // Therm-X's ADP form says "Applying for Mechanical Engineer I/II – Thermal
+  // Systems" and nothing about the employer; the job is in his Inbox as a
+  // LinkedIn copy. Among the few hundred postings he chose, one exact title is
+  // that job. Last, so any match that names the board or employer wins.
+  if (wanted.size) {
+    const mine = db().prepare("SELECT id, title, superseded_by FROM jobs WHERE status IN ('inbox','queued','interested') AND gone_at IS NULL")
+      .all().filter((r) => wanted.has(roleKey(r.title)));
+    if (mine.length === 1) { const hit = getJob(String(mine[0].superseded_by || mine[0].id)); if (hit) return hit; }
+  }
+  return null;
+}
+
+/**
+ * A FORM OPENED FROM SOMEWHERE ELSE (2026-09-25: "why tf its saying this is not
+ * a posting"). He opened Solar Turbines' Workday form straight from Jack & Jill;
+ * the store had never seen that board, so the panel said "not a posting" and
+ * the fill uploaded no resume. The ATS's own API names the posting, as it
+ * already does for a finished fill (/api/filled): the title and employer are
+ * read there, never invented, and the row is recorded under the posting's own
+ * URL — the form's with /apply… and the query taken off — so the enricher and
+ * the next visit both find it. A page the ATS will not describe stays unknown,
+ * and is not asked about again for ten minutes.
+ */
+const ATS_MISS = new Map();
+async function recordFromAts(pageUrl) {
+  const u = String(pageUrl || '');
+  if (!/^https:/i.test(u) || !(isAtsPosting(u) || oraclePosting(u))) return null;
+  const at = u.replace(/[?#].*$/, '').replace(/\/apply(?:\/[A-Za-z]+)?\/?$/i, '');
+  if ((ATS_MISS.get(at) || 0) > Date.now()) return null;
+  const meta = await fetchPostingMeta(at).catch(() => null) || await fetchPostingMeta(u).catch(() => null);
+  if (!meta?.title || NOT_A_TITLE_RE.test(meta.title)) { ATS_MISS.set(at, Date.now() + 600000); return null; }
+  const existing = findByUrl(at);
+  if (existing) return existing;
+  await withStoreLock(() => upsertJobs([{ url: at, title: meta.title, company: companyForPage(at, meta.company || ''), source: `${meta.ats}-manual` }]));
+  PAGE_MISS.clear();
+  const job = findByUrl(at) || null;
+  if (job) console.log(`  recorded ${meta.company} — ${meta.title} from its own ATS (the page was not in the store)`);
+  return job;
+}
+
+/**
+ * The panel's form of recordFromAts: never waits on the ATS. The panel asks
+ * again while a page settles, so the lookup runs once in the background and
+ * the next question finds the recorded posting through the ordinary path.
+ */
+const ATS_PENDING = new Set();
+function recordFromAtsSoon(pageUrl) {
+  const u = String(pageUrl || '');
+  if (!u || ATS_PENDING.has(u) || !/^https:/i.test(u) || !(isAtsPosting(u) || oraclePosting(u))) return null;
+  ATS_PENDING.add(u);
+  recordFromAts(u).catch(() => null).finally(() => ATS_PENDING.delete(u));
+  return null;
+}
+
+/**
+ * A POSTING THE STORE KNOWS ONLY FROM LINKEDIN (2026-09-24, Phoenix Tailings).
+ * A company imported from LinkedIn has rows whose URL is a LinkedIn link, but
+ * the form he fills is on the company's own board — `jobs.lever.co/
+ * PhoenixTailings/<uuid>/apply` — so no URL, requisition or board-and-heading
+ * match can find it, and the panel said the page was not a posting.
+ *
+ * The board's slug names the company (`PhoenixTailings` → "Phoenix Tailings")
+ * and the page names the role. Both must match EXACTLY: the slug against the
+ * company with case, spaces and punctuation removed, and the heading against
+ * the title once the company name and a board's outline number ("4.6.") are
+ * taken off it — "Senior Manufacturing Engineer I" never matches
+ * "Manufacturing Engineer I". One row, or nothing.
+ *
+ * The employer is read by pageCompanyKeys: the board's slug, or the subdomain
+ * where the ATS puts it there — engineering-appliedmedical.icims.com, whose
+ * first path segment is "jobs" on every tenant (F-630).
+ */
+/**
+ * SMARTRECRUITERS' ONE-CLICK FORM NAMES ITS POSTING BY A UUID (2026-10-02).
+ *
+ * jobs.smartrecruiters.com/oneclick-ui/company/Intuitive/publication/<uuid>
+ * is the form; the posting the scanner stored is jobs.smartrecruiters.com/
+ * Intuitive/744000141356119-…, and nothing in one says the other. Intuitive
+ * has two "NPI Manufacturing Engineer" postings: his 2026-09-25 application
+ * (Sunnyvale) was filed under Blacksburg by heading, and the RISE Mechanical
+ * Engineer form was "not a posting in your store". SmartRecruiters' public
+ * API answers the uuid with the posting's numeric id; asked once per uuid.
+ */
+const SR_PUB = new Map();   // uuid -> store id, or null when it is none of his rows
+function srPublicationOf(pageUrl) {
+  const m = String(pageUrl || '').match(/smartrecruiters\.com\/oneclick-ui\/company\/([^/?#]+)\/publication\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  return m ? { slug: m[1], uuid: m[2].toLowerCase() } : null;
+}
+async function resolveSmartRecruitersPublication(pageUrl) {
+  const pub = srPublicationOf(pageUrl);
+  if (!pub || SR_PUB.has(pub.uuid)) return;
+  let id = null;
+  try {
+    const r = await fetch(`https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(pub.slug)}/postings/${pub.uuid}`, { signal: AbortSignal.timeout(8000) });
+    const j = r.ok ? await r.json() : null;
+    const posting = String(j?.id || '');
+    if (/^\d{6,}$/.test(posting)) {
+      const row = db().prepare('SELECT id, superseded_by FROM jobs WHERE url LIKE ? LIMIT 1').get(`%smartrecruiters.com/${pub.slug}/${posting}%`);
+      id = row ? String(row.superseded_by || row.id) : null;
+    }
+  } catch { return; }   // unreachable: asked again next time
+  SR_PUB.set(pub.uuid, id);
+}
+
+/**
+ * AN EIGHTFOLD FORM WHOSE POSTING WE STORED FROM ANOTHER FRONT (2026-10-02).
+ *
+ * Applied Materials' board is read from jobs.appliedmaterials.com (Radancy:
+ * /job/santa-clara/process-engineer-iii-e3/95/99481090496 — 4,301 rows), and
+ * its Apply button opens careers.appliedmaterials.com/careers/job/790317862825
+ * (Eightfold). Nothing in one names the other, so every AMAT form was "not a
+ * posting in your store": no resume, no card. Eightfold's own API answers the
+ * pid with the title and city; the one stored posting at that employer with
+ * that title, in that city, is it. Asked once per pid.
+ */
+const EF_PID = new Map();   // origin|pid -> store id, or null
+function eightfoldPidOf(pageUrl) {
+  const m = String(pageUrl || '').match(/^(https:\/\/[^/]+)\/careers\/job\/(\d{6,})(?:[/?#]|$)/i);
+  if (!m) return null;
+  let domain = '';
+  try { domain = new URL(pageUrl).searchParams.get('domain') || ''; } catch { /* none */ }
+  return { origin: m[1], pid: m[2], domain, key: `${m[1]}|${m[2]}` };
+}
+async function resolveEightfoldPosting(pageUrl) {
+  const ef = eightfoldPidOf(pageUrl);
+  if (!ef || EF_PID.has(ef.key)) return;
+  // Only when the page is not already a stored posting (Micron and Lam store
+  // their Eightfold URLs directly).
+  try { if (findByAnyUrl([String(pageUrl).replace(/[?#].*$/, ''), String(pageUrl)])) { EF_PID.set(ef.key, null); return; } } catch { /* look it up */ }
+  let id = null;
+  try {
+    const host = new URL(ef.origin).hostname;
+    const domain = ef.domain || host.replace(/^(careers|jobs)\./, '');
+    const r = await fetch(`${ef.origin}/api/apply/v2/jobs/${ef.pid}?domain=${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(8000) });
+    const j = r.ok ? await r.json() : null;
+    const flat = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const title = flat(j?.name);
+    const city = flat(String(j?.location || '').split(',')[0]);
+    // The employer: the page's domain= parameter, else the site's name less
+    // "careers."/"jobs." — careers.appliedmaterials.com → appliedmaterials,
+    // amd.eightfold.ai → amd.
+    const labels = (ef.domain || host).toLowerCase().split('.').filter((l) => !/^(careers|jobs|www|apply)$/.test(l));
+    const keys = [/eightfold\.ai$/.test(host) ? labels[0] : labels[labels.length - 2] || labels[0]].filter((k) => k && k.length >= 3);
+    if (title && keys.length) {
+      const rows = db().prepare('SELECT id, company, title, url, location, superseded_by FROM jobs WHERE gone_at IS NULL AND superseded_by IS NULL AND lower(title) LIKE ?')
+        .all(`${String(j.name).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim().split(/\s+/)[0]}%`)
+        .filter((row) => flat(row.title) === title && keys.some((k) => sameEmployer(k, row.company)))
+        .filter((row) => !city || flat(row.url).includes(city) || flat(row.location).includes(city));
+      if (rows.length === 1) id = String(rows[0].id);
+      // TWO REQUISITIONS, ONE TITLE, ONE CITY (AMAT's Process Engineer III
+      // E3 in Santa Clara is two). The requisition Eightfold names
+      // (R2626412) is printed on the front's own page, so each candidate's
+      // page is read once and the one that names it is the posting.
+      const req = String(j?.ats_job_id || j?.display_job_id || '').trim();
+      if (!id && rows.length > 1 && rows.length <= 6 && /^[A-Z]{0,3}\d{5,}$/.test(req)) {
+        const naming = [];
+        for (const row of rows) {
+          try {
+            const page = await fetch(row.url, { signal: AbortSignal.timeout(8000), headers: { 'user-agent': 'Mozilla/5.0' } });
+            if (page.ok && (await page.text()).includes(req)) naming.push(row);
+          } catch { /* that one stays unknown */ }
+        }
+        if (naming.length === 1) id = String(naming[0].id);
+      }
+    }
+  } catch { return; }   // unreachable: asked again next time
+  EF_PID.set(ef.key, id);
+}
+
+function findLinkedInCopy(pageUrl, headings) {
+  const flat = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // …or the page TITLE, where the URL names no employer (Paylocity, F-691).
+  const named = titleParts(headings);
+  const wants = new Set([...pageCompanyKeys(pageUrl), ...named.map((n) => n.company)]);
+  if (!wants.size) return null;
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // By the indexed source column: 11 ms, where a LIKE on the URL walked all
+  // 390,000 rows (259 ms) on every page that was not a posting.
+  const rows = db().prepare("SELECT id, company, title FROM jobs WHERE source = 'linkedin' AND superseded_by IS NULL")
+    .all().filter((r) => wants.has(flat(r.company)) || wants.has(employerKey(r.company)));
+  if (!rows.length) return null;
+  const roleOf = (h, company) => {
+    let s = String(h || '').trim();
+    const co = String(company || '').trim();
+    if (co && s.toLowerCase().startsWith(co.toLowerCase())) s = s.slice(co.length);
+    s = s.replace(/^[\s\-–—|:·]+/, '').replace(/[\s\-–—|:·]+(?:jobs?|careers?)?\s*$/i, '');
+    return norm(s.replace(/^\s*\d+(?:\.\d+)*\.\s+/, ''));
+  };
+  const hits = rows.filter((r) => headings.some((h) => roleOf(h, r.company) === norm(r.title))
+    || named.some((n) => n.company === employerKey(r.company) && norm(n.role) === norm(r.title)));
+  return hits.length === 1 ? getJob(hits[0].id) : null;
 }
 
 
@@ -1293,10 +1909,30 @@ function readBody(req) {
  * work-auth and preference blocks. A job he has since acted on still counts
  * under its own status; only the unread bucket is trimmed.
  */
+// Rebuilt at once after HIS writes; a background child's commit waits up to
+// 20 s (2026-09-25: ~600 ms of counting on every list request, because the
+// enricher, the scan and the mail reader commit constantly).
+// THE COVERAGE LINE ON EVERY PROGRESS POLL (2026-09-26). Three counts over
+// the store per poll, recomputed each time — one took 2.4 s and stalled the
+// server under memory pressure. They move only when the store does, and a
+// header may trail the enricher's commits by half a minute.
+const coverageCounts = memoOnStore(() => {
+  // Lever ships descriptions in its list API, so those count as read too.
+  const readableFilter = { browsable: true, source: READABLE_SOURCES };
+  return {
+    readable: count(readableFilter),
+    read: count({ ...readableFilter, hasDesc: true }),
+    teams: count({ ...readableFilter, hasTeam: true }),
+  };
+}, { minAgeMs: 30_000 });
+
 const counts = memoOnStore(() => {
-  const c = { total: count() };
+  // The total is the sum of the per-status counts — one GROUP BY, not a
+  // second pass over 400,000 rows (230 ms each, 2026-09-25).
+  const byStatus = countBy('status');
+  const c = { total: Object.values(byStatus).reduce((a, b) => a + b, 0) };
   for (const s of STATUSES) c[s] = 0;
-  for (const [status, n] of Object.entries(countBy('status'))) c[status] = n;
+  for (const [status, n] of Object.entries(byStatus)) c[status] = n;
   c.new = count({ status: 'new', blocked: false, fitBlocked: false });
   // …AND AN EMPLOYER HE HAS HIDDEN IS HIDDEN EVERYWHERE, including here.
   // Hiding a company is a decision, so it applies to the decided piles too
@@ -1306,12 +1942,15 @@ const counts = memoOnStore(() => {
   // with its own destination.
   const hidden = hiddenCompanies();
   if (hidden.length) {
-    for (const s of ['inbox', 'queued', 'interested']) {
-      c[s] = count({ status: s, excludeCompany: hidden });
+    // Every pile the board draws, not only the undecided ones: the board
+    // leaves a hidden employer out of Applied too, and a GlobalFoundries
+    // receipt moved a card there (2026-09-25) — "99 applied" over 98 cards.
+    for (const s of ['inbox', 'queued', 'interested', 'applied', 'responded', 'interview', 'offer', 'rejected']) {
+      if (STATUSES.includes(s)) c[s] = count({ status: s, excludeCompany: hidden });
     }
   }
   return c;
-});
+}, { minAgeMs: 20000 });
 
 // ── resumes ─────────────────────────────────────────────────────────
 // Rendered resume PDFs live in output/jarvis-resumes/. The Resumes view lists
@@ -1367,6 +2006,32 @@ const HIDDEN_RESUME_DIRS = new Set(['sent', '.upload']);
  * the only route to them, and it goes through the same guarded /resume handler
  * rather than exposing a second way to read a file off disk.
  */
+/**
+ * A resume PDF under RESUME_DIR, or null. path.basename() strips any traversal
+ * ("../../.ssh/id_rsa") before the join; resumes live in per-variant subfolders
+ * ("sent", "default", "automation", …), so ONE level is allowed, restricted to
+ * a plain slug. The resolved-path containment check is the actual guarantee.
+ */
+function resumeFile(rawDir, rawName) {
+  const name = path.basename(String(rawName || ''));
+  const dir = /^[a-z0-9][a-z0-9-]{0,40}$/i.test(String(rawDir || '')) ? String(rawDir) : '';
+  const full = path.resolve(RESUME_DIR, dir, name);
+  if (!name.toLowerCase().endsWith('.pdf')
+    || !full.startsWith(path.resolve(RESUME_DIR) + path.sep)
+    || !existsSync(full)) return null;
+  return full;
+}
+
+/**
+ * Where "Get it ready" puts the resume (2026-09-27). The browser names a second
+ * download "Alex Rivera Resume (1).pdf" — the recipient sees the "(1)", and a
+ * Downloads folder of near-identical files is how another company's resume
+ * gets attached. So the server writes ONE file, always this name, replaced on
+ * every press: whatever is there is the resume for the message just copied.
+ */
+const DOWNLOADS_DIR = process.env.JARVIS_DOWNLOADS_DIR || path.join(process.env.USERPROFILE || process.env.HOME || ROOT, 'Downloads');
+const ATTACH_NAME = resumeFileName(person.fullName);
+
 function resumeLink(storedPath) {
   // path.basename handles both separators, so no escape is needed here —
   // and a regex over backslashes is the one construction that has failed to
@@ -1441,6 +2106,33 @@ function sentArchive() {
   return out;
 }
 
+/**
+ * THE RESUME TO ATTACH to an outreach message about one job (2026-09-27).
+ *
+ * The job row's `resume_sent` was empty for all 11 of his live outreach jobs;
+ * the PDFs were in sent/, tied to their posting by the sidecar. So: the row's
+ * own record first, then the archive entries for that job. One is the answer.
+ * Several builds for the same posting are listed for him to choose — his rule
+ * is "if there is any ambiguity about which resume to attach, STOP and ask me
+ * rather than guessing" — and none is none.
+ *
+ * @param archive  sentArchive(), read once by the caller
+ */
+function attachableResume(job, archive) {
+  const own = resumeLink(job?.resume_sent);
+  if (own) return { url: own, name: path.basename(String(job.resume_sent)) };
+  const mine = (archive || []).filter((a) => a.jobId && a.jobId === job?.id);
+  if (mine.length === 1) return { url: mine[0].url, name: mine[0].file };
+  if (mine.length > 1) return { choices: mine.map((a) => ({ url: a.url, name: a.file, at: a.at })) };
+  // Same company and title, but not provably this posting: Sunday's record
+  // points at the careers home page, and 1X's was built for a different
+  // "Mechanical Engineer" req. Offered, never attached on its own.
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const alike = (archive || []).filter((a) => norm(a.company) === norm(job?.company) && norm(a.title) === norm(job?.title));
+  if (alike.length) return { choices: alike.map((a) => ({ url: a.url, name: a.file, at: a.at })), byTitle: true };
+  return null;
+}
+
 /** Which store row each per-posting resume file belongs to. A full-table scan (1.1 s measured), so once per store change. */
 const resumeOwners = memoOnStore(() => {
   const byPath = new Map();
@@ -1451,6 +2143,21 @@ const resumeOwners = memoOnStore(() => {
   }
   return byPath;
 });
+
+/** How many family resumes are on disk — the same walk as listResumes, nothing else. */
+function familyResumeCount() {
+  let n = 0;
+  const readDir = (dir, rel) => {
+    let entries = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isDirectory()) { if (!rel && !HIDDEN_RESUME_DIRS.has(e.name)) readDir(path.join(dir, e.name), e.name); }
+      else if (e.name.toLowerCase().endsWith('.pdf')) n += 1;
+    }
+  };
+  readDir(RESUME_DIR, '');
+  return n;
+}
 
 function listResumes() {
   const found = [];
@@ -1572,7 +2279,7 @@ const preparedRows = memoOnStore(() => {
     const hiddenNow = new Set(hiddenCompanies());
     const rows = query({ prepared: true }, { sort: 'applied', limit: 500, full: true }).rows
       .map(j => ({
-        failed: !(j.apply.filled > 0),
+        failed: !((j.apply || {}).filled > 0),
         // A run that filled nothing because the POSTING IS GONE is not a
         // run to repeat. Micron, Western Digital and AbbVie all read
         // "filled nothing and need re-running" on 2026-09-04 with the page
@@ -1584,15 +2291,15 @@ const preparedRows = memoOnStore(() => {
         title: j.title || '',
         location: j.location || '',
         status: j.status || 'new',
-        at: j.apply.at,
+        at: (j.apply || {}).at,
         // Fall back to the posting if an older record has no apply URL.
-        url: j.apply.url || j.url,
+        url: (j.apply || {}).url || j.url,
         postingUrl: j.url,
-        filled: j.apply.filled || 0,
+        filled: (j.apply || {}).filled || 0,
         // Ticked boxes, so Review & Send can agree with the badge he saw.
-        checked: j.apply.checked || 0,
-        skipped: j.apply.skipped || 0,
-        resume: !!j.apply.resumeUploaded,
+        checked: (j.apply || {}).checked || 0,
+        skipped: (j.apply || {}).skipped || 0,
+        resume: !!(j.apply || {}).resumeUploaded,
         // Exactly which PDF went out, so it can be opened and checked BEFORE
         // Submit rather than taken on trust.
         resumeSent: j.resume_sent || '',
@@ -1608,15 +2315,63 @@ const preparedRows = memoOnStore(() => {
         // which tells him one was built and gives him no way to read it. The
         // one thing missing between the file and his eyes was a URL.
         resumeUrl: resumeLink(j.resume_sent),
-        reachedReview: !!j.apply.reachedReview,
-        needs: (j.apply.needsInput || []).map(n => ({ l: n.label, w: n.why })),
-        written: (j.apply.written || []).map(w => ({ l: w.label, n: w.words, p: w.problems || [] })),
-        stoppedBecause: j.apply.stoppedBecause || '',
-        review: (j.apply.review || []).map(r => ({ l: r.label, v: String(r.value) })),
+        reachedReview: !!(j.apply || {}).reachedReview,
+        needs: ((j.apply || {}).needsInput || []).map(n => ({ l: n.label, w: n.why })),
+        written: ((j.apply || {}).written || []).map(w => ({ l: w.label, n: w.words, p: w.problems || [] })),
+        stoppedBecause: (j.apply || {}).stoppedBecause || '',
+        review: ((j.apply || {}).review || []).map(r => ({ l: r.label, v: String(r.value) })),
       }));
   return rows;
 }, { minAgeMs: 30_000 });
 
+// THE HEAVY AGGREGATES RUN IN A WORKER THREAD (jarvis/overview-worker.mjs).
+// On this thread they froze every request for up to 31.8 s (2026-09-25).
+// Stale-while-revalidate: a request gets the last aggregates at once and a
+// refresh starts behind it; only the very first request after boot waits, and
+// it waits on the worker, not on this thread. The parts that must follow his
+// own clicks — the funnel and the pile counts — are assembled fresh per call.
+let OV_WORKER = null; let OV_SEQ = 0; const OV_WAIT = new Map();
+let OV_HEAVY = null; let OV_AT = 0; let OV_PENDING = null;
+function overviewWorker() {
+  if (OV_WORKER) return OV_WORKER;
+  OV_WORKER = new Worker(new URL('./overview-worker.mjs', import.meta.url));
+  OV_WORKER.unref();
+  OV_WORKER.on('message', (m) => { const w = OV_WAIT.get(m.id); if (!w) return; OV_WAIT.delete(m.id); m.ok ? w.resolve(m.data) : w.reject(new Error(m.error)); });
+  const fail = (e) => { for (const w of OV_WAIT.values()) w.reject(e instanceof Error ? e : new Error(`overview worker exited (${e})`)); OV_WAIT.clear(); OV_WORKER = null; };
+  OV_WORKER.on('error', fail);
+  OV_WORKER.on('exit', (code) => fail(code));
+  return OV_WORKER;
+}
+function refreshOverviewHeavy() {
+  if (OV_PENDING) return OV_PENDING;
+  const id = ++OV_SEQ;
+  OV_PENDING = new Promise((resolve, reject) => {
+    OV_WAIT.set(id, { resolve, reject });
+    overviewWorker().postMessage({ id, args: { hidden: hiddenCompanies(), readableSources: READABLE_SOURCES } });
+  }).then((heavy) => { OV_HEAVY = heavy; OV_AT = Date.now(); return heavy; })
+    .finally(() => { OV_PENDING = null; });
+  return OV_PENDING;
+}
+async function overviewNow() {
+  if (!OV_HEAVY) await refreshOverviewHeavy();
+  else if (Date.now() - OV_AT > 60_000) refreshOverviewHeavy().catch((e) => trace(`could not refresh the home tiles: ${e.message}`));
+  return assembleOverview(OV_HEAVY);
+}
+
+function assembleOverview(heavy) {
+  const stat = { ...heavy.stat };
+  const blockReasons = heavy.blockReasons;
+  const bySource = heavy.bySource;
+  const byAdapter = heavy.byAdapter;
+  const byCompany = new Map();
+  for (const [company, n] of Object.entries(heavy.byCompanyCounts)) byCompany.set(company, { company, n, watchlist: false, top: 0 });
+  for (const company of heavy.watchlistCompanies) { const co = byCompany.get(company); if (co) co.watchlist = true; }
+  const applyRuns = heavy.applyRuns;
+  return overviewTail({ stat, blockReasons, bySource, byAdapter, byCompany, applyRuns, storage: heavy.storage });
+}
+
+// The pre-2026-09-25 body, kept for tests that call it directly; the server
+// itself answers from the worker (overviewNow).
 const buildOverview = memoOnStore(() => {
   const now = Date.now();
   const DAY = 86400000;
@@ -1692,11 +2447,15 @@ const buildOverview = memoOnStore(() => {
 
   const applyRuns = query({ prepared: true }, { sort: 'applied', limit: 60, full: true }).rows
     .map(j => ({
-      at: j.apply.at, company: j.company, title: j.title, url: j.url,
-      filled: Array.isArray(j.apply.filled) ? j.apply.filled.length : (j.apply.filled || 0),
-      needs: j.apply.needsInput?.length ?? 0,
+      at: (j.apply || {}).at, company: j.company, title: j.title, url: j.url,
+      filled: Array.isArray((j.apply || {}).filled) ? (j.apply || {}).filled.length : ((j.apply || {}).filled || 0),
+      needs: (j.apply || {}).needsInput?.length ?? 0,
     }));
+  return overviewTail({ stat, blockReasons, bySource, byAdapter, byCompany, applyRuns, storage: storeStats() });
+}, { minAgeMs: 60_000 });
 
+/** The parts of the Home view that are cheap, or that must follow his clicks. */
+function overviewTail({ stat, blockReasons, bySource, byAdapter, byCompany, applyRuns, storage }) {
   // Funnel — captured narrows to what the user actually acted on.
   const c = counts();
   const scans = getScans(12);
@@ -1747,11 +2506,13 @@ const buildOverview = memoOnStore(() => {
     activity: activity.slice(0, 14),
     lastScanAt: scans[0]?.at || null,
     // Counts the family resumes (one PDF per folder), not the audit copies.
-    resumeCount: listResumes().resumes.length,
-    storage: storeStats(),
+    // Just the count. listResumes() also rebuilds the whole sent archive and
+    // matches every PDF to its posting — seconds, for one number (2026-09-25).
+    resumeCount: familyResumeCount(),
+    storage,
     code: codeChangedSinceStart(),
   };
-}, { minAgeMs: 60_000 });
+}
 
 /**
  * A TEST THAT READS HIS REAL STORE MUST NOT BE ABLE TO WRITE TO IT.
@@ -1773,6 +2534,26 @@ const buildOverview = memoOnStore(() => {
 const READONLY = process.env.JARVIS_READONLY === '1';
 
 const server = http.createServer(async (req, res) => {
+  // A SLOW REQUEST SAYS SO (2026-09-25, "takes like 30s to recognize a page").
+  // Anything over half a second is written to serve.log with its path, so the
+  // next "it is slow" has an answer in the log instead of a guess.
+  const began = Date.now();
+  // In flight, for the freeze tracer: which requests were running when the
+  // server stopped answering (2026-09-26 — two 10-second freezes while he was
+  // applying, and nothing said what caused them).
+  const flightKey = Symbol('req');
+  INFLIGHT.set(flightKey, { at: began, what: `${req.method} ${String(req.url).split('?')[0]}` });
+  res.on('close', () => INFLIGHT.delete(flightKey));
+  res.on('finish', () => {
+    INFLIGHT.delete(flightKey);
+    const ms = Date.now() - began;
+    // A request that does its slow work SYNCHRONOUSLY finishes before the
+    // freeze tracer's overdue tick runs, so the tracer says "no request in
+    // flight" about a freeze a request caused (F-607). The trace file is the
+    // one log a detached server keeps, so the slow ones go there too.
+    if (ms > 2000) trace(`slow request ${(ms / 1000).toFixed(1)}s — ${req.method} ${String(req.url).split('?')[0]}`);
+    if (ms > 500) console.log(`  slow ${ms} ms ${req.method} ${String(req.url).replace(/([?&](?:pageUrl|url)=)[^&]{60,}/g, (m, p) => `${p}${decodeURIComponent(m.slice(p.length)).slice(0, 60)}…`).slice(0, 160)}`);
+  });
   try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
@@ -1802,7 +2583,7 @@ const server = http.createServer(async (req, res) => {
       // and the card gave advice that was false.
       const html = readFileSync(HTML_PATH, 'utf-8').replace(
         '<head>',
-        `<head><script>window.__JARVIS_SOURCES=${JSON.stringify({ readable: READABLE_SOURCES, browserOnly: BROWSER_ONLY })};</script>`,
+        `<head><script>window.__JARVIS_SOURCES=${JSON.stringify({ readable: READABLE_SOURCES, browserOnly: BROWSER_ONLY })};window.__JARVIS_PERSON=${JSON.stringify(personPayload()).replace(/</g, '\\u003c')};</script>`,
       );
       // No cache headers were sent at all, so Chrome applied heuristic caching
       // and served an OLD dashboard.html after the file had changed. The
@@ -1839,6 +2620,16 @@ const server = http.createServer(async (req, res) => {
         if (many.length > 1) return many;
         return many.length === 1 ? many[0].split(',').filter(Boolean) : undefined;
       };
+      // AN EMPLOYER'S NAME may itself hold a comma. One value is the whole
+      // name AND the old shorthand: "Penumbra, Inc." split alone became
+      // "Penumbra" and " Inc." and hid nothing (the dashboard test, the day
+      // the inbox's first employer had a comma).
+      const names = (k) => {
+        const many = p.getAll(k).filter(Boolean);
+        if (many.length !== 1) return many.length ? many : undefined;
+        const parts = many[0].split(',').map((s) => s.trim()).filter(Boolean);
+        return parts.length > 1 ? [...new Set([many[0], ...parts])] : parts;
+      };
       const tri = (k) => (p.get(k) === '1' ? true : p.get(k) === '0' ? false : undefined);
       const num = (k) => (p.get(k) != null && p.get(k) !== '' ? Number(p.get(k)) : undefined);
 
@@ -1849,7 +2640,7 @@ const server = http.createServer(async (req, res) => {
         locationBucket: list('loc'),
         level: list('level'),
         company: list('company'),
-        excludeCompany: list('excludeCompany'),
+        excludeCompany: names('excludeCompany'),
         // The field filter had a dropdown, a database column and an index —
         // and this line was missing, so every option returned the identical
         // 12,302 rows. The one control built for the "show me robotics, not
@@ -1873,6 +2664,8 @@ const server = http.createServer(async (req, res) => {
         // "posted ≤ 7 days" mean "captured in the last 7 days", which on a
         // company tracked last week is every posting it has ever had.
         postedWithin: num('postedWithin'),
+        // Postings the curator read and turned down, out of the list (2026-10-16).
+        hideTurnedDown: p.get('hideTurnedDown') === '1' ? true : undefined,
       };
       const sort = p.get('sort') || 'fit';
       const { rows, total } = query(filters, {
@@ -1903,8 +2696,22 @@ const server = http.createServer(async (req, res) => {
       // search keystroke, and thrown away each time. Now it goes only to the
       // caller that asks, which is that one call at page load.
       const wantsScans = p.get('scans') === '1';
+      // The Applications sheet folds one role posted as several requisitions
+      // into one line (mail.mjs sameRoleKey); only it asks.
+      // …and shows each application's resume to view or download (2026-09-30:
+      // "lets make resume viewable and downloadable in application tab"): the
+      // one sent with it, or the same-title builds to choose from, never a guess.
+      let withRole = jobs;
+      if (p.get('roleKey') === '1') {
+        const archive = sentArchive();
+        withRole = jobs.map((j) => ({
+          ...j,
+          roleKey: sameRoleKey(j),
+          resume: attachableResume({ ...j, resume_sent: getJob(j.id)?.resume_sent }, archive),
+        }));
+      }
       return json(res, 200, {
-        jobs, total, spread,
+        jobs: withRole, total, spread,
         counts: counts(),
         ...(wantsScans ? { scans: getScans(20) } : {}),
         hiddenCompanies: hiddenCompanies(),
@@ -1952,6 +2759,14 @@ const server = http.createServer(async (req, res) => {
       return hint;
     };
 
+    /** What the Outreach research found about one person on one job: their post and something about them. */
+    const researchedPerson = (jobId, name) => {
+      try {
+        const want = String(name || '').trim().toLowerCase();
+        return (getLeadRun(jobId)?.result?.people || []).find((p) => String(p.name).trim().toLowerCase() === want || samePerson(p.name, name)) || null;
+      } catch { return null; }
+    };
+
     /** Everything he needs to go find one person for one job. */
     if (req.method === 'GET' && url.pathname === '/api/outreach') {
       const id = String(url.searchParams.get('id') || '');
@@ -1959,12 +2774,23 @@ const server = http.createServer(async (req, res) => {
       if (!job) return json(res, 404, { error: 'no such job' });
       const hints = emailHintsFor(job.company);
       const spec = targetSpec(job, { description: getDescription(job.id) || '', domain: hints.domain || '' });
-      const existing = forJob(job.id);
+      const saved = forJob(job.id);
+      // Each saved person with what the research found about them, by name.
+      let researched = [];
+      try { researched = getLeadRun(job.id)?.result?.people || []; } catch { researched = []; }
+      const existing = saved.map((c) => {
+        const f = researched.find((p) => samePerson(p.name, c.name));
+        return { ...c, signal: f?.signal || null, personal: f?.personal || null };
+      });
       return json(res, 200, {
-        job: { id: job.id, company: job.company, title: job.title, team: job.team, location: job.location, url: job.url, status: job.status },
+        job: {
+          id: job.id, company: job.company, title: job.title, team: job.team, location: job.location, url: job.url, status: job.status,
+          resume: attachableResume(job, sentArchive()),
+        },
         spec,
         emailHint: hints,
         contacts: existing,
+        linkedin: (() => { try { return eventsForJob(job.id); } catch { return []; } })(),
         // WHY he may or may not write to another person about this role. The
         // reason is the useful half; a bare false teaches nothing.
         gate: canContact(null, existing, { jobId: job.id }),
@@ -1972,29 +2798,122 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    /** The work list: follow-ups first, then jobs with nobody on them yet. */
+    /**
+     * The work list: follow-ups first, then the jobs he CHOSE for outreach.
+     *
+     * It used to be every job in his inbox, tracking, queued or applied — up to
+     * 200 rows he never picked, so the jobs he had pressed Outreach on were
+     * lost among them (2026-09-25). Now a job is on it because he pressed
+     * Outreach on its application, or already saved a person for it, and it
+     * leaves when he takes it off.
+     */
     if (req.method === 'GET' && url.pathname === '/api/outreach/queue') {
-      const due = dueFollowUps();
-      // Scoped to what he has actually committed to — queued, applied, or in
-      // his inbox. Outreach about a posting he has not decided on is the
-      // volume play this feature exists to avoid.
-      const committed = query({ status: ['inbox', 'interested', 'queued', 'applied'] }, { limit: 200 }).rows || [];
-      const seen = new Set(allContacts({ limit: 5000 }).map((c) => c.job_id));
-      // The card's Outreach button researches people too (leads.mjs). A job
-      // with people found there is not a job "with nobody on it" — the two
-      // features used to disagree about the same KLA card (2026-09-17).
+      const due = dueFollowUps({ jobStatus: (id) => { const j = getListItem(id); return j ? (j.goneAt ? 'gone' : j.status) : null; } });
       let leads = {};
       try { leads = leadSummary(); } catch { leads = {}; }
-      return json(res, 200, {
-        due,
-        stats: outreachStats(),
-        jobs: committed.map((j) => ({
-          id: j.id, company: j.company, title: j.title, team: j.team, location: j.location, status: j.status,
-          hasContact: seen.has(j.id),
-          leadsFound: leads[j.id]?.status === 'done' ? leads[j.id].count || 0 : 0,
-          leadsRunning: leads[j.id]?.status === 'running',
-        })),
-      });
+      let removed = new Set();
+      try { removed = removedFromOutreach(); } catch { /* nothing taken off */ }
+      const people = new Map();
+      for (const c of allContacts({ limit: 5000 })) {
+        if (!c.job_id) continue;
+        if (!people.has(c.job_id)) people.set(c.job_id, []);
+        people.get(c.job_id).push(c);
+      }
+      let li = {};
+      try { li = linkedInSummary(); } catch { li = {}; }
+      const ids = new Set([...Object.keys(leads), ...[...people.keys()].filter((id) => !removed.has(id))]);
+      // The sent/ archive, read once for every row's resume (attachableResume).
+      let archive = [];
+      try { archive = sentArchive(); } catch { archive = []; }
+      const jobs = [];
+      for (const id of ids) {
+        const j = getJob(id);
+        if (!j) continue;
+        const saved = people.get(id) || [];
+        const lead = leads[id];
+        // The people the research found, so an expanded row can show their
+        // profiles without opening the job (2026-09-26: "it should show me
+        // link to those people's linkedin profile").
+        let found = [];
+        if (lead?.status === 'done') {
+          try {
+            found = (getLeadRun(id)?.result?.people || []).map((p) => ({
+              name: p.name, title: p.title || '', persona: p.persona || '', confidence: p.confidence || '',
+              why: p.why || '', profile_url: p.profile_url || '', public_email: p.public_email || '',
+              signal: p.signal || null, personal: p.personal || null,
+              lead_type: p.lead_type || '', usefulness: p.usefulness || '', scores: p.scores || null, activity: p.activity || null, excellent: p.excellent || '',
+              // The same person as someone he saved, under any name they go by.
+              saved: saved.some((c) => samePerson(p.name, c.name)),
+            }));
+          } catch { found = []; }
+        }
+        jobs.push({
+          id: j.id, company: j.company, title: j.title, team: j.team, location: j.location, status: j.status, url: j.url,
+          gone: !!j.goneAt,
+          // Everything a row needs to show the person and the message itself:
+          // "it says drafted but wheres the message?" (2026-09-26).
+          contacts: saved.map((c) => ({
+            id: c.id, name: c.name, title: c.title || '', persona: c.persona || '', channel: c.channel || '',
+            linkedin_url: c.linkedin_url || '', email: c.email || '', draft: c.draft || '',
+            status: c.status, sent_at: c.sent_at, replied_at: c.replied_at, do_not_contact: !!c.do_not_contact,
+            // What the research found about THIS person, matched by name.
+            ...(() => { const f = found.find((p) => samePerson(p.name, c.name)); return { signal: f?.signal || null, personal: f?.personal || null, lead_type: f?.lead_type || '', usefulness: f?.usefulness || '', why: f?.why || '', scores: f?.scores || null, activity: f?.activity || null, excellent: f?.excellent || '' }; })(),
+          })),
+          found,
+          // THE RESUME TO ATTACH (2026-09-27): he pastes the message into
+          // LinkedIn and attaches this. It is the exact PDF that went out with
+          // the application; with none on disk the card says so, and nothing
+          // else is picked for him ("if there is any ambiguity about which
+          // resume to attach, STOP and ask me rather than guessing").
+          resume: attachableResume(j, archive),
+          hasContact: saved.length > 0,
+          leads: lead ? { status: lead.status, count: lead.count || 0, warnings: lead.warnings || 0 } : null,
+          linkedin: li[id] || null,
+          chosenAt: lead?.startedAt || saved.map((c) => c.created_at || '').sort()[0] || '',
+        });
+      }
+      jobs.sort((a, b) => String(b.chosenAt).localeCompare(String(a.chosenAt)));
+      return json(res, 200, { due, stats: outreachStats(), jobs, mail: (() => { try { const m = mailStatus(); return { connected: m.connected, lastSyncAt: m.lastSyncAt }; } catch { return null; } })() });
+    }
+
+    // ── LINKEDIN: who he wrote to there, and who answered (linkedin-activity.mjs) ──
+    // Gmail brings accepted invitations and InMail replies on its own; the data
+    // export, when he imports one, brings everything he sent. Nothing here
+    // signs in to LinkedIn.
+    if (req.method === 'GET' && url.pathname === '/api/linkedin/status') {
+      return json(res, 200, { lastImport: lastImport(), download: exportInDownloads(), untied: untiedOutreach() });
+    }
+    // Only the export the server finds in his Downloads — the page never names a path.
+    if (req.method === 'POST' && url.pathname === '/api/linkedin/import') {
+      const found = exportInDownloads();
+      if (!found) return json(res, 404, { error: 'no LinkedIn export in your Downloads folder' });
+      try { return json(res, 200, { result: importExport(found.path, { self: PROFILE_NAME() }) }); }
+      catch (e) { return json(res, 400, { error: String(e?.message || e) }); }
+    }
+    // The same, for an export saved somewhere else: the page sends the file.
+    if (req.method === 'POST' && url.pathname === '/api/linkedin/upload') {
+      const chunks = []; let size = 0;
+      for await (const c of req) { size += c.length; if (size > 200_000_000) return json(res, 413, { error: 'that file is too large to be a LinkedIn export' }); chunks.push(c); }
+      // Written to the store folder only for as long as the read takes: it holds every message he has.
+      const tmp = path.join(STORE_DIR, `linkedin-upload-${Date.now()}.zip`);
+      writeFileSync(tmp, Buffer.concat(chunks));
+      try { return json(res, 200, { result: importExport(tmp, { self: PROFILE_NAME() }) }); }
+      catch (e) { return json(res, 400, { error: String(e?.message || e) }); }
+      finally { try { unlinkSync(tmp); } catch { /* already gone */ } }
+    }
+    if (req.method === 'POST' && url.pathname === '/api/linkedin/tie') {
+      const body = await readBody(req);
+      if (!getJob(String(body.jobId || ''))) return json(res, 404, { error: 'no such job' });
+      return json(res, 200, { tied: tiePerson(String(body.name || ''), String(body.jobId)) });
+    }
+
+    /** Take a job off the Outreach tab. Its research and its ledger rows stay. */
+    if (req.method === 'POST' && url.pathname === '/api/outreach/remove') {
+      const body = await readBody(req);
+      const id = String(body.id || '');
+      if (!id || !getJob(id)) return json(res, 404, { error: 'no such job' });
+      removeFromOutreach(id);
+      return json(res, 200, { ok: true });
     }
 
     /** Draft one message. Returns it WITH its problems, and never sends it. */
@@ -2013,11 +2932,104 @@ const server = http.createServer(async (req, res) => {
         contact,
         spec,
         request: String(body.request || ''),
+        lead: researchedPerson(job.id, contact.name),
       });
       return json(res, 200, {
         ...draft,
         email: contact.name && hints.domain ? candidateEmail(contact.name, hints) : null,
       });
+    }
+
+    /**
+     * WRITE THE MESSAGE FOR SOMEONE ALREADY SAVED (2026-09-26).
+     *
+     * Seventeen people were saved by the 2026-09-15 research with no message at
+     * all, and the row said "drafted" over nothing. The job page's form refused
+     * to write to them because the one-person-per-role gate counted the very
+     * person he wanted to write to. This writes for the saved person, keeps
+     * their channel and persona, and stores the text on their row. It never
+     * sends anything.
+     */
+    if (req.method === 'POST' && url.pathname === '/api/outreach/contact/write') {
+      const body = await readBody(req);
+      const c = getContact(String(body.contactId || ''));
+      if (!c) return json(res, 404, { error: 'no such contact' });
+      if (c.do_not_contact) return json(res, 409, { error: 'marked do not contact' });
+      const job = getJob(String(c.job_id || ''));
+      if (!job) return json(res, 404, { error: 'the job this person was saved for is gone from the store' });
+      const channel = CHANNELS[body.channel] ? body.channel : (CHANNELS[c.channel] ? c.channel : 'note');
+      const hints = emailHintsFor(job.company);
+      const spec = targetSpec(job, { description: getDescription(job.id) || '', domain: hints.domain || '' });
+      const draft = await writeOutreach(job, {
+        jd: getDescription(job.id) || '',
+        channel,
+        persona: c.persona || 'team',
+        contact: { name: c.name, title: c.title || '' },
+        spec,
+        request: String(body.request || ''),
+        lead: researchedPerson(job.id, c.name),
+        // A saved person's note is written unattended (the row's Write
+        // button); one more try before it is shown as failed.
+        retries: 2,
+      });
+      // ONLY A MESSAGE THAT PASSED IS STORED. A failed one comes back with its
+      // problems for him to see, and the row keeps saying "no message written
+      // yet" — five failed notes, one of them the model's own word count, were
+      // stored as ready on 2026-09-26.
+      if (!draft.text || !draft.ok) return json(res, 200, { ...draft, contact: c });
+      const saved = saveContact({ id: c.id, draft: draft.text, channel });
+      return json(res, 200, { ...draft, contact: saved });
+    }
+
+    /**
+     * PUT THIS RESUME IN DOWNLOADS AS "Alex Rivera Resume.pdf" (2026-09-27),
+     * replacing the one there. See DOWNLOADS_DIR for why not a browser download.
+     */
+    if (req.method === 'POST' && url.pathname === '/api/outreach/resume-to-downloads') {
+      const body = await readBody(req);
+      const full = resumeFile(body.dir, body.file);
+      if (!full) return json(res, 404, { error: 'no such resume' });
+      const dest = path.join(DOWNLOADS_DIR, ATTACH_NAME);
+      try {
+        mkdirSync(DOWNLOADS_DIR, { recursive: true });
+        copyFileSync(full, dest);
+      } catch (e) {
+        // Open in a PDF viewer on Windows is the usual cause: the file is locked.
+        return json(res, 409, { error: `could not replace ${dest} (${e.code || e.message}); close it if it is open and press again` });
+      }
+      return json(res, 200, { ok: true, path: dest, from: path.basename(full) });
+    }
+
+    /**
+     * WRITE TO THIS PERSON INSTEAD (2026-09-27). The role has one slot; a
+     * better lead replaces a saved person he has not written to. Refused for
+     * anyone he has sent to, heard from, or marked do-not-contact.
+     */
+    if (req.method === 'POST' && url.pathname === '/api/outreach/contact/swap') {
+      const body = await readBody(req);
+      const old = getContact(String(body.contactId || ''));
+      if (!old) return json(res, 404, { error: 'no such contact' });
+      const job = getJob(String(old.job_id || ''));
+      if (!job) return json(res, 404, { error: 'the job this person was saved for is gone from the store' });
+      const name = String(body.name || '').trim();
+      if (!name) return json(res, 400, { error: 'a contact needs a name' });
+      if (!removeUnsent(old.id)) return json(res, 409, { error: `${old.name} has been written to, so they stay` });
+      const saved = saveContact({
+        job_id: job.id, company: job.company, name,
+        title: String(body.title || ''), persona: String(body.persona || ''),
+        channel: 'message', linkedin_url: String(body.linkedin_url || ''),
+        email: String(body.email || ''), email_conf: body.email ? 'his' : '',
+        note: `Replaced ${old.name} on ${new Date().toISOString().slice(0, 10)}: the research ranked them higher.`,
+      });
+      return json(res, 200, { contact: saved, removed: old.name });
+    }
+
+    /** He edited the message in the row: keep his words. */
+    if (req.method === 'POST' && url.pathname === '/api/outreach/contact/draft') {
+      const body = await readBody(req);
+      const c = getContact(String(body.contactId || ''));
+      if (!c) return json(res, 404, { error: 'no such contact' });
+      return json(res, 200, { contact: saveContact({ id: c.id, draft: String(body.draft ?? '') }) });
     }
 
     /** Record the person, the draft, and what he did with it. */
@@ -2071,6 +3083,9 @@ const server = http.createServer(async (req, res) => {
         description: getDescription(job.id) || '',
         hardBlock: !!job.triage?.flags?.hardBlock,
         refresh: !!body.refresh,
+        // People he already saved are researched too, so their post, its date
+        // and something about them reach the message (2026-09-26).
+        known: forJob(job.id).filter((c) => !c.do_not_contact).map((c) => c.name),
       });
       return json(res, leadRun?.status === 'running' ? 202 : 200, { run: leadRun, contacts: forJob(job.id) });
     }
@@ -2245,7 +3260,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/overview') {
-      return json(res, 200, buildOverview());
+      return json(res, 200, await overviewNow());
+    }
+
+    // HIS PACE (2026-10-16): confirmed applications per day, so he can see
+    // whether he is slacking. jarvis/application-pace.mjs.
+    if (req.method === 'GET' && url.pathname === '/api/pace') {
+      try { return json(res, 200, applicationPace()); } catch (e) { return json(res, 500, { error: String(e.message || e) }); }
     }
 
     if (req.method === 'GET' && url.pathname === '/api/resumes') {
@@ -2263,23 +3284,17 @@ const server = http.createServer(async (req, res) => {
       // path.basename() strips any traversal ("../../.ssh/id_rsa") before the
       // join, and the resolved path is re-checked against RESUME_DIR — the
       // only directory this server will ever read a file out of.
-      const name = path.basename(url.searchParams.get('file') || '');
-      // Resumes now live in per-variant subfolders ("sent", "default",
-      // "total-experience", "automation", …). Allow ONE level, restricted to a plain slug so
-      // nothing path-like survives; the resolved-path containment check below is
-      // still the actual guarantee.
-      const rawDir = url.searchParams.get('dir') || '';
-      const dir = /^[a-z0-9][a-z0-9-]{0,40}$/i.test(rawDir) ? rawDir : '';
-      const full = path.resolve(RESUME_DIR, dir, name);
-      if (!name.toLowerCase().endsWith('.pdf')
-        || !full.startsWith(path.resolve(RESUME_DIR) + path.sep)
-        || !existsSync(full)) {
-        return json(res, 404, { error: 'no such resume' });
-      }
+      const full = resumeFile(url.searchParams.get('dir'), url.searchParams.get('file'));
+      if (!full) return json(res, 404, { error: 'no such resume' });
+      const name = path.basename(full);
       res.writeHead(200, {
         'content-type': 'application/pdf',
         'content-length': statSync(full).size,
-        'content-disposition': contentDisposition('inline', name),
+        // ?download=1 saves it as "Alex Rivera Resume.pdf", the only name a
+        // recruiter ever sees — for attaching to a LinkedIn message (2026-09-27).
+        'content-disposition': url.searchParams.get('download') === '1'
+          ? contentDisposition('attachment', ATTACH_NAME)
+          : contentDisposition('inline', name),
         'cache-control': 'no-cache',
       });
       return createReadStream(full).pipe(res);
@@ -2338,11 +3353,7 @@ const server = http.createServer(async (req, res) => {
         const stale = !Number.isFinite(lastWrite) || (Date.now() - lastWrite) > 10 * 60 * 1000;
         if (stale || (batch.total && batch.done >= batch.total)) batch = { ...batch, running: false, stalled: true };
       }
-      // Lever ships descriptions in its list API, so those count as read too.
-      const readableFilter = { browsable: true, source: READABLE_SOURCES };
-      const readable = count(readableFilter);
-      const read = count({ ...readableFilter, hasDesc: true });
-      const teams = count({ ...readableFilter, hasTeam: true });
+      const { readable, read, teams } = coverageCounts();
       return json(res, 200, {
         batch,
         batchRunning: !!enrichChild || !!batch?.running,
@@ -2377,16 +3388,17 @@ const server = http.createServer(async (req, res) => {
       if (!callerMayHaveToken(req)) return json(res, 403, { error: 'extensions only' });
       noteExtension(null, null);
       console.log(`  extension connected${origin ? ` (${origin.slice(0, 48)})` : ''}`);
-      return json(res, 200, { token: IMPORT_TOKEN, port: PORT });
+      return json(res, 200, { token: IMPORT_TOKEN, port: PORT, person: personPayload() });
     }
 
     if (url.pathname === '/api/apply' || url.pathname === '/api/plan'
       || url.pathname === '/api/apply-resume' || url.pathname === '/api/apply-current'
       || url.pathname === '/api/apply-status' || url.pathname === '/api/extension'
-      || url.pathname === '/api/choose' || url.pathname === '/api/filled'
+      || url.pathname === '/api/choose' || url.pathname === '/api/filled' || url.pathname === '/api/resume-name'
       || url.pathname === '/api/apply-page' || url.pathname === '/api/panel' || url.pathname === '/api/panel-retailor'
       || url.pathname === '/api/cover-letter' || url.pathname === '/api/cover-letter-pdf'
-      || url.pathname === '/api/answer' || url.pathname === '/api/answer-snapshot') {
+      || url.pathname === '/api/answer' || url.pathname === '/api/answer-snapshot' || url.pathname === '/api/form-capture' || url.pathname === '/api/page-errors'
+      || url.pathname === '/api/person') {
       // The extension calls these from the employer's origin, so the same CORS
       // and token gate the assisted import already uses applies here.
       res.setHeader('access-control-allow-origin', '*');
@@ -2474,6 +3486,11 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      // Whose Jarvis this is: the name every file is called by, and the preset.
+      if (url.pathname === '/api/person' && req.method === 'GET') {
+        return json(res, 200, personPayload());
+      }
+
       // How the resume for one application is coming along. Keyed by job id, so
       // three postings can be in flight at once and each reports its own.
       // Has the extension ever spoken to us, and is the copy Chrome loaded current?
@@ -2552,6 +3569,14 @@ const server = http.createServer(async (req, res) => {
       // besides. None of it was reachable. So the extension now opens the list,
       // reports what it sees, and asks; the judgement stays in one place, which
       // is the whole reason the plan is built server-side to begin with.
+      // HIS NAME FOR THIS POSTING'S RESUME FILE (resume-names.mjs), from the
+      // panel. Empty puts the default back.
+      if (url.pathname === '/api/resume-name' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (!body?.id) return json(res, 400, { error: 'which posting?' });
+        try { return json(res, 200, { ok: true, name: setResumeName(String(body.id), String(body.name ?? '')) }); }
+        catch (e) { return json(res, 500, { error: String(e?.message || e) }); }
+      }
       if (url.pathname === '/api/choose' && req.method === 'POST') {
         const body = await readBody(req);
         const want = String(body.want ?? '');
@@ -2559,6 +3584,19 @@ const server = http.createServer(async (req, res) => {
         if (!want || !options.length) return json(res, 400, { error: 'want and options are required' });
         let index = chooseOption(want, options);
         if (index == null || index < 0) index = chooseBand(want, options);
+        // A START DATE AGAINST A LIST OF WAITS (Micron, 2026-09-24): its
+        // availability question is a prompt, so its options reach only this
+        // endpoint, and "June 2027" matched none of "… after offer acceptance".
+        // The planner already converts a date into the list's wait for the
+        // options it can see; this path, for options only the page sees, did not.
+        if (index == null || index < 0) index = chooseDelay(want, options);
+        // A YES NEVER BECOMES A NO ON THE WAY IN (_facts.mjs). Options only a
+        // live page can see are matched here, out of sight of the plan's check:
+        // when the answer and the row it matched say opposite things, no row.
+        if (index >= 0) {
+          const said = polarity(want), row = polarity(options[index]);
+          if (said != null && row != null && said !== row) index = -1;
+        }
         return json(res, 200, {
           index: index == null ? -1 : index,
           value: index >= 0 ? options[index] : null,
@@ -2603,12 +3641,12 @@ const server = http.createServer(async (req, res) => {
         if (!job && (Number(body.filled) || 0) > 0 && /^https?:/i.test(pageUrl)) {
           const meta = await fetchPostingMeta(pageUrl).catch(() => null);
           if (meta?.title) {
-            upsertJobs([{
+            await withStoreLock(() => upsertJobs([{
               url: pageUrl,
               title: meta.title,
               company: meta.company || '',
               source: `${meta.ats}-manual`,
-            }]);
+            }]));
             job = findByUrl(pageUrl) || null;
           }
         }
@@ -2652,14 +3690,14 @@ const server = http.createServer(async (req, res) => {
             goneNote = `the page at this address is dead but the ATS still lists the job (${api.reason}) — find it on the company's own careers site`;
             console.log(`  NOT retired → ${job.company} — ${job.title}\n    his browser saw: "${String(body.postingGone).slice(0, 80)}" but ${api.reason}`);
           } else {
-            updateJob(job.id, { goneAt: new Date().toISOString() }, { rederive: true });
+            await withStoreLock(() => updateJob(job.id, { goneAt: new Date().toISOString() }, { rederive: true }));
             console.log(`  gone → ${job.company} — ${job.title}\n    his browser saw: "${String(body.postingGone).slice(0, 80)}"`);
           }
         }
         // "You have already applied" on the posting's own page, in his browser.
         // The employer's word for it; the tracker catches up.
         if (body.alreadyApplied && fromOwnPage && job.status !== 'applied') {
-          updateJob(job.id, { status: 'applied' });
+          await withStoreLock(() => updateJob(job.id, { status: 'applied' }));
           console.log(`  already applied → ${job.company} — ${job.title}`);
         }
 
@@ -2687,12 +3725,16 @@ const server = http.createServer(async (req, res) => {
         const submittedSaid = String(body.submitted || '').slice(0, 200);
         const newlySubmitted = submittedSaid && job.status !== 'applied';
         if (newlySubmitted) {
-          updateJob(job.id, { status: 'applied' });
+          await withStoreLock(() => updateJob(job.id, { status: 'applied' }));
           console.log(`  SUBMITTED → ${job.company} — ${job.title}\n    the page said: "${submittedSaid.slice(0, 90)}"`);
         }
 
         const list = (v) => (Array.isArray(v) ? v.slice(0, 60) : []);
-        updateJob(job.id, {
+        // A TEST DRIVE (the harness's own profile) leaves no "prepared" mark on
+        // his row: its fill time is not his, and the mail matcher reads fill
+        // times (2026-09-25 — thirty-odd rows marked by one afternoon's drives).
+        if (body.harness === true) return json(res, 200, { ok: true, recorded: false, why: 'a test drive — not recorded on his row', submit: false });
+        await withStoreLock(() => updateJob(job.id, {
           apply: {
             at: new Date().toISOString(),
             url: pageUrl || job.url,
@@ -2747,7 +3789,7 @@ const server = http.createServer(async (req, res) => {
                 ? { submittedAt: job.apply.submittedAt, submittedSaid: job.apply.submittedSaid || '' }
                 : {})),
           },
-        });
+        }));
         return json(res, 200, {
           recorded: true,
           job: job.id,
@@ -2784,18 +3826,22 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const pageUrl = String(body.pageUrl || '');
         if (!/^https?:/i.test(pageUrl)) return json(res, 400, { error: 'pageUrl is required' });
+        await resolveSmartRecruitersPublication(pageUrl);
+        await resolveEightfoldPosting(pageUrl);
         const posting = body.posting && typeof body.posting === 'object' ? body.posting : {};
         const tidy = (v, n) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, n);
         const title = tidy(posting.title, 200);
         const rawCompany = tidy(posting.company, 120);
-        const company = NOT_A_COMPANY_RE.test(rawCompany) ? '' : rawCompany;
+        const company = companyForPage(pageUrl, NOT_A_COMPANY_RE.test(rawCompany) ? '' : rawCompany);
         const location = tidy(posting.location, 120);
         const description = String(posting.description || '').replace(/\r/g, '').trim().slice(0, MAX_PAGE_JD_CHARS);
         const postingUrl = /^https?:/i.test(String(posting.url || '')) ? String(posting.url).slice(0, 2000) : '';
 
         // 1. Already in the store? The posting's own canonical URL is tried too —
         //    a Greenhouse form at /jobs/123#app names its posting as /jobs/123.
-        let job = jobForPage(pageUrl) || (postingUrl ? jobForPage(postingUrl) : null)
+        // A SuccessFactors portal by title first — its URL names nothing (F-559).
+        let job = (SF_PORTAL_RE.test(pageUrl) && title ? findSuccessFactorsPosting([title]) : null)
+          || jobForPage(pageUrl) || (postingUrl ? jobForPage(postingUrl) : null)
           || jobByRequisition(pageUrl) || (postingUrl ? jobByRequisition(postingUrl) : null);
         let recorded = false;
 
@@ -2827,9 +3873,36 @@ const server = http.createServer(async (req, res) => {
         //    itself when it names one.
         if (!job && pageReadPostingIsRecordable(posting, title, description)) {
           const at = postingUrl || pageUrl;
-          upsertJobs([{ url: at, title, company, location, description, source: 'extension' }]);
+          await withStoreLock(() => upsertJobs([{ url: at, title, company, location, description, source: 'extension' }]));
+          PAGE_MISS.clear();
           job = findByUrl(at) || null;
           recorded = !!job;
+          // HIS LINKEDIN CARD FOLDS INTO THE PAGE HE IS ON, NOW (2026-10-16).
+          // Weave's Mechatronics Engineer sat in his Inbox as a LinkedIn copy;
+          // its Dover form was recorded as a second, undecided row, and the
+          // form knew nothing of his pick. dedupe.mjs (F-674) would join them,
+          // but only after the next scan finishes. Same rule, done here: the
+          // page's row keeps the posting and takes his decision and note; the
+          // copy points at it.
+          if (job) {
+            try {
+              await withStoreLock(() => {
+                const twins = db().prepare(`SELECT id, company, title, status, status_changed_at, pick_note FROM jobs
+                  WHERE source = 'linkedin' AND superseded_by IS NULL AND id != ? AND lower(title) = lower(?)`).all(String(job.id), String(job.title || title))
+                  // Both employers named: an empty one would match every copy of the title.
+                  .filter((r) => bare(r.company) && bare(job.company || company) && sameCompany(r.company, job.company || company));
+                for (const r of twins) {
+                  const mine = getJob(String(job.id));
+                  if (['inbox', 'queued', 'interested', 'applied', 'hidden'].includes(r.status) && (!mine?.status || mine.status === 'new')) {
+                    db().prepare('UPDATE jobs SET status = ?, status_changed_at = ?, pick_note = COALESCE(pick_note, ?) WHERE id = ?')
+                      .run(r.status, r.status_changed_at || new Date().toISOString(), r.pick_note, String(job.id));
+                  }
+                  db().prepare('UPDATE jobs SET superseded_by = ? WHERE id = ?').run(String(job.id), r.id);
+                }
+              });
+              job = getJob(String(job.id)) || job;
+            } catch (e) { console.log(`  (could not fold the LinkedIn copy: ${e?.message || e})`); }
+          }
         }
 
         // 3. Still nothing: a bare form on an ATS whose page carries no posting
@@ -2837,7 +3910,8 @@ const server = http.createServer(async (req, res) => {
         if (!job) {
           const meta = await fetchPostingMeta(pageUrl).catch(() => null);
           if (meta?.title) {
-            upsertJobs([{ url: pageUrl, title: meta.title, company: meta.company || '', source: `${meta.ats}-manual` }]);
+            await withStoreLock(() => upsertJobs([{ url: pageUrl, title: meta.title, company: companyForPage(pageUrl, meta.company || ''), source: `${meta.ats}-manual` }]));
+            PAGE_MISS.clear();
             job = findByUrl(pageUrl) || null;
             recorded = !!job;
           }
@@ -2854,7 +3928,7 @@ const server = http.createServer(async (req, res) => {
         const id = String(job.id);
         const hadBody = !!(getDescription(id) || '').trim();
         if (!hadBody && description.length >= MIN_PAGE_JD_CHARS) {
-          updateJob(id, { description }, { rederive: true });
+          await withStoreLock(() => updateJob(id, { description }, { rederive: true }));
         }
         const hasBody = hadBody || description.length >= MIN_PAGE_JD_CHARS;
 
@@ -2881,10 +3955,24 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/plan' && req.method === 'POST') {
         const body = await readBody(req);
         const fields = body.fields;
+        await resolveSmartRecruitersPublication(body.pageUrl);
+        await resolveEightfoldPosting(body.pageUrl);
+        // THE PAGE IN FRONT OF HIM WINS over the tab's remembered id (F-492),
+        // for the plan as for the resume: an armed tab that moved on to another
+        // employer's form was planned as the old one — its company, its city.
+        let rebound = false;
+        if (body.id && body.pageUrl) {
+          const real = jobForRequest(String(body.id), { pageUrl: body.pageUrl, heading: body.heading || '', pageTitle: body.pageTitle || '' });
+          if (real && String(real.id) !== String(body.id)) { body.id = String(real.id); rebound = true; }
+        }
         // The extension sends the page it is on; that decides which application
         // this is, not whichever one happened to finish last.
         const picked = body.id
-          ? { id: String(body.id), ctx: APPLY_CONTEXT.get(String(body.id)), matched: 'id' }
+          // A rebound id came from the PAGE, and says so, so the tab adopts it:
+          // otherwise the plan was right and the tab's report still went out
+          // under the old job (Cintal's Rippling form logged as Western
+          // Digital, with WD's questions on its list — F-568, 2026-09-24).
+          ? { id: String(body.id), ctx: APPLY_CONTEXT.get(String(body.id)), matched: rebound ? 'page' : 'id' }
           : contextForPage(body.pageUrl);
         let id = picked.id;
         let ctx = picked.ctx;
@@ -2946,7 +4034,7 @@ const server = http.createServer(async (req, res) => {
         try { profile = loadApplyProfile(); }
         catch (e) { return json(res, 500, { error: String(e.message || e) }); }
         noteExtension(body.extensionVersion, body.pageUrl);
-        const plan = planForm(fields, profile, {
+        const planOpts = {
           // The employer this application is for — a question about his history
           // with them is answered from his own work history (F-376).
           //
@@ -2956,6 +4044,7 @@ const server = http.createServer(async (req, res) => {
           // Materials?" went back to the standing No on Applied Materials' own
           // form (measured 2026-09-07). The id already names the posting.
           company: ctx?.company || (id ? getJob(String(id))?.company : null) || null,
+          location: ctx?.location || (id ? getJob(String(id))?.location : null) || null,
           familyKey: ctx?.familyKey || null,
           titles: ctx?.titles || null,
           extensionVersion: body.extensionVersion || null,
@@ -2966,7 +4055,31 @@ const server = http.createServer(async (req, res) => {
           // ranking is plain text overlap, no model call. Same source the fit
           // score and the resume tailor already read.
           jd: (id ? (getJob(String(id))?.description || '') : '') || '',
-        });
+        };
+        // His own past answers, for the questions no rule knows (answer-log
+        // pastAnswers): Intel's questionnaire, Samsung's, Western Digital's.
+        try { profile.pastAnswer = pastAnswers(); } catch { /* the rules alone, as before */ }
+        // Has he applied here before? The store knows (F-621).
+        try { profile.appliedHereBefore = planOpts.company ? appliedElsewhereAt(planOpts.company, id) > 0 : null; } catch { /* the standing answer, as before */ }
+        const plan = planForm(fields, profile, planOpts);
+        if (id) {
+          const words = letterWordsFrom(fields.map((f) => f?.label));
+          if (words.length) LETTER_WORDS.set(String(id), words);
+          // ANY MENTION STARTS THE LETTER (his ask, 2026-10-03): the page's
+          // text, a label on this step, or the posting's description — after
+          // the form's own required words were read just above.
+          try {
+            const job0 = getJob(String(id));
+            const said = body.mentionsLetter ? 'the page mentions a cover letter'
+              : fields.some((f) => MENTIONS_LETTER_RE.test(String(f?.label || ''))) ? 'a field asks for a cover letter'
+              : MENTIONS_LETTER_RE.test(String(getDescription(String(id)) || '')) ? 'the posting mentions a cover letter' : '';
+            if (job0 && said) startLetterFor(String(id), job0, said);
+          } catch { /* a head start, never the plan */ }
+        }
+        // A LEFTOVER QUESTION IN NEW WORDS, RECOGNISED (recognise.mjs). Haiku
+        // says which known question it is; the known question's own rule
+        // answers it from his files, through every check, flagged for review.
+        try { await recogniseLeftovers(plan, fields, profile, planOpts); } catch { /* never costs him the plan */ }
         // EVERY QUESTION IT COULD NOT ANSWER IS WRITTEN DOWN, WITH ITS OPTIONS.
         //
         // His ask, 2026-09-18: "a lot of times its the same stuff cv.md
@@ -3034,7 +4147,7 @@ const server = http.createServer(async (req, res) => {
           // still has to fill, which is the failure this project treats as
           // worse than a wrong answer.
           const toWrite = id ? (plan.essays || []) : [];
-          const startOne = (e, avoid) => {
+          const startOne = (e, avoid, allInOne = 0) => {
             const key = answerKeyFor(id || '', e.label);
             const had = answerFor(key) || siblingAnswer(id, e.label, key);
             if (had && (had.status === 'writing' || had.status === 'ready')) return had;
@@ -3043,11 +4156,12 @@ const server = http.createServer(async (req, res) => {
               jd: id ? getDescription(String(id)) : null,
               kind: e.kind || null,
               context: e.context || '',
-              field: { label: e.label, near: e.context || '', maxLength: e.maxLength || 0, placeholder: e.placeholder || '' },
+              field: { label: e.label, type: e.type || '', multiline: e.multiline === true, near: e.context || '', maxLength: e.maxLength || 0, placeholder: e.placeholder || '' },
               stem: e.stem || '',
               seriesIndex: e.seriesIndex || 0,
               seriesOf: e.seriesOf || 0,
               avoid,
+              allInOne,
             });
           };
           const loose = toWrite.filter((e) => !e.stem);
@@ -3066,7 +4180,9 @@ const server = http.createServer(async (req, res) => {
             (async () => {
               const written = [];
               for (const e of members) {
-                const entry = startOne(e, written.slice());
+                // ONE BOX asking for several (Nudge, 2026-09-24: "Please provide
+                // three examples…" with nowhere else to put them) holds all of them.
+                const entry = startOne(e, written.slice(), members.length === 1 && (e.seriesOf || 0) > 1 ? e.seriesOf : 0);
                 // Wait for THIS one before starting the next, so the next can
                 // differ from it. Capped, because a stuck write must not
                 // strand the rest of the group unwritten.
@@ -3115,6 +4231,10 @@ const server = http.createServer(async (req, res) => {
           ...plan,
           resumeUrl: trusted ? `/api/apply-resume?id=${encodeURIComponent(id)}` : null,
           matched: picked.matched,
+          // Who the job is, so a tab that adopts a page-matched id (F-568)
+          // stops carrying the previous job's name.
+          company: ctx?.company || (id ? getJob(String(id))?.company : null) || null,
+          title: ctx?.title || (id ? getJob(String(id))?.title : null) || null,
           // "You already applied to this" on the page itself (F-414).
           applied: id ? appliedBefore(getJob(String(id))) : null,
           // WORDS FOR THE STATE IT IS ACTUALLY IN. "Press Apply on the dashboard
@@ -3253,6 +4373,32 @@ const server = http.createServer(async (req, res) => {
       // THE FORM AS IT WENT OUT (his ask, 2026-09-24). The extension reads every
       // field as Next or Submit is pressed; answer-log.mjs sets each beside the
       // plan: kept, changed, cleared, you answered, left blank, edited.
+      // THE MARKUP AROUND A CONTROL THAT DID NOT TAKE (F-655): an upload the
+      // page never showed. One line per capture, for reading when a form
+      // fails in a way the answer log cannot explain. Values were stripped in
+      // the page; this keeps the last 400.
+      if (url.pathname === '/api/form-capture' && req.method === 'POST') {
+        const body = await readBody(req);
+        const file = path.join(STORE_DIR, 'form-captures.jsonl');
+        const row = { at: new Date().toISOString(), id: String(body.id || ''), pageUrl: String(body.pageUrl || '').slice(0, 600),
+          why: String(body.why || '').slice(0, 200), label: String(body.label || '').slice(0, 200), html: String(body.html || '').slice(0, 24000) };
+        try {
+          const prior = existsSync(file) ? readFileSync(file, 'utf-8').split('\n').filter(Boolean).slice(-399) : [];
+          writeFileSync(file, `${[...prior, JSON.stringify(row)].join('\n')}\n`);
+        } catch { return json(res, 500, { ok: false }); }
+        return json(res, 200, { ok: true });
+      }
+      // WHAT THE FORM SAID BACK (his ask, 2026-10-02): red text, alert
+      // banners and boxes marked invalid, read by the extension after a press
+      // or as they appear — page-errors.mjs, `npm run jarvis:page-errors`.
+      if (url.pathname === '/api/page-errors' && req.method === 'POST') {
+        const body = await readBody(req).catch(() => null);
+        const page = { pageUrl: String(body?.pageUrl || ''), heading: String(body?.heading || ''), pageTitle: String(body?.pageTitle || '') };
+        let job = null;
+        try { job = jobForRequest(String(body?.id || ''), page); } catch { job = null; }
+        const logged = logPageErrors({ pageUrl: page.pageUrl, heading: page.heading, trigger: String(body?.trigger || ''), job, errors: Array.isArray(body?.errors) ? body.errors : [] });
+        return json(res, 200, { ok: true, logged });
+      }
       if (url.pathname === '/api/answer-snapshot' && req.method === 'POST') {
         const body = await readBody(req).catch(() => null);
         const page = { pageUrl: String(body?.pageUrl || ''), heading: String(body?.heading || ''), pageTitle: String(body?.pageTitle || '') };
@@ -3284,7 +4430,9 @@ const server = http.createServer(async (req, res) => {
         try { logRequest({ job, what: 'letter', request, previous: had?.text || '' }); } catch { /* a record, never the letter */ }
         const jd = getDescription(id);
         const ctx = APPLY_CONTEXT.get(id);
-        writeCoverLetter(job, { jd, request, resumeLines: ctx?.resumeLines || [] }).then((r) => {
+        const words = LETTER_WORDS.get(id) || [];
+        writeCoverLetter(job, { jd, request: letterWordsRequest(words, request), resumeLines: ctx?.resumeLines || [] }).then((r) => {
+          if (r.text) r.text = withLetterWords(r.text, words);
           Object.assign(entry, { status: r.text ? 'ready' : 'failed', text: r.text, problems: r.problems, notices: r.notices, why: r.why, error: r.text ? null : r.why });
           if (r.text) {
             try { mkdirSync(LETTER_DIR, { recursive: true }); writeFileSync(path.join(LETTER_DIR, `${id}.md`), `${r.text}\n`); } catch { /* memory holds it */ }
@@ -3327,23 +4475,21 @@ const server = http.createServer(async (req, res) => {
         // letter and answers 425 while it is written, exactly as the resume
         // does, and the filler waits the same way.
         if (!text && !entry && url.searchParams.get('write') === '1') {
-          entry = { status: 'writing', at: new Date().toISOString(), request: '', text: '', problems: [], notices: [], why: '' };
-          LETTERS.set(id, entry);
-          const ctx0 = APPLY_CONTEXT.get(id);
-          writeCoverLetter(job, { jd: getDescription(id), request: '', resumeLines: ctx0?.resumeLines || [] }).then(async (r) => {
-            Object.assign(entry, { status: r.text ? 'ready' : 'failed', text: r.text, problems: r.problems, notices: r.notices, why: r.why, error: r.text ? null : r.why });
-            if (r.text) {
-              try { mkdirSync(LETTER_DIR, { recursive: true }); writeFileSync(path.join(LETTER_DIR, `${id}.md`), `${r.text}\n`); } catch { /* memory holds it */ }
-              const made2 = await renderLetterFile(id, job, r.text).catch(() => null);
-              if (made2) { entry.pdfPath = made2.path; entry.pdfName = path.basename(made2.path); }
-            }
-            console.log(`  letter → ${job.company} — ${job.title}: ${r.why} (the form asked for one)`);
-          }).catch((e) => { Object.assign(entry, { status: 'failed', error: String(e?.message || e) }); });
+          startLetterFor(id, job, 'the form asked for one');
           return json(res, 425, { error: `writing the cover letter for ${job.company} — it attaches when it is ready` });
         }
         if (entry?.status === 'writing') return json(res, 425, { error: `still writing the letter for ${job.company}` });
         if (!text) return json(res, 404, { error: 'no letter for this job yet — ask for one in the panel first' });
-        let made = entry?.pdfPath && existsSync(entry.pdfPath) ? { path: entry.pdfPath } : null;
+        // A letter written before the form's requested word was known gets it
+        // now, and a fresh page — never the old file without it.
+        let stale = false;
+        const withWords = withLetterWords(text, LETTER_WORDS.get(id) || []);
+        if (withWords !== text) {
+          text = withWords; stale = true;
+          if (entry) entry.text = text;
+          try { mkdirSync(LETTER_DIR, { recursive: true }); writeFileSync(path.join(LETTER_DIR, `${id}.md`), `${text}\n`); } catch { /* memory holds it */ }
+        }
+        let made = !stale && entry?.pdfPath && existsSync(entry.pdfPath) ? { path: entry.pdfPath } : null;
         if (!made) {
           made = await renderLetterFile(id, job, text).catch(() => null);
           if (made && entry) { entry.pdfPath = made.path; entry.pdfName = path.basename(made.path); }
@@ -3367,6 +4513,8 @@ const server = http.createServer(async (req, res) => {
         }
         if (!entry) return json(res, 404, { error: 'no letter for this job yet' });
         if (entry.status === 'writing') return json(res, 425, { error: 'still writing the letter' });
+        const words = LETTER_WORDS.get(id) || [];
+        if (words.length && entry.text) entry = { ...entry, text: withLetterWords(entry.text, words) };
         return json(res, 200, { id, ...entry, submit: false });
       }
 
@@ -3399,12 +4547,14 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/panel' && req.method === 'GET') {
         const asked = String(url.searchParams.get('id') || '');
         const pageUrl = url.searchParams.get('pageUrl') || '';
+        await resolveSmartRecruitersPublication(pageUrl);
+        await resolveEightfoldPosting(pageUrl);
         // `asked` used to win outright, so a tab still holding an earlier
         // posting printed that posting's title, fit and "already applied" over
         // the form he was actually looking at (2026-09-19, two Tesla roles).
         const found = jobForRequest(asked, {
           pageUrl, heading: url.searchParams.get('heading') || '', pageTitle: url.searchParams.get('pageTitle') || '',
-        });
+        }) || recordFromAtsSoon(pageUrl);
         if (!found) return json(res, 404, { error: 'this page is not a posting in your store' });
         const job = getJob(String(found.id), { description: true }) || found;
         const fit = scoreFit(job, getProfile());
@@ -3436,7 +4586,16 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (url.pathname === '/api/apply-resume' && req.method === 'GET') {
-        const asked = url.searchParams.get('id');
+        let asked = url.searchParams.get('id');
+        // THE PAGE IN FRONT OF HIM WINS (F-492, applied here too, 2026-09-24).
+        // A tab armed for Western Digital that then opened Beech Valley's
+        // Breezy form attached "Alex Rivera - Western Digital - Hardware
+        // Engineer.pdf" — the tab's remembered id beat the page. When the page
+        // resolves to a different posting, that posting is the application.
+        if (asked && url.searchParams.get('pageUrl')) {
+          const real = jobForRequest(asked, { pageUrl: url.searchParams.get('pageUrl'), heading: url.searchParams.get('heading') || '', pageTitle: url.searchParams.get('pageTitle') || '' });
+          if (real && String(real.id) !== String(asked)) asked = String(real.id);
+        }
         const picked = asked
           ? { id: asked, ctx: APPLY_CONTEXT.get(String(asked)), matched: 'id' }
           : contextForPage(url.searchParams.get('pageUrl'));
@@ -3444,7 +4603,8 @@ const server = http.createServer(async (req, res) => {
         // Resolve the page to a posting BEFORE deciding, so the decision has
         // everything it needs and lives in one pure function.
         const onPage = (!asked && picked.matched !== 'page')
-          ? jobForPage(pageUrl, { heading: url.searchParams.get('heading') || '', pageTitle: url.searchParams.get('pageTitle') || '' })
+          ? (jobForPage(pageUrl, { heading: url.searchParams.get('heading') || '', pageTitle: url.searchParams.get('pageTitle') || '' })
+            || await recordFromAts(pageUrl))
           : null;
         // The id an armed tab carries names a posting even when no context is
         // left for it (the dashboard restarted mid-walk). Build for THAT
@@ -3511,7 +4671,9 @@ const server = http.createServer(async (req, res) => {
           // generic one on purpose — a per-posting filename reads as machine-made.
           // `inline` when the panel is SHOWING it: Chrome's PDF viewer reads
           // the Save name from here, which is the whole point (F-412).
-          'content-disposition': contentDisposition(url.searchParams.get('inline') === '1' ? 'inline' : 'attachment', path.basename(ctx.pdfPath)),
+          // …unless he renamed it for this posting in the panel (resume-names).
+          'content-disposition': contentDisposition(url.searchParams.get('inline') === '1' ? 'inline' : 'attachment',
+            getResumeName(String(asked || picked.id || onPage?.id || '')) || path.basename(ctx.pdfPath)),
         });
         return createReadStream(ctx.pdfPath).pipe(res);
       }
@@ -3782,7 +4944,7 @@ if (window.opener) window.opener.postMessage({ kind: 'jarvis-bridge-ready' }, '*
 
     if (req.method === 'POST' && url.pathname === '/api/company') {
       const { company, hidden } = await readBody(req);
-      return json(res, 200, { hiddenCompanies: setCompanyHidden(company, !!hidden) });
+      return json(res, 200, { hiddenCompanies: await withStoreLock(() => setCompanyHidden(company, !!hidden)) });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/job') {
@@ -3810,6 +4972,43 @@ if (window.opener) window.opener.postMessage({ kind: 'jarvis-bridge-ready' }, '*
         const changed = setStatuses(ids, status);
         return json(res, 200, { changed, counts: counts() });
       });
+    }
+
+    // HIS NOTE ON ONE APPLICATION, from the tracker sheet (2026-09-24).
+    if (req.method === 'POST' && url.pathname === '/api/note') {
+      const { id, note } = await readBody(req);
+      if (!id || typeof note !== 'string') return json(res, 400, { error: 'need { id, note }' });
+      return await withStoreLock(() => {
+        const r = storeDb().prepare('UPDATE jobs SET user_note = ? WHERE id = ?').run(note.trim().slice(0, 2000) || null, String(id));
+        return json(res, 200, { changed: r.changes || 0 });
+      });
+    }
+
+    // THE TRACKER AS A SPREADSHEET FILE (2026-09-24: "change application
+    // tracker to an excel sheet kinda format"). CSV with a byte-order mark, so
+    // Excel opens it with the dashes and accents intact.
+    if (req.method === 'GET' && url.pathname === '/api/applications.csv') {
+      const STAGE = ['interested', 'applied', 'responded', 'interview', 'offer', 'rejected'];
+      const rows = storeDb().prepare(`SELECT company, title, location, status, status_changed_at, applied_at,
+          salary_min, salary_max, salary_interval, url, user_note, pick_note, gone_at, posted_at, first_seen
+        FROM jobs WHERE status IN (${STAGE.map(() => '?').join(',')}) ORDER BY status_changed_at DESC`).all(...STAGE);
+      const cell = (v) => { const s = String(v ?? ''); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+      const day = (v) => (v ? String(v).slice(0, 10) : '');
+      // How stale the posting was when he applied (2026-09-25). With no posting
+      // date, the day Jarvis first saw it gives a floor, written ">=".
+      const ageApplied = (r) => {
+        const applied = Date.parse(r.applied_at || (r.status === 'applied' ? r.status_changed_at : '') || '');
+        const posted = Date.parse(r.posted_at || '') || Date.parse(r.first_seen || '');
+        if (!applied || !posted || applied < posted) return '';
+        return `${r.posted_at ? '' : '>='}${Math.floor((applied - posted) / 86400000)}`;
+      };
+      const waiting = (r) => (r.status_changed_at ? Math.floor((Date.now() - Date.parse(r.status_changed_at)) / 86400000) : '');
+      const pay = (r) => (r.salary_min || r.salary_max ? `${r.salary_min || ''}–${r.salary_max || ''}${r.salary_interval && r.salary_interval !== 'year' ? '/' + r.salary_interval : ''}` : '');
+      const head = ['Company', 'Role', 'Location', 'Status', 'Applied', 'Posting age when applied (days)', 'Last update', 'Days in status', 'Pay', 'Posting', 'Still open', 'Your notes', 'Why it was picked'];
+      const lines = [head.join(',')].concat(rows.map((r) => [r.company, r.title, r.location, r.status === 'interested' ? 'tracking' : r.status,
+        day(r.applied_at || (r.status === 'applied' ? r.status_changed_at : '')), ageApplied(r), day(r.status_changed_at), waiting(r), pay(r), r.url, r.gone_at ? 'no' : 'yes', r.user_note, r.pick_note].map(cell).join(',')));
+      res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="Jarvis applications.csv"' });
+      return res.end('\ufeff' + lines.join('\r\n'));
     }
 
     if (req.method === 'POST' && url.pathname === '/api/skip-reason') {
@@ -3917,8 +5116,10 @@ if (window.opener) window.opener.postMessage({ kind: 'jarvis-bridge-ready' }, '*
       const protect = [
         ...(prof.primaryRoles || []), ...(prof.secondaryRoles || []),
         ...(prof.industries || []), ...(prof.skills || []),
-        'mechanical', 'manufacturing', 'automation', 'robotics', 'design',
-        'process', 'quality', 'test', 'equipment', 'systems', 'production',
+        // The preset's own field words (hardware: mechanical, manufacturing,
+        // automation, robotics, design, process, quality, test, equipment,
+        // systems, production).
+        ...(screen.skipProtect || []),
       ];
       // Any employer he has said yes to in any form.
       const protectCompanies = [...new Set(
@@ -3946,7 +5147,7 @@ if (window.opener) window.opener.postMessage({ kind: 'jarvis-bridge-ready' }, '*
     if (req.method === 'POST' && url.pathname === '/api/accept-rule') {
       const { action, rule, company } = await readBody(req);
       if (action === 'hide-company' && company) {
-        return json(res, 200, { ok: true, hiddenCompanies: setCompanyHidden(String(company), true) });
+        return json(res, 200, { ok: true, hiddenCompanies: await withStoreLock(() => setCompanyHidden(String(company), true)) });
       }
       if (action === 'add-rule' && rule) {
         const line = String(rule).trim();
@@ -3975,12 +5176,14 @@ if (window.opener) window.opener.postMessage({ kind: 'jarvis-bridge-ready' }, '*
       const list = Array.isArray(ids) ? ids.slice(0, 200).map(String) : [];
       const at = new Date().toISOString();
       let marked = 0;
-      for (const id of list) {
-        // First sighting only — re-marking would make "seen today" creep
-        // forward every time he pages back through the deck.
-        const j = getListItem(id);
-        if (j && !j.seenAt) { updateJob(id, { seenAt: at }); marked++; }
-      }
+      await withStoreLock(() => {
+        for (const id of list) {
+          // First sighting only — re-marking would make "seen today" creep
+          // forward every time he pages back through the deck.
+          const j = getListItem(id);
+          if (j && !j.seenAt) { updateJob(id, { seenAt: at }); marked++; }
+        }
+      });
       return json(res, 200, { ok: true, marked });
     }
 
@@ -3988,7 +5191,7 @@ if (window.opener) window.opener.postMessage({ kind: 'jarvis-bridge-ready' }, '*
       // Records a "please analyze this deeply" request. The agent picks these up;
       // the dashboard never runs analysis itself (keeps it instant + cheap).
       const { id } = await readBody(req);
-      const updated = updateJob(id, { deepRequested: new Date().toISOString() });
+      const updated = await withStoreLock(() => updateJob(id, { deepRequested: new Date().toISOString() }));
       if (!updated) return json(res, 404, { error: 'unknown job' });
       return json(res, 200, { ok: true });
     }
@@ -4036,6 +5239,14 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   try { process.on(sig, () => { trace(`${sig} — stopping`); process.exit(0); }); } catch { /* not on this platform */ }
 }
 
+// AN IDLE CONNECTION OUTLIVES A BUSY MOMENT (2026-09-27). Node closes an idle
+// keep-alive socket after 5 s; a resume build holding the event loop lets that
+// close land just as a poll reuses the socket, and the poll fails with
+// ECONNRESET (panel-api.test, mid-build). A client reuses a socket only inside
+// the window the server advertises, so a long one leaves no race.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+
 // An already-running dashboard is the normal case for a desktop shortcut, not an
 // error. Without this, the second launch threw EADDRINUSE and the shortcut window
 // flashed and closed — indistinguishable from "Jarvis won't start".
@@ -4077,4 +5288,13 @@ server.on('error', async (err) => {
 server.listen(PORT, () => {
   console.log(`\n  Jarvis Jobs dashboard → http://localhost:${PORT}\n`);
   console.log('  (Ctrl-C to stop. Actions save to data/jarvis/jobs.db.)\n');
+  // EVERY RESUME ON HIS PHONE (2026-09-27). Each build syncs itself; this
+  // catches anything written while the dashboard was down, then hourly. A test
+  // server's temporary resume folder is refused inside syncToOneDrive.
+  const oneDrive = () => {
+    const r = syncToOneDrive({ from: path.join(RESUME_DIR, 'sent') });
+    if (r.copied || r.removed || r.error || r.pruneHeld) console.log(`  OneDrive resumes: ${r.error || `${r.copied} copied, ${r.removed} removed${r.pruneHeld ? `; ${r.pruneHeld}` : ''}`}`);
+  };
+  setTimeout(oneDrive, 5000).unref();
+  setInterval(oneDrive, 60 * 60 * 1000).unref();
 });

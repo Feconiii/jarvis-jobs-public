@@ -55,9 +55,99 @@ export default {
     // redirect:'error' prevents SSRF via server-side redirects; combined with
     // assertWorkableUrl above it guarantees the final hostname stays in the allowlist.
     const text = await ctx.fetchText(feedUrl, { redirect: 'error' });
-    return parseWorkableMarkdown(text, entry.name);
+    const departments = departmentsFromSearchGuide(text);
+    if (!departments.length) return parseWorkableMarkdown(text, entry.name);
+    // A LARGER BOARD ANSWERS WITH A SEARCH GUIDE, NOT A TABLE (F-659).
+    // Past some size the feed stops listing jobs and explains its query
+    // parameters instead — no row parses, and the scanner reported OnLogic's
+    // 33 openings as "ZERO postings — hiring freeze, or moved ATS" (TMEIC,
+    // Nextern and Celsius the same). The guide names every department and
+    // every country. One search returns at most SEARCH_CAP rows (TMEIC's
+    // 34-role parent department answered 30), so a department past the cap is
+    // asked through its sub-departments instead. Departments alone are not
+    // enough either: 13 of Nextern's 47 have none, so the countries are asked
+    // too and the answers merged.
+    const byUrl = new Map();
+    const searches = [
+      ...departmentSearches(departments).map((name) => `department=${encodeURIComponent(name)}`),
+      ...countriesFromSearchGuide(text).map((c) => `${encodeURIComponent('location[0][country]')}=${encodeURIComponent(c)}`),
+    ];
+    for (const query of searches) {
+      const url = `${feedUrl}?${query}`;
+      assertWorkableUrl(url);
+      for (const job of parseWorkableMarkdown(await ctx.fetchText(url, { redirect: 'error' }), entry.name)) {
+        if (!byUrl.has(job.url)) byUrl.set(job.url, job);
+      }
+    }
+    return [...byUrl.values()];
   },
 };
+
+/** Rows one Workable search returns at most (measured on TMEIC, 2026-10-02). */
+export const SEARCH_CAP = 30;
+
+/**
+ * The department tree of Workable's search guide — the page a large board
+ * serves at /jobs.md in place of its table. Sub-departments are indented
+ * under their parent.
+ *
+ * @param {string} text
+ * @returns {Array<{name: string, count: number, children: Array}>} empty when the page is a table
+ */
+export function departmentsFromSearchGuide(text) {
+  if (typeof text !== 'string' || text.includes('[View](')) return [];
+  const section = text.split(/^## Departments\s*$/m)[1];
+  if (!section) return [];
+  const roots = [];
+  const stack = [];   // [{ indent, node }]
+  for (const line of section.split(/^## /m)[0].split('\n')) {
+    const m = line.match(/^(\s*)- (.+?) \((\d+) roles?\)\s*$/);
+    if (!m) continue;
+    const node = { name: m[2], count: Number(m[3]), children: [] };
+    const indent = m[1].length;
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    (stack.length ? stack[stack.length - 1].node.children : roots).push(node);
+    stack.push({ indent, node });
+  }
+  return roots;
+}
+
+/**
+ * Which departments to search: each one whose search fits under the cap,
+ * and for any that does not, its sub-departments as well. The parent is
+ * still asked — openings filed on it directly belong to no child, and a
+ * capped answer for them beats none.
+ *
+ * @param {Array<{name: string, count: number, children: Array}>} tree
+ * @returns {string[]}
+ */
+export function departmentSearches(tree) {
+  const out = [];
+  for (const d of tree) {
+    out.push(d.name);
+    if (d.count >= SEARCH_CAP) out.push(...departmentSearches(d.children));
+  }
+  return out;
+}
+
+/**
+ * The countries of the same guide's "## Locations" list
+ * ("- United States: Minnesota, Maple Grove | …").
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function countriesFromSearchGuide(text) {
+  if (typeof text !== 'string') return [];
+  const section = text.split(/^## Locations\s*$/m)[1];
+  if (!section) return [];
+  const out = [];
+  for (const line of section.split(/^## /m)[0].split('\n')) {
+    const m = line.match(/^- ([^:]+):/);
+    if (m && !out.includes(m[1].trim())) out.push(m[1].trim());
+  }
+  return out;
+}
 
 /**
  * Parse Workable's public markdown feed. Exported as a named export for unit

@@ -44,13 +44,19 @@
 // mechanical-engineering surface, while Financials, Real Estate and Utilities
 // contribute volume and almost no matching roles.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 import yaml from 'js-yaml';
 
 import { guardArgs } from './cli.mjs';
 import { makeHostLimiter, serviceOf } from './net-pool.mjs';
+import { resolveBranded, renderCareers, closeRenderer } from './branded-boards.mjs';
+import pinpoint from '../providers/pinpoint.mjs';
+import teamtailor from '../providers/teamtailor.mjs';
+import personio from '../providers/personio.mjs';
+import { makeHttpCtx } from '../providers/_http.mjs';
+import { person, discovery } from './targeting.mjs';
 
 const USAGE = `
   node jarvis/discover-ats.mjs [options]
@@ -62,16 +68,56 @@ const USAGE = `
     --concurrency <value> 
     --exclude-sectors <value>
     --limit <value>       
-    --names <value>       
-    --sectors <value>     
-    --seeds <value>       
+    --names <value>
+    --sites-file <json>   [{name, site}] — the website each --names company published
+    --results-file <jsonl> one line per company as it is settled: {name, outcome, provider, url}
+                          (outcome: tracked | dupe | gated | partial | miss | known) — the
+                          coverage ledger (universe.mjs) reads it, and it survives a killed run
+    --sectors <value>
+    --seeds <value>
     --vc <a,b>            VC portfolios, read as company domains
-    --write               
+    --render              render a careers page in headless Chromium when its HTML names no board
+                          (one page at a time; the requests it makes name the ATS)
+    --write
     --help, -h
 `;
 
 // F-163: not one command in this project handled --help, so --help RAN them.
-guardArgs({ usage: USAGE, flags: ["--all-startups","--sp500","--sp400","--sp600","--concurrency","--exclude-sectors","--limit","--names","--sectors","--seeds","--vc","--write"], valued: ["--concurrency","--exclude-sectors","--limit","--names","--sectors","--seeds","--vc"] });
+const RENDER = process.argv.includes('--render');
+// Only when run as a command: reboard.mjs imports the probes, and its own
+// flags are not this tool's.
+const IS_MAIN = !!process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (IS_MAIN) guardArgs({ usage: USAGE, flags: ["--all-startups","--sp500","--sp400","--sp600","--concurrency","--exclude-sectors","--limit","--names","--sites-file","--results-file","--render","--sectors","--seeds","--vc","--write"], valued: ["--concurrency","--exclude-sectors","--limit","--names","--sites-file","--results-file","--sectors","--seeds","--vc"] });
+
+/**
+ * WEBSITES A COMPANY PUBLISHED ITSELF, for `--names` (F-657).
+ *
+ * An ad-hoc name otherwise gets a guessed `<name>.com`. discover-linkedin reads
+ * the website off each company's own LinkedIn page and hands it over here, so
+ * the careers page it links is followed as the company's word, not a guess.
+ * Keyed by lower-cased name; anything unreadable is simply absent.
+ *
+ * @param {string} text  JSON: [{ name, site }]
+ * @returns {Map<string, string>}
+ */
+export function parseSitesFile(text) {
+  const out = new Map();
+  let rows;
+  try { rows = JSON.parse(text); } catch { return out; }
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const name = String(r?.name || '').trim().toLowerCase();
+    let site = '';
+    try { const u = new URL(String(r?.site || '')); if (/^https?:$/.test(u.protocol)) site = u.origin; } catch { /* not a URL */ }
+    if (name && site) out.set(name, site);
+  }
+  return out;
+}
+
+function sitesFromFile(args) {
+  const i = args.indexOf('--sites-file');
+  if (i === -1 || !args[i + 1]) return new Map();
+  try { return parseSitesFile(readFileSync(args[i + 1], 'utf8')); } catch { return new Map(); }
+}
 
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -87,32 +133,15 @@ const TIMEOUT_MS = 12_000;
 // "US person" status, which an F-1/OPT candidate cannot hold. Discovering them
 // would only fill the pipeline with postings that can never be applied to, so
 // they are never auto-added. (See modes/_profile.md for the standing rule.)
-export const CLEARANCE_GATED = [
-  'lockheed', 'northrop', 'raytheon', 'rtx', 'general dynamics', 'l3harris',
-  'huntington ingalls', 'leidos', 'booz allen', 'caci', 'saic', 'palantir',
-  'transdigm', 'howmet', 'axon',
-  // Defence-first companies whose engineering roles are clearance- or
-  // US-person-gated almost without exception. Space and energy startups are
-  // deliberately NOT here: their ITAR postings get hard-blocked individually,
-  // with the quote, so the applyable minority still surfaces.
-  'spacex', 'blue origin', 'anduril', 'shield ai', 'general atomics',
-  'sierra nevada', 'aerovironment', 'kratos', 'epirus', 'radiance technologies',
-  // Added 2026-09-08 with the curated hardware seed: defence-first startups
-  // that read as commercial hard-tech from the name alone, which is exactly
-  // how they would otherwise slip past this gate.
-  'saronic', 'castelion', 'forterra', 'overland ai', 'hidden level',
-  'firestorm labs', 'scout ai', 'applied research associates',
-  // Added 2026-09-09 on MEASUREMENT rather than reputation. This list's own
-  // rule is that space startups stay off it, because their ITAR postings get
-  // blocked one at a time and the applyable minority still reaches him. True
-  // Anomaly has no applyable minority: of the first 25 postings read, **25 of
-  // 25** hard-blocked — security clearance or US-person status, every one. That
-  // is 182 live postings he can never hold, and the criterion this list
-  // already states ("gated almost without exception") is met.
-  'true anomaly',
-  // Same measurement, same answer (2026-09-10): Mach Industries returned
-  // **25 of 25** read postings hard-blocked on clearance or US-person status.
-  'mach industries',
+//
+// The list is the preset's (presets/<preset>/discovery.mjs → clearanceGated,
+// where the history of each name is kept), and it applies only to a person who
+// is NOT a U.S. person: a citizen can hold a clearance. The preset's
+// `skipEmployers` applies to everyone.
+export const CLEARANCE_GATED = discovery.clearanceGated || [];
+const GATED_FOR_THIS_PERSON = [
+  ...(person.usPerson ? [] : CLEARANCE_GATED),
+  ...(discovery.skipEmployers || []),
 ];
 
 /**
@@ -155,7 +184,7 @@ const spaced = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').
 //     "SAIC", "saic.com" and "Axon Enterprise" match; "MosaicML", "Axoni" and
 //     "efficacies" do not.
 const MIN_SUBSTRING = 6;
-const GATE_TERMS = CLEARANCE_GATED.map((g) => {
+const GATE_TERMS = GATED_FOR_THIS_PERSON.map((g) => {
   const flat = flatten(g);
   return {
     flat,
@@ -275,7 +304,14 @@ async function req(url, { method = 'GET', body = null, headers = {} , speculativ
       const res = await fetch(url, {
         method,
         body,
-        headers: { 'user-agent': UA, accept: 'application/json', ...headers },
+        // `connection: close` for the same reason as enrich.mjs (F-425, F-636):
+        // a reused keep-alive socket that ends while undici's parser is paused
+        // throws `assert(!this.paused)` from a socket handler — outside any
+        // try/catch — and kills the run. The 2026-10-01 seeds pass died at
+        // 525/1265 that way, and lost all 525 because results are written at
+        // the end. This header alone did NOT stop it (the rerun died within
+        // seconds at concurrency 8); main() now survives the assertion.
+        headers: { 'user-agent': UA, accept: 'application/json', connection: 'close', ...headers },
         redirect: 'follow',
         signal: controller.signal,
       });
@@ -454,9 +490,30 @@ async function probeAshby({ slug, strong }, name, reqOpts = {}) {
   };
 }
 
-async function probeLever({ slug, strong }, name, reqOpts = {}) {
-  const r = await req(`https://api.lever.co/v0/postings/${slug}?mode=json`, reqOpts);
-  if (!r.ok) return null;
+/**
+ * LEVER SLUGS ARE CASE-SENSITIVE (2026-09-24). Phoenix Tailings' board is
+ * `PhoenixTailings`; `phoenixtailings` answers 404, so the company fell through
+ * to the LinkedIn import and its postings carried LinkedIn links the extension
+ * could not match to the Lever form he was filling. The same letters in the
+ * company's own capitalisation are tried after the lowercase slug — never a
+ * different spelling, so no new false match.
+ */
+export function leverCaseVariants(slug, name) {
+  const words = String(name || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const out = [slug];
+  for (const v of [words.join(''), words.map((w) => w[0].toUpperCase() + w.slice(1)).join('')]) {
+    if (v && v !== slug && v.toLowerCase() === String(slug).toLowerCase() && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+async function probeLever({ slug: lower, strong }, name, reqOpts = {}) {
+  let r = null; let slug = lower;
+  for (const s of leverCaseVariants(lower, name)) {
+    r = await req(`https://api.lever.co/v0/postings/${s}?mode=json`, reqOpts);
+    if (r.ok) { slug = s; break; }
+  }
+  if (!r?.ok) return null;
   const j = parseJson(r.text);
   const jobs = Array.isArray(j) ? j : [];
   if (!jobs.length) return null;
@@ -517,12 +574,23 @@ async function probeWorkable({ slug, strong }, name, reqOpts = {}) {
   };
 }
 
+/** The demo board BambooHR serves under unclaimed-looking subdomains (F-637). */
+export function isBambooPlaceholder(jobs) {
+  return (jobs || []).some(x => String(x?.id) === '15'
+    && /^IT Security Engineer$/i.test(String(x?.jobOpeningName || '').trim())
+    && /mayfair/i.test(JSON.stringify(x?.location || '')));
+}
+
 async function probeBambooHR({ slug, strong }, name, reqOpts = {}) {
   const r = await req(`https://${slug}.bamboohr.com/careers/list`, reqOpts);
   if (!r.ok) return null;
   const j = parseJson(r.text);
   const jobs = Array.isArray(j?.result) ? j.result : [];
   if (!jobs.length) return null;
+  // BambooHR's placeholder board (F-637): many unrelated subdomains — andai,
+  // culture, curative, xylem, mte — answer with the same demo postings, led by
+  // job #15 "IT Security Engineer" in Mayfair. It is nobody's careers site.
+  if (isBambooPlaceholder(jobs)) return null;
   if (!strong) {
     const sample = jobs.slice(0, 5).map(x => `${x.jobOpeningName || ''} ${x.departmentLabel || ''}`).join(' ');
     if (!nameEvidence(sample, name)) return null;
@@ -701,7 +769,7 @@ async function cxs(tenant, instance, site) {
   );
 }
 
-async function probeWorkday({ slug, strong }, name, reqOpts = {}) {
+export async function probeWorkday({ slug, strong }, name, reqOpts = {}) {
   // Workday's CXS response carries no company name, so there is nothing to
   // corroborate a fragment slug against — and `applied.wd1` would happily
   // return some other Applied's postings. Only full-name tenants are trusted.
@@ -788,9 +856,11 @@ async function resolveCompany({ name, ticker, skipWorkday = false, seeded = fals
   // Only for an AUTHORITATIVE site. A guessed `<name>.com` has to earn its
   // answer the slow way, because a wrong domain would otherwise bind a real
   // board to the wrong company.
+  let platform = '';
   if (site && !siteGuessed) {
     const followed = await resolveViaCareersPage(site, name, { authoritative: true });
     if (followed?.entry) return followed;
+    platform = followed?.platform || '';
   }
 
   // Strong slugs first across every provider: a full-name match anywhere beats
@@ -826,7 +896,7 @@ async function resolveCompany({ name, ticker, skipWorkday = false, seeded = fals
     const followed = await resolveViaCareersPage(site, name, { authoritative: !siteGuessed });
     if (followed) return followed;
   }
-  return partial || { miss: true, name };
+  return partial || { miss: true, name, platform };
 }
 
 // ── concurrency pool ────────────────────────────────────────────────
@@ -878,6 +948,11 @@ const BOARD_PATTERNS = [
   // guessing is hopeless and reading the link off the careers page is the only
   // route. Joby's page names `careers-jobyaviation.icims.com` outright.
   { provider: 'icims', re: /([a-z0-9][a-z0-9-]{1,60})\.icims\.com/gi },
+  // Boards the scanner always could read but no link here recognised
+  // (2026-10-07: ISG's Pinpoint board came in through Runway's apply link).
+  { provider: 'pinpoint', re: /([a-z0-9][a-z0-9-]{1,40})\.pinpointhq\.com/gi },
+  { provider: 'teamtailor', re: /([a-z0-9][a-z0-9-]{1,40})\.teamtailor\.com/gi },
+  { provider: 'personio', re: /([a-z0-9][a-z0-9-]{1,40})\.jobs\.personio\.(?:de|com)/gi },
 ];
 
 /**
@@ -903,8 +978,13 @@ export function workdayLinksIn(html) {
   if (typeof html !== 'string' || !html) return [];
   const out = [];
   const seen = new Set();
+  // The host-first form too — wd3.myworkdaysite.com/recruiting/magna/Magna
+  // (2026-10-04: Magna, 1,412 postings, linked only this way and was a miss).
+  // Same tenant, instance and site; the cxs API answers on either host.
+  const hostFirst = [...html.matchAll(/(wd\d{1,3})\.myworkdaysite\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?recruiting\/([a-z0-9][a-z0-9-]{1,39})\/([A-Za-z0-9_-]{2,60})/gi)]
+    .map(([, instance, tenant, site]) => [null, tenant.toLowerCase(), instance.toLowerCase(), site]);
   WORKDAY_LINK_RE.lastIndex = 0;
-  for (const m of html.matchAll(WORKDAY_LINK_RE)) {
+  for (const m of [...html.matchAll(WORKDAY_LINK_RE), ...hostFirst]) {
     const [, tenant, instance, site] = m;
     // `wday` is the API path prefix, not a site id.
     if (site === 'wday') continue;
@@ -948,6 +1028,28 @@ export function boardLinksIn(html) {
   return out;
 }
 
+// A board read through its own provider, for the shapes whose response is the
+// postings themselves. Their APIs name no company, so a guessed link must carry
+// one of the company's own slugs in its subdomain (the iCIMS rule).
+const providerCtx = makeHttpCtx();
+function viaProvider(provider, urlOf) {
+  return async ({ slug, strong }, name) => {
+    if (!strong) {
+      const ours = slugCandidates(name).map((c) => c.slug).filter((x) => x.length >= 4);
+      if (!ours.some((x) => slug.includes(x))) return null;
+    }
+    try {
+      const careers_url = urlOf(slug);
+      const jobs = await provider.fetch({ name, careers_url, provider: provider.id }, providerCtx);
+      if (!jobs.length) return null;
+      return { entry: { name, careers_url, provider: provider.id }, provider: provider.id, count: jobs.length };
+    } catch { return null; }
+  };
+}
+const probePinpoint = viaProvider(pinpoint, (slug) => `https://${slug}.pinpointhq.com`);
+const probeTeamtailor = viaProvider(teamtailor, (slug) => `https://${slug}.teamtailor.com`);
+const probePersonio = viaProvider(personio, (slug) => `https://${slug}.jobs.personio.de`);
+
 const PROBE_BY_PROVIDER = {
   greenhouse: probeGreenhouse,
   ashby: probeAshby,
@@ -959,6 +1061,9 @@ const PROBE_BY_PROVIDER = {
   breezy: probeBreezy,
   recruitee: probeRecruitee,
   icims: probeIcims,
+  pinpoint: probePinpoint,
+  teamtailor: probeTeamtailor,
+  personio: probePersonio,
 };
 
 /** Where a company is likely to have put its openings. */
@@ -970,7 +1075,7 @@ const CAREERS_PATHS = ['/careers', '/jobs', '/careers/', '/company/careers', '/a
  * @param {string} site  The company's website, from the seed list.
  * @param {string} name  For corroboration — the found board still has to prove itself.
  */
-async function resolveViaCareersPage(site, name, { authoritative = true } = {}) {
+export async function resolveViaCareersPage(site, name, { authoritative = true } = {}) {
   let origin;
   try {
     const u = new URL(site.startsWith('http') ? site : `https://${site}`);
@@ -979,12 +1084,16 @@ async function resolveViaCareersPage(site, name, { authoritative = true } = {}) 
   } catch { return null; }
 
   const tried = new Set();
+  const pages = [];
+  let refusedHere = 0;
   for (const p of CAREERS_PATHS) {
     // Fetching the company's OWN careers page is never speculation about a
     // shared host — it is one request to that company's domain, and it is the
     // request that tells us which ATS to confirm.
     const r = await req(`${origin}${p}`, { headers: { accept: 'text/html' }, speculative: false });
+    if (r.status === 403 || r.status === 429) refusedHere++;
     if (!r.ok || !r.text) continue;
+    pages.push(r.text);
     for (const { provider, slug } of boardLinksIn(r.text)) {
       const key = `${provider}:${slug}`;
       if (tried.has(key)) continue;
@@ -1039,6 +1148,61 @@ async function resolveViaCareersPage(site, name, { authoritative = true } = {}) 
       };
     }
   }
+  // A BOARD ON THE COMPANY'S OWN DOMAIN (branded-boards.mjs, 2026-10-03).
+  // careers.garmin.com, careers.ti.com: SuccessFactors, Oracle, Phenom and the
+  // careers-home app, which no shared-host link reveals. A guessed domain must
+  // first show the company's name on its own pages, or a namesake's careers
+  // site would be bound to this company.
+  // Every page refused us: bot protection, not an absence of careers. Named
+  // so the ledger does not count it as a company with no board.
+  if (!pages.length) return refusedHere ? { miss: true, name, platform: 'bot-blocked' } : null;
+  if (!authoritative && !pages.some((t) => nameEvidence(t, name))) return null;
+  const branded = await resolveBranded(pages, origin, name, {
+    fetchPage: async (u) => {
+      const r = await req(u, { headers: { accept: 'text/html' }, speculative: false });
+      return r.ok ? r.text : '';
+    },
+  });
+  if (branded?.entry) return branded;
+  // RENDERED, LAST (--render). The page's own script asks its ATS for jobs;
+  // that request names the board when no link in the HTML does. Only the
+  // company's own published site, or a guessed one that already named it.
+  if (RENDER) {
+    for (const path of ['/careers', '/']) {
+      const text = await renderCareers(`${origin}${path}`);
+      if (!text) continue;
+      const hit = await boardFromText(text, name, authoritative, tried);
+      if (hit) return hit;
+      const b2 = await resolveBranded([text], origin, name);
+      if (b2?.entry) return b2;
+      if (b2?.platform && !branded?.platform) return { miss: true, name, platform: b2.platform };
+    }
+  }
+  // Nothing readable, but the platform it runs on is worth naming: the
+  // coverage ledger counts misses per platform, which says what to build next.
+  return branded?.platform ? { miss: true, name, platform: branded.platform } : null;
+}
+
+/** The shared-host and Workday links in a page's text, verified — for rendered pages. */
+export async function boardFromText(text, name, authoritative, tried) {
+  for (const { provider, slug } of boardLinksIn(text)) {
+    const key = `${provider}:${slug}`;
+    if (tried.has(key)) continue;
+    tried.add(key);
+    const probe = PROBE_BY_PROVIDER[provider];
+    if (!probe) continue;
+    const hit = await probe({ slug, strong: authoritative }, name, { speculative: false });
+    if (hit?.entry) return hit;
+  }
+  for (const { tenant, instance, site } of workdayLinksIn(text)) {
+    const key = `workday:${tenant}.${instance}/${site}`;
+    if (tried.has(key)) continue;
+    tried.add(key);
+    if (!authoritative && !new Set(slugCandidates(name).map(c => c.slug)).has(tenant.toLowerCase())) continue;
+    const w = await cxs(tenant, instance, site);
+    const total = w.ok ? Number(parseJson(w.text)?.total ?? 0) : 0;
+    if (total) return { entry: { name, careers_url: `https://${tenant}.${instance}.myworkdayjobs.com/${site}` }, provider: 'workday', count: total };
+  }
   return null;
 }
 
@@ -1064,25 +1228,12 @@ function parseCsv(text) {
   return rows;
 }
 
-// Tags/industries that mean a startup actually builds physical things. YC and
-// a16z portfolios run to thousands of companies, the overwhelming majority of
-// them B2B SaaS with no mechanical-engineering surface whatsoever. Probing all
-// of them would cost hours of requests to add companies that will never post a
-// relevant role, so the seed list is filtered before any network work happens.
-// Tuned once against a real YC run. "healthcare" and "biotech" were in the
-// first version and were far too broad — YC tags every telehealth and
-// claims-billing SaaS with them, which flooded the results with companies that
-// will never post a mechanical role. "medical device" and "hard tech" capture
-// the physical-product subset without the digital-health tail.
-export const HARDWARE_TAGS = [
-  'hardware', 'hard tech', 'robotics', 'manufacturing', 'aerospace', 'space',
-  'drones', 'autonomous', 'self-driving', 'automotive', 'electric vehicle',
-  'energy', 'climate', 'nuclear', 'semiconductor', 'supply chain', 'logistics',
-  'construction', 'medical device', 'medical devices', 'industrial',
-  'agriculture', 'iot', '3d printing', 'materials', 'batteries',
-  'transportation', 'aviation', 'mining', 'oil and gas', 'sensors',
-  'manufacturing automation', 'warehouse',
-];
+// Tags/industries that mean a startup works in the person's field. YC and a16z
+// portfolios run to thousands of companies, most of them nothing to do with any
+// one field, so the seed list is filtered before any network work happens. The
+// tags are the preset's (discovery.seedTags; the hardware preset keeps the
+// history of how its list was tuned). `--all-startups` skips the filter.
+export const HARDWARE_TAGS = discovery.seedTags || [];
 
 export function looksHardware(company) {
   const hay = [
@@ -1263,7 +1414,7 @@ function existingEntries() {
   };
 }
 
-function renderEntry(hit, sector) {
+export function renderEntry(hit, sector) {
   const e = hit.entry;
   const lines = [`  - name: ${JSON.stringify(e.name)}`];
   // Pinned when the probe knows which adapter answered. Detection normally
@@ -1274,6 +1425,10 @@ function renderEntry(hit, sector) {
   if (e.provider) lines.push(`    provider: ${e.provider}`);
   lines.push(`    careers_url: ${e.careers_url}`);
   if (e.api) lines.push(`    api: ${e.api}`);
+  // What the branded-host providers need besides a URL (branded-boards.mjs).
+  for (const k of ['orc_host', 'orc_site', 'pageup_instance', 'pageup_site', 'adp_ccids']) {
+    if (e[k] !== undefined && e[k] !== '') lines.push(`    ${k}: ${JSON.stringify(String(e[k]))}`);
+  }
   const prefix = sector ? `${sector}. ` : '';
   const thin = hit.thin ? ' UNVERIFIED: only a handful of postings - likely NOT the main careers board, review before trusting.' : '';
   lines.push(`    notes: ${JSON.stringify(`${prefix}Auto-discovered via ${hit.provider} (${hit.count} postings live at discovery).${thin}`)}`);
@@ -1281,20 +1436,88 @@ function renderEntry(hit, sector) {
   return lines.join('\n');
 }
 
-function appendToPortals(block) {
+// One header per RUN, even though entries are now written one at a time
+// (F-636): the first write lays the header down, every later one goes directly
+// under it, so a run still reads as one block in portals.yml.
+let runStamp = null;
+
+const urlKey = (u) => String(u || '').toLowerCase().replace(/\/+$/, '');
+
+/**
+ * NEVER WRITE A BOARD THAT IS ALREADY THERE (F-754). portals.yml once held
+ * eight exact duplicates — same name, same careers_url, one discovery batch
+ * written twice — and every scan read each of those boards twice. The run's
+ * own checks are made against portals.yml as it was when the run STARTED, so a
+ * second run writing at the same time, or a batch replayed, got past them. The
+ * file is therefore read again at the moment of writing, and an entry whose
+ * name or careers_url is already tracked is refused.
+ *
+ * @param {string} block  one or more rendered entries ("  - name: …")
+ * @returns {{ written: string[], refused: string[] }}  names
+ */
+export function appendToPortals(block) {
   const src = readFileSync(PORTALS_PATH, 'utf-8');
+  let cfg = {};
+  try { cfg = yaml.load(src) || {}; } catch { /* unparseable: nothing to compare against, written as before */ }
+  const list = Array.isArray(cfg.tracked_companies) ? cfg.tracked_companies : [];
+  const names = new Set(list.map(c => String(c?.name || '').toLowerCase().trim()).filter(Boolean));
+  const urls = new Set(list.map(c => urlKey(c?.careers_url)).filter(Boolean));
+  const written = [], refused = [];
+  const keep = [];
+  for (const part of String(block).split(/\n(?= {2}- name:)/)) {
+    let e = null;
+    try { e = (yaml.load(`tracked_companies:\n${part}`) || {}).tracked_companies?.[0] || null; } catch { /* not an entry: written as given */ }
+    const name = String(e?.name || '').toLowerCase().trim();
+    const url = urlKey(e?.careers_url);
+    if (e && ((name && names.has(name)) || (url && urls.has(url)))) { refused.push(e.name); continue; }
+    if (name) names.add(name);
+    if (url) urls.add(url);
+    if (e?.name) written.push(e.name);
+    keep.push(part);
+  }
+  if (!keep.length) return { written, refused };
+  block = keep.join('\n');
+  writeBlock(src, block);
+  return { written, refused };
+}
+
+function writeBlock(src, block) {
+  if (runStamp && src.includes(runStamp)) {
+    const insertAt = src.indexOf(runStamp) + runStamp.length;
+    writeFileSync(PORTALS_PATH, src.slice(0, insertAt) + block + '\n\n' + src.slice(insertAt));
+    return;
+  }
   const marker = '\ntracked_companies:';
   const at = src.indexOf(marker);
   if (at === -1) throw new Error('portals.yml has no tracked_companies: key');
   const insertAt = at + marker.length;
-  const stamp = `\n\n  # ── Auto-discovered by jarvis/discover-ats.mjs (${new Date().toISOString().slice(0, 10)}) ──\n`;
-  const next = src.slice(0, insertAt) + stamp + block + '\n' + src.slice(insertAt);
+  // A fresh portals.yml (setup writes one) says `tracked_companies: []`. The
+  // block goes under the key as a block list, so the empty flow list has to
+  // go, or the file stops parsing (2026-10-16, the first second-user trial).
+  const emptyList = src.slice(insertAt).match(/^[ \t]*\[\][ \t]*/);
+  const rest = src.slice(insertAt + (emptyList ? emptyList[0].length : 0));
+  runStamp = `\n\n  # ── Auto-discovered by jarvis/discover-ats.mjs (${new Date().toISOString().slice(0, 16).replace('T', ' ')}) ──\n`;
+  const next = src.slice(0, insertAt) + runStamp + block + '\n' + rest;
   writeFileSync(PORTALS_PATH, next);
 }
 
 // ── main ────────────────────────────────────────────────────────────
 
+// ONE LOST REQUEST, NOT A LOST RUN (F-636). undici's `assert(!this.paused)`
+// is thrown from a socket handler, outside any promise, so no catch around a
+// fetch can see it — and this tool holds every resolved board until the end.
+// The request it belongs to still has its own abort timer and settles as a
+// miss; the run carries on. Anything else stays fatal.
 async function main() {
+  process.on('uncaughtException', (e) => {
+    if (e?.code === 'ERR_ASSERTION' && /undici/.test(String(e.stack || ''))) {
+      console.error('  ⚠ undici parser assertion (F-636) — one request lost, run continues');
+      return;
+    }
+    console.error(e);
+    process.exit(1);
+  });
+
   const args = process.argv.slice(2);
   const write = args.includes('--write');
   const useSp500 = args.includes('--sp500');
@@ -1421,11 +1644,11 @@ async function main() {
     // and is labelled a guess for the same reason: it is the only way to reach
     // a board whose slug cannot be derived, and it must not be trusted as if
     // the company had published it.
-    companies.push(...String(args[namesFlag + 1] || '').split(',').map(s => s.trim()).filter(Boolean).map(name => ({
-      name,
-      site: `https://${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`,
-      siteGuessed: true,
-    })));
+    const published = sitesFromFile(args);
+    companies.push(...String(args[namesFlag + 1] || '').split(',').map(s => s.trim()).filter(Boolean).map(name => (
+      published.has(name.toLowerCase())
+        ? { name, site: published.get(name.toLowerCase()), siteGuessed: false }
+        : { name, site: `https://${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`, siteGuessed: true })));
   }
   if (!companies.length) {
     console.error('Nothing to resolve. Pass --sp500, --seeds yc,a16z, and/or --names "A,B".');
@@ -1444,26 +1667,29 @@ async function main() {
 
   if (limitFlag !== -1) companies = companies.slice(0, Number(args[limitFlag + 1]) || companies.length);
 
+  // ONE LINE PER COMPANY, AS IT IS SETTLED (F-701). The coverage ledger needs
+  // to know what happened to every name it handed over — a miss is retried in
+  // a month, a tracked one never again — and a run killed for memory must keep
+  // the answers it already paid for, so nothing waits for the end.
+  const resultsFlag = args.indexOf('--results-file');
+  const resultsFile = resultsFlag !== -1 ? String(args[resultsFlag + 1] || '') : '';
+  const settle = (name, outcome, extra = {}) => {
+    if (!resultsFile) return;
+    try { appendFileSync(resultsFile, `${JSON.stringify({ name, outcome, ...extra })}\n`); } catch { /* a record, never a reason to stop */ }
+  };
+  for (const n of skippedKnown) settle(n, 'known');
+  for (const n of skippedGated) settle(n, 'gated');
+
   console.error(`Resolving ${companies.length} companies (concurrency ${concurrency})…`);
   if (skippedKnown.length) console.error(`  · ${skippedKnown.length} already in portals.yml — skipped.`);
   if (skippedGated.length) console.error(`  · ${skippedGated.length} clearance/ITAR-gated — skipped: ${skippedGated.slice(0, 6).join(', ')}${skippedGated.length > 6 ? ', …' : ''}`);
-
-  let done = 0;
-  const results = await mapPool(companies, concurrency, async (c) => {
-    const r = await resolveCompany(c);
-    done++;
-    if (r.entry) process.stderr.write(`  ✓ ${c.name} → ${r.provider} (${r.count})\n`);
-    else if (r.partial) process.stderr.write(`  ~ ${c.name} → workday tenant ${r.tenant}.${r.instance}, site unknown\n`);
-    if (done % 25 === 0) process.stderr.write(`  … ${done}/${companies.length}\n`);
-    return { ...r, sector: c.sector };
-  });
 
   // Drop hits that landed on a board portals.yml already tracks under another
   // name, and on a board another hit in THIS run already claimed.
   const claimed = new Set(known.urls);
   const dupes = [];
   const gatedLate = [];
-  const hits = results.filter(r => {
+  const admit = (r) => {
     if (!r.entry) return false;
     const key = String(r.entry.careers_url).toLowerCase().replace(/\/+$/, '');
     // THE BOARD URL IS THE LAST WORD ON IDENTITY (F-434). A company can reach
@@ -1475,7 +1701,41 @@ async function main() {
     if (claimed.has(key)) { dupes.push(r.entry.name); return false; }
     claimed.add(key);
     return true;
+  };
+
+  // WRITTEN AS FOUND, NOT AT THE END (F-636). A 1,265-company run takes hours,
+  // and it used to hold every resolved board until the last one returned — so
+  // a crash, or the OS reaping the process for memory, lost all of it (twice on
+  // 2026-10-01: 525 companies, then four runs at once). Each admitted board is
+  // now appended the moment it resolves; a dead run keeps what it found, and a
+  // re-run skips those names as already tracked.
+  let done = 0;
+  const results = await mapPool(companies, concurrency, async (c) => {
+    const r = await resolveCompany(c);
+    done++;
+    if (r.entry) process.stderr.write(`  ✓ ${c.name} → ${r.provider} (${r.count})\n`);
+    else if (r.partial) process.stderr.write(`  ~ ${c.name} → workday tenant ${r.tenant}.${r.instance}, site unknown\n`);
+    if (done % 25 === 0) process.stderr.write(`  … ${done}/${companies.length}\n`);
+    const out = { ...r, sector: c.sector };
+    const wasGated = gatedLate.length;
+    let admitted = admit(out);
+    // Written only if portals.yml, read again now, does not already hold it (F-754).
+    if (admitted && write && appendToPortals(renderEntry(out, out.sector)).refused.length) {
+      admitted = false;
+      dupes.push(r.entry.name);
+    }
+    if (admitted) {
+      out.admitted = true;
+      // A dry run found the board but tracked nothing, and says so.
+      settle(c.name, write ? 'tracked' : 'found', { provider: r.provider, url: r.entry.careers_url, count: r.count });
+    } else if (r.entry) {
+      // The board answered but belongs to someone already tracked, or is gated.
+      settle(c.name, gatedLate.length > wasGated ? 'gated' : 'dupe', { provider: r.provider, url: r.entry.careers_url });
+    } else if (r.partial) settle(c.name, 'partial', { url: `https://${r.tenant}.${r.instance}.myworkdayjobs.com/` });
+    else settle(c.name, 'miss', r.platform ? { platform: r.platform } : {});
+    return out;
   });
+  const hits = results.filter(r => r.admitted);
   if (gatedLate.length) console.error(`  · ${gatedLate.length} dropped — the resolved board is clearance/ITAR-gated: ${gatedLate.join(', ')}`);
   if (dupes.length) console.error(`  · ${dupes.length} resolved to an already-tracked board — skipped: ${dupes.slice(0, 6).join(', ')}${dupes.length > 6 ? ', …' : ''}`);
   const partials = results.filter(r => r.partial);
@@ -1510,7 +1770,7 @@ async function main() {
 
   const block = hits.map(h => renderEntry(h, h.sector)).join('\n\n');
   if (write && hits.length) {
-    appendToPortals(block);
+    // Already on disk — each was appended as it resolved (F-636).
     console.error(`\n  Wrote ${hits.length} entries → ${path.relative(ROOT, PORTALS_PATH)}`);
   } else if (hits.length) {
     console.log(block);
@@ -1530,5 +1790,5 @@ async function main() {
 
 // Only run when invoked directly — importing this file (tests) must not scan.
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch(err => { console.error(err); process.exit(1); });
+  main().then(() => closeRenderer()).catch(err => { console.error(err); process.exit(1); });
 }

@@ -1,0 +1,142 @@
+# Jarvis Jobs: application answer bank (YOUR data; edit freely).
+#
+# `npm run jarvis:setup` copies this to data/jarvis/apply-profile.yml and fills
+# in what it asked you. The apply engine fills forms from that file and NOTHING
+# else. A question with no answer here is left blank and flagged "needs your
+# input" in the review report. It never invents an answer.
+#
+# REVIEW the work-authorization section yourself. Those answers appear on real
+# applications and are legally significant.
+
+identity:
+  # LEGAL name, exactly as on your ID documents.
+  first_name: ""
+  last_name: ""
+  full_name: ""
+  # PREFERRED name: what you go by, and what the resume header says.
+  preferred_first_name: ""
+  preferred_last_name: ""
+  preferred_full_name: ""
+  initials: ""
+  county: ""
+  email: ""
+  phone: ""
+  location: ""          # "City, State" with the full state name
+  address_line1: ""
+  address_line2: ""
+  city: ""
+  state: ""             # full name, e.g. "Washington"
+  postal_code: ""
+  country: "United States of America"
+  linkedin: ""
+  website: ""
+  portfolio: ""
+  github: ""
+  salutation: ""
+
+education:
+  school: ""
+  degree: ""            # e.g. "Bachelor of Science"
+  discipline: ""        # your major
+  graduation: ""        # e.g. "May 2027"
+  graduation_year: ""
+  gpa: ""
+  degree_level: ""      # e.g. "Bachelor's"
+  location: ""
+
+languages:
+  - name: "English"
+    proficiency: "Fluent"
+
+education_entries:
+  - school: ""
+    degree: ""
+    field_of_study: ""
+    gpa: ""
+    first_year: ""      # e.g. "Aug 2023"
+    last_year: ""       # e.g. "May 2027"
+
+# Copy each role from cv.md. Nothing here may say more than cv.md does.
+work_experience: []
+#  - title: ""
+#    company: ""
+#    location: ""
+#    start: "May 2026"
+#    end: "August 2026"
+#    description: >
+#      ...
+
+answers:
+  phone_type: "Mobile"
+
+  # Work authorization (REVIEW: flagged on every application)
+  authorized_to_work_us: ""
+  require_sponsorship: ""
+  visa_status_note: ""
+  us_person: ""
+  protected_individual: ""
+  security_clearance: "No"
+
+  # Logistics
+  earliest_start: ""
+  willing_to_relocate: ""
+  travel_ok: ""
+  remote_or_onsite: "Open to on-site, hybrid, or remote"
+  how_heard: "LinkedIn"
+  skills: ""            # comma list, every one backed by cv.md
+  salary_expectation: ""
+
+  # Campus-recruiting questions
+  currently_in_school: ""
+  highest_education: ""
+  field_of_study: ""
+  opportunity_type: "New College Graduate"
+
+  # Commonly asked
+  current_company: ""
+  current_title: ""
+  reason_for_leaving: "Internship ended"
+  current_employer_reason: "Currently employed"
+  citizenship_status: ""
+  citizenship_country: ""
+  meets_basic_requirements: "Yes"
+  worked_via_agency: "No"
+  employer_agreement: "No"
+  essential_functions: "Yes"
+  future_contact: "Yes"
+  over_18: "Yes"
+  ai_screening_consent: "Yes"
+  communication_optin: "Yes"
+  talent_community_optin: "Yes"
+  data_processing_consent: "Yes"
+  background_check_consent: "Yes"
+  previously_employed_here: "No"
+  previously_applied_here: "No"
+  relatives_at_company: "No"
+  employee_referral: "No"
+  terminated_for_cause: "No"
+  non_compete: "No"
+  agree_to_background_check: ""
+
+# Voluntary self-identification. Leave any of these blank and the engine
+# leaves the question for you.
+eeo:
+  gender: ""
+  hispanic: ""
+  race: ""
+  veteran: ""
+  disability: ""
+
+policy:
+  auto_check_certifications: true
+
+documents:
+  resume_path: ""       # setup fills this from your name
+  cover_letter_path: ""
+
+# Fields the engine must NEVER fill, by policy. Matched against labels.
+never_fill:
+  - signature
+  - date of birth
+  - ssn
+  - social security

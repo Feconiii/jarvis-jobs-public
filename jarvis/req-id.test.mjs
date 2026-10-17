@@ -114,3 +114,15 @@ test('urlHasReqId accepts the same alphanumeric keys and no others', () => {
   assert.equal(urlHasReqId(url, 'r7540'), false, 'lowercase is not the same requisition');
   assert.equal(urlHasReqId(url, 'ABCD7540'), false);
 });
+
+test('the same job number on two employers\' Oracle sites is two postings (F-714)', async () => {
+  const { crossTenant } = await import('./req-id.mjs');
+  // 2026-10-06: Legrand's form showed Darling Ingredients' "Fleet Mechanic 2".
+  assert.equal(crossTenant('https://iadugs.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/1246/apply/email',
+    'https://ekgz.fa.us6.oraclecloud.com/hcmUI/CandidateExperience/en/sites/DarlingII/job/1246'), true);
+  assert.equal(crossTenant('https://a.taleo.net/careersection/2/jobdetail.ftl?job=123', 'https://b.taleo.net/careersection/2/jobdetail.ftl?job=123'), true);
+  assert.equal(crossTenant('https://hcjy.fa.us2.oraclecloud.com/x/sites/CX/job/12469', 'https://hcjy.fa.us2.oraclecloud.com/x/sites/CX_1/job/12469'), false, 'one tenant, two sites: one requisition');
+  assert.equal(crossTenant('https://careers.ti.com/en/sites/CX_1/job/25016597', 'https://edbz.fa.us2.oraclecloud.com/x/job/25016597'), false, 'a company\'s own domain fronting its tenant');
+  assert.equal(crossTenant('https://boards.greenhouse.io/acme/jobs/1', 'https://job-boards.greenhouse.io/acme/jobs/1'), false, 'Greenhouse ids are global');
+  assert.equal(crossTenant('not a url', 'https://x.taleo.net/'), false);
+});

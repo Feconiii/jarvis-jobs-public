@@ -123,6 +123,16 @@ test('the page he is on outranks the job the tab remembers', async () => {
   // remembered binding is for — an apply form on a host the store never saw.
   const off = await get(`/api/panel?id=${a.body.id}&pageUrl=${encodeURIComponent('https://sso.example.test/login')}`);
   assert.equal(off.body.job.id, a.body.id);
+
+  // THE RESUME FOLLOWS THE PAGE TOO (2026-09-24): a tab armed for Western
+  // Digital attached Western Digital's resume to Beech Valley's form.
+  let name = '';
+  for (let i = 0; i < 120 && !name; i += 1) {
+    const r = await fetch(`${BASE}/api/apply-resume?id=${a.body.id}&pageUrl=${encodeURIComponent(`${sibling.url}/apply`)}`, { headers: { 'x-jarvis-token': token } });
+    if (r.status === 200) name = decodeURIComponent(r.headers.get('content-disposition') || '');
+    else await new Promise((res) => setTimeout(res, 1000));
+  }
+  assert.match(name, /Process/i, `the resume is the page's posting's, got "${name}"`);
 });
 
 test('HIS NOTE WRITES THE RESUME AGAIN, and the panel shows the note it was written with', async () => {

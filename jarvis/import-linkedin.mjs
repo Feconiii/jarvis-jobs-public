@@ -53,9 +53,11 @@ import { guardArgs } from './cli.mjs';
 import { htmlToText } from './text.mjs';
 import { triage } from './triage.mjs';
 import { upsertJobs, db } from './store.mjs';
+import { applyRoute } from './linkedin-route.mjs';
 import {
   harvest, companyKey, NEVER_TRACK, DEFAULT_QUERIES, worthTracking,
 } from './discover-linkedin.mjs';
+import { discovery } from './targeting.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -72,6 +74,7 @@ const USAGE = `
     --pages <n>        pages per query, 10 postings each (default 8)
     --limit <n>        stop after n postings
     --from <file>      read postings from a saved harvest instead of searching again
+    --metro <list>     search these LinkedIn locations instead of the whole US
     --only <company>   import only this company out of the harvest
     --as <name>        store it under this name, and import it even though a
                        DIFFERENT company of the same name is tracked
@@ -120,7 +123,7 @@ export async function fetchPosting(id, { fetchImpl = fetch, pause = (ms) => new 
   // empty description would sail through triage unflagged and land in his deck
   // looking like a clean fit. Reported, never invented.
   if (!description) return null;
-  return { description, criteria };
+  return { description, criteria, route: applyRoute(html) };
 }
 
 // ── deciding what to import ─────────────────────────────────────────
@@ -245,8 +248,8 @@ export function toStoreRow(posting, { description, criteria = [] }) {
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
-const FLAGS = ['--dry-run', '--queries', '--days', '--pages', '--limit', '--json', '--only', '--as', '--from'];
-const VALUED = ['--queries', '--days', '--pages', '--limit', '--only', '--as', '--from'];
+const FLAGS = ['--dry-run', '--queries', '--days', '--pages', '--limit', '--json', '--only', '--as', '--from', '--metro'];
+const VALUED = ['--queries', '--days', '--pages', '--limit', '--only', '--as', '--from', '--metro'];
 
 async function main(argv) {
   const args = guardArgs({ usage: USAGE, flags: FLAGS, valued: VALUED, argv });
@@ -274,7 +277,13 @@ async function main(argv) {
     postings = JSON.parse(readFileSync(path.resolve(from), 'utf8')).postings || [];
     say(`  (from ${from} — LinkedIn's search is not asked again)`);
   } else {
-    ({ postings, throttled, unfinished } = await harvest(queries, { days, pages }));
+    // --metro: the same per-place search discover-linkedin runs (2026-10-01). A
+    // country-wide search returns LinkedIn's top pages only; asking each hardware
+    // metro reaches postings that never rank nationally.
+    const metro = flag('metro', '');
+    // Names carry commas ("Austin, Texas Metropolitan Area"): split on ';' when one is there.
+    const places = metro ? metro.split(metro.includes(';') ? ';' : ',').map(s => s.trim()).filter(Boolean).map(name => ({ name, location: name })) : undefined;
+    ({ postings, throttled, unfinished } = await harvest(queries, { days, pages, ...(places ? { places } : {}) }));
   }
   if (throttled) say(`  ⚠ LinkedIn stayed rate-limited: ${unfinished.length} searches never ran, so this import is partial.`);
 
@@ -295,7 +304,7 @@ async function main(argv) {
   if (!flag('only', '')) take = take.filter(p => worthTracking(p.title));
   const offTopic = before - take.length;
   if (limit > 0) take = take.slice(0, limit);
-  if (offTopic) say(`  ${offTopic} left out: the title is not hardware work.`);
+  if (offTopic) say(`  ${offTopic} left out: the title is not ${discovery.fieldWord} work.`);
 
   say(`  ${postings.length} postings. ${skipped.tracked} at companies whose board we read, ` +
       `${skipped.alreadyHave} already in the store, ${skipped.filtered} filtered.`);
@@ -303,9 +312,13 @@ async function main(argv) {
 
   const rows = [];
   let empty = 0;
+  const easy = [];
   for (const p of take) {
     const body = await fetchPosting(p.id);
     if (!body) { empty++; continue; }
+    // Easy Apply only: his resume cannot be tailored there, so it is not his
+    // kind of application (2026-10-02). Named, never silently dropped.
+    if (body.route === 'easy-apply') { easy.push(p); continue; }
     rows.push(toStoreRow(p, body));
     await new Promise(r => setTimeout(r, 1200));
   }
@@ -314,12 +327,16 @@ async function main(argv) {
   if (asJson) {
     console.log(JSON.stringify({
       harvested: postings.length, selected: take.length, withBody: rows.length,
-      noBody: empty, hardBlocked: blocked, dryRun,
+      noBody: empty, easyApplyOnly: easy.length, hardBlocked: blocked, dryRun,
       companies: [...new Set(rows.map(r => r.company))],
     }, null, 1));
   } else {
     console.log(`  ${rows.length} postings with a readable description` +
       `${empty ? `, ${empty} served none and were skipped` : ''}.`);
+    if (easy.length) {
+      console.log(`  ${easy.length} left out: LinkedIn Easy Apply only, no company-site apply.`);
+      for (const p of easy.slice(0, 10)) console.log(`    ${p.company} — ${p.title}`);
+    }
     console.log(`  ${blocked} hard-blocked on work authorization.`);
     console.log(`  ${new Set(rows.map(r => r.company)).size} companies.\n`);
     for (const r of rows.slice(0, 30)) {

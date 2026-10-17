@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { openDb } from './db.mjs';
-import { dedupeKey, locationKey, loadCandidates, isThinBody, winnability, learnedWhere } from './picks.mjs';
+import { dedupeKey, locationKey, loadCandidates, isThinBody, winnability, learnedWhere, exportBar } from './picks.mjs';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -115,6 +115,17 @@ console.log('\n🧪 picks: a place the store already knows is not "unrecognised"
   eq('a place it has never seen stays unknown', learnedWhere('Yixing', places), null);
   eq('an empty location is not a place', learnedWhere('', places), null);
   eq('no evidence at all is safe', learnedWhere('Reno', null), null);
+}
+
+// HIS PICKS SKIP ITAR AND U.S.-PERSON ROLES (2026-09-30, 2026-10-02).
+{
+  const pcb = 'This position requires access to information subject to the International Traffic in Arms Regulations (22 C.F.R, Chapter 1, Subchapter M). Qualified candidates must be legally authorized to access such information.';
+  eq('PCB Piezotronics: ITAR access is a skip', !!exportBar('Manufacturing Engineer I', pcb), true);
+  const sierra = 'This position requires the candidate to be a U.S. Citizen, lawful permanent resident of the U.S., protected individual as defined by 8 U.S.C. 1324b(a)(3), or eligible to obtain the required authorizations from the U.S. Department of State.';
+  eq('Sierra Space: a U.S.-person list, even "or eligible to obtain authorizations", is a skip', !!exportBar('Manufacturing Engineer I', sierra), true);
+  const adi = 'Applicants for this position – except US Citizens, US Permanent Residents, and protected individuals as defined by 8 U.S.C. 1324b(a)(3) – may have to go through an export licensing review process.';
+  eq('Analog Devices: the routine export-licence review is NOT a skip', exportBar('Associate Manufacturing Engineer', adi), null);
+  eq('nothing about export control: no bar', exportBar('Mechanical Engineer', 'Design fixtures for wafer handling robots. BS in Mechanical Engineering.'), null);
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

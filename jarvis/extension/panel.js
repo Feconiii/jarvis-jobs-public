@@ -22,6 +22,30 @@
     } catch (e) { resolve({ ok: false, error: String(e?.message || e) }); }
   });
 
+  /**
+   * WHOSE FILES. The worker keeps the dashboard's person in storage
+   * (`jarvisPerson`); the Download name falls back to theirs when the server
+   * sent none. The original user's name until that is read.
+   */
+  let PERSON_NAME = 'Alex Rivera';
+  const resumeFallback = () => `${PERSON_NAME} Resume.pdf`;
+  try {
+    chrome.storage?.local?.get?.('jarvisPerson')?.then?.((s) => {
+      const n = s?.jarvisPerson?.fullName;
+      if (typeof n !== 'string' || !n.trim()) return;
+      PERSON_NAME = n.trim();
+      const dl = $('#download-pdf');
+      if (dl && dl.getAttribute('download') === 'Alex Rivera Resume.pdf') dl.setAttribute('download', resumeFallback());
+      const ex = $('#file-name-example');
+      if (ex) ex.textContent = `${PERSON_NAME} - Company - Role.pdf`;
+      // The example note names his employers; anyone else gets a generic one.
+      const req = $('#request');
+      if (req && s.jarvisPerson.preset && s.jarvisPerson.preset !== 'hardware-engineering') {
+        req.setAttribute('placeholder', 'e.g. lead with the internship most like this role; keep the analysis tools; drop the oldest job');
+      }
+    })?.catch?.(() => {});
+  } catch { /* no storage here: the default name stands */ }
+
   const state = { tabId: null, jobId: null, pdfUrl: null, fileUrl: '', fileName: '', pollUntil: 0, pollTimer: null, resumeTimer: null, lastKey: '', letter: null, letterTimer: null, letterFor: '', letterMiss: { id: '', at: 0 }, tab: 'resume', tabChosen: false, report: null, reportAt: 0, retryTimer: null };
 
   /**
@@ -365,7 +389,7 @@
       // stopped answering.
       const served = await ask({ type: 'file-url', id: jobId, inline: true });
       state.fileUrl = served.ok ? served.url : '';
-      const name = r.filename || 'Alex Rivera Resume.pdf';
+      const name = r.filename || resumeFallback();
       state.fileName = name;
       const dl = $('#download-pdf');
       dl.href = state.fileUrl || state.pdfUrl;
@@ -374,6 +398,9 @@
       dl.hidden = false;
       $('#attach-pdf').hidden = false;
       $('#save-note').textContent = '';
+      // The name the employer will see, his to change for this posting.
+      $('#name-row').hidden = false;
+      if (document.activeElement !== $('#file-name')) $('#file-name').value = name;
       state.lastKey = jobId;
       frame.src = state.fileUrl || state.pdfUrl;
       frame.hidden = false;
@@ -389,6 +416,7 @@
     openBtn.hidden = true;
     $('#download-pdf').hidden = true;
     $('#attach-pdf').hidden = true;
+    $('#name-row').hidden = true;
     if (r.status === 425) {
       // WHICH STAGE, NOT JUST "STILL". One unchanging sentence over a two-minute
       // build reads as a hang, and he waited on one (2026-09-06).
@@ -487,6 +515,19 @@
     $('#letter-request').value = '';
     renderLetter({ ok: false, status: 'writing' });
     state.letterTimer = setTimeout(() => loadLetter(state.jobId, { wait: true }), 5000);
+  });
+  // SELECT-ALL ON A SHOWN LETTER SELECTS THE LETTER (F-734). In Opera's docked
+  // panel Ctrl+A took the whole panel, and the header, the fit card and
+  // "Filling…" went to Slip Robotics above the letter.
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'a') return;
+    const t = document.activeElement;
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    const letter = $('#letter-text');
+    if (!letter || letter.hidden || !letter.offsetParent || !letter.textContent.trim()) return;
+    e.preventDefault();
+    const r = document.createRange(); r.selectNodeContents(letter);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
   });
   $('#letter-copy').addEventListener('click', async () => {
     const note = $('#letter-note');
@@ -605,7 +646,7 @@
    */
   async function saveIt(saveAs) {
     const note = $('#save-note');
-    const name = $('#download-pdf').getAttribute('download') || 'Alex Rivera Resume.pdf';
+    const name = $('#download-pdf').getAttribute('download') || resumeFallback();
     if (!state.pdfUrl && !state.fileUrl) return;
     try {
       // The dashboard's URL first: it names the file in the header, so the
@@ -641,6 +682,22 @@
       : (r.why || r.error || 'could not attach it');
   }
   $('#attach-pdf').addEventListener('click', () => attachHere('resume', '#save-note'));
+  // RENAME (2026-09-27): saved for this posting on the dashboard, which names
+  // the file on every route out; the preview and Download are reloaded so
+  // they carry the new name too.
+  async function saveName() {
+    if (!state.jobId) return;
+    const note = $('#name-note');
+    note.textContent = 'Saving…';
+    const r = await ask({ type: 'resume-name', id: state.jobId, name: $('#file-name').value });
+    if (!r.ok) { note.textContent = r.error || 'could not save the name'; return; }
+    note.textContent = r.name ? 'Renamed — attach it again if it is already in the form' : 'Back to the original name';
+    $('#file-name').blur();
+    state.lastKey = '';
+    await loadResume(state.jobId);
+  }
+  $('#save-name').addEventListener('click', saveName);
+  $('#file-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveName(); } });
   $('#letter-attach').addEventListener('click', () => attachHere('letter', '#letter-note'));
 
   // Opened from the dashboard's URL, so the viewer's own Save button offers

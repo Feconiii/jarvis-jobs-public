@@ -70,17 +70,28 @@ function quoteFor(text, re) {
 export { classifyVisa } from './visa.mjs';
 import { classifyVisa } from './visa.mjs';
 import { checkDegree } from './degree.mjs';
+import { yearsMentions } from './requirements.mjs';
+import { person, screen, DEFAULT_PERSON } from './targeting.mjs';
+
+// The card's prose was written about one person ("he graduates May 2027").
+// His own profile is not `isDefault` (that is the no-profile fallback), so the
+// wording keys on the name; anyone else gets a neutral sentence.
+const IS_HIM = person.fullName === DEFAULT_PERSON.fullName;
 
 
 // ── experience level ────────────────────────────────────────────────
 
-const SENIOR_TITLE_RE = /\b(senior|sr\.?|staff|principal|lead|distinguished|manager|supervisor|superintendent|director|head\s+of|vp|vice\s+president|chief|architect)\b/i;
-// `rotation program` and `development program` are here because Applied
-// Materials' flagship new-grad req is "2027 Engineer Development Rotation
-// Program … (E2)": the only entry signal the pattern knew was the adjective
-// `rotational`, so the title read as level-neutral and its pay grade then
-// classified it a stretch. A graduate programme outranks its own grade code.
-const ENTRY_TITLE_RE = /\b(new\s+grad(uate)?|entry[-\s]?level|early\s+career|university\s+(hire|grad)|campus|associate|engineer\s+(i|1)\b|graduate\s+(engineer|program)|rotational|rotation\s+program|development\s+program|apprentice)\b/i;
+// The title words moved to the preset so a second user can run Jarvis
+// (presets/<preset>/screen.mjs): "staff" is senior for an engineer and entry
+// level for an accountant.
+const SENIOR_TITLE_RE = screen.seniorTitle;
+// `rotation program` and `development program` are in the hardware preset's
+// pattern because Applied Materials' flagship new-grad req is "2027 Engineer
+// Development Rotation Program … (E2)": the only entry signal the pattern knew
+// was the adjective `rotational`, so the title read as level-neutral and its
+// pay grade then classified it a stretch. A graduate programme outranks its
+// own grade code.
+const ENTRY_TITLE_RE = screen.entryTitle;
 
 /**
  * A NUMBERED LEVEL ABOVE I IS A STRETCH, AND ONLY A STRETCH.
@@ -106,100 +117,59 @@ const ENTRY_TITLE_RE = /\b(new\s+grad(uate)?|entry[-\s]?level|early\s+career|uni
  */
 const NUMBERED_LEVEL_TITLE_RE = /\b(?:engineer|scientist|specialist|analyst|developer|designer|technologist)\s*(?:I{2,3}|IV|V|[2-5])\b|\(\s*E[2-5]\s*\)/i;
 
-// Headings that turn everything under them into a wish rather than a gate.
-// Amazon splits every req into "BASIC QUALIFICATIONS" and "PREFERRED
-// QUALIFICATIONS" and puts a second, higher years figure in the latter.
-const PREFERRED_HEAD_RE = /\b(preferred\s+(?:qualification|skill|experience|requirement)s?|nice\s*[-\s]?to\s*[-\s]?have|bonus\s+points|desired\s+(?:qualification|skill|experience)s?|it'?s?\s+a\s+plus|pluses|preferred:|would\s+be\s+a\s+plus|ideal(?:ly)?\s+you)\b/i;
-// …and headings that end that section, putting us back in required territory.
-const REQUIRED_HEAD_RE = /\b(basic\s+qualification|minimum\s+qualification|required\s+qualification|requirements:|qualifications:|what\s+you'?ll\s+need|responsibilities:|about\s+the\s+role)\b/i;
-
 /**
- * Is the match at `index` sitting under a "preferred / nice to have" heading?
- *
- * Looks backwards for the nearest of either heading kind. A years figure under
- * "Preferred Qualifications" is not something he fails to satisfy — treating
- * it as a requirement would hide jobs he could get.
+ * A BACHELOR'S IS A ROUTE IN WITH NO YEARS AT ALL (F-729, 2026-10-14).
+ * First Solar's "Engineer- Manufacturing I" lists several routes in: an
+ * Associate's plus 3 years, 6 years in manufacturing, 10 years as a skilled
+ * technician, or "Bachelor's Degree … with no experience required". The
+ * largest figure was read as the ask and the card said "likely too senior"
+ * on a role he qualifies for as written. The degree route must sit on one line
+ * with its "no experience required", and that line must name no years at all:
+ * "4+ years with a Bachelor's, 3+ with a Master's, or no experience required
+ * with a PhD" (Intel, Lam, AbbVie — measured on the store) waives the years
+ * for the doctorate, not for him.
  */
-function inPreferredSection(text, index) {
-  const before = text.slice(0, index);
-  let lastPref = -1, lastReq = -1, m;
-  const pre = new RegExp(PREFERRED_HEAD_RE.source, 'ig');
-  while ((m = pre.exec(before)) !== null) lastPref = m.index;
-  const req = new RegExp(REQUIRED_HEAD_RE.source, 'ig');
-  while ((m = req.exec(before)) !== null) lastReq = m.index;
-  return lastPref > lastReq;
-}
-
-// ── how a years requirement is actually written ─────────────────────
-//
-// F-466. The first version of this required the literal word "experience"
-// within the same sentence, after the figure. Measured on his own store on
-// 2026-09-17: of 2,770 rows the picks screen would admit, **139 state a years
-// requirement this missed** — and they are the ones at the top of his list.
-// 1X "Manufacturing Engineer, Hands" at fit 100 ("5+ years with a Bachelor's"),
-// Standard Bots at 97 ("4+ years in electronics/PCBA manufacturing"), Applied
-// Materials at 95 ("Experience: 3–7 years"), Gecko at 94 ("5+ years building
-// production software"). About 60 of the ~110 he read by hand that week were
-// out on years alone. Reading is what the screen is meant to save.
-//
-// Three shapes, all requirement-shaped rather than merely containing a number:
-// The trailing "+" is allowed on BOTH ends: Zipline writes "a minimum of
-// 2-15+ years", and a version that could not close that range read it at 15.
-const YEARS_NUM = String.raw`(\d{1,2})\s*\+?\s*(?:(?:-|–|—|to)\s*\d{1,2}\s*\+?\s*)?(?:years?|yrs?)`;
-const YEARS_PATTERNS = [
-  // 1. The original: a figure and the word experience in the same sentence.
-  new RegExp(`${YEARS_NUM}\\b[^.]*?(?:experience|exp\\b)`, 'i'),
-  // 2. The figure carries its own object: "5+ years with a Bachelor's",
-  //    "4+ years in electronics manufacturing", "5+ years building production
-  //    software", "2 to 5 years in hardware test".
-  //    "program" is deliberately NOT in this list: "During this 2 year program"
-  //    is Viavi's rotational scheme, a req written for exactly him.
-  new RegExp(`${YEARS_NUM}\\s*\\)?\\s+(?:of|in|with|as|building|working|develop\\w*|design\\w*|support\\w*|integrat\\w*|lead\\w*|manag\\w*|programming)\\b`, 'i'),
-  // 3. Reversed, which is how the Indian and Israeli sites of the big
-  //    equipment makers write it: "Experience: 3–7 years", "Experience - 5 to
-  //    8 Yrs", "Experience (3-5 years)", "related work experience of 5 years".
-  new RegExp(`(?:experience|exp)\\b\\s*[:\\-–—(]?\\s*(?:of\\s+)?${YEARS_NUM}`, 'i'),
-  // 4. Stated as a floor in words: "minimum of 2 years", "at least 3 years".
-  new RegExp(`(?:minimum(?:\\s+of)?|at\\s+least|requires?)\\s+${YEARS_NUM}`, 'i'),
-];
-
-// A number of years next to a noun that is not a requirement. Each of these
-// was a false positive in the measurement, and each would have cost him a job
-// he can actually get, which is the expensive direction:
-//   Viavi  "During this 2 year program you will…"      — a rotation he wants
-//   Micron "strategic roadmaps for 5+ years in post probe wafer…" — a horizon
-//   Zebra  "…a 4 year degree"                          — the degree, not a bar
-const NOT_A_REQUIREMENT_AFTER = /^\W{0,3}(program|degree|school|university|college|course|rotation|contract|warranty|roadmap|plan|lease|old\b|age\b|running|in a row|of (?:growth|history|operation))/i;
-// "…who graduated within the last 2 years" is new-grad INCLUSION, and reading
-// it as a two-year bar turns a req written for him into one he is filtered out
-// of (Medtronic, fit 94).
-const RECENCY_BEFORE = /\b(?:with)?in\s+the\s+(?:last|past|previous)\s*$|\bgraduated\s+(?:with)?in\s+the\s+\w+\s*$/i;
-// Pay bands sit next to the qualifications block and carry their own numbers;
-// "Base Pay Range: $117,800.00 - $200,300.00" must not lend a digit to a
-// years match that starts inside it.
-const PAY_BEFORE = /\$[\d,.]+\s*(?:-|–|—|to)?\s*[\d,.]*\s*$/;
-// A span of years the ROLE looks ahead over, not one the candidate must have
-// behind them: Micron's "Establish hardware strategic roadmaps for 5+ years in
-// post probe wafer and die processing" is a duty, and reading it as a bar took
-// a fit-89 req off his list.
-// Kept narrow on purpose: a horizon noun within 20 characters, or the literal
-// "over/for the next". A looser rule that swallowed a bare "over" would have
-// skipped "over 5 years of experience", which IS a bar.
-const HORIZON_BEFORE = /\b(?:roadmaps?|horizons?|forecasts?|strateg(?:y|ies|ic)|visions?|outlooks?|pipelines?|planning)\b[^.]{0,20}$|\b(?:over|for|in|within)\s+the\s+next\s+$/i;
-
-/**
- * Is this match a requirement on the candidate, rather than a number that
- * happens to sit beside the word "years"?
- */
-function isRequirementYears(text, m) {
-  const after = text.slice(m.index + m[0].length, m.index + m[0].length + 24);
-  const before = text.slice(Math.max(0, m.index - 60), m.index);
-  if (NOT_A_REQUIREMENT_AFTER.test(after)) return false;
-  if (RECENCY_BEFORE.test(before)) return false;
-  if (PAY_BEFORE.test(before)) return false;
-  if (HORIZON_BEFORE.test(before)) return false;
+const NO_EXPERIENCE_RE = /\bno\s+(?:prior\s+|previous\s+|work\s+|professional\s+)?experience\s+(?:is\s+)?(?:required|necessary|needed)/i;
+const LINE_YEARS_RE = /\d|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\byears?\b|\byrs?\b/i;
+const WAIVER_FOR_HIGHER_RE = /\b(?:with|and)\s+(?:an?\s+|the\s+)?(?:master|ph\.?\s?d|doctor)|\b(?:master(?:['’]?s)?|ph\.?\s?d\.?|doctorate)(?:\s+degree)?\s*(?:,\s*)?(?:and|with)\s+$/i;
+// …AND "A BACHELOR'S … OR N+ YEARS" (2026-10-16). Providien's "A bachelor's
+// degree in engineering/sciences or 5+ years of experience in a technical
+// role" was read as a 5-year ask: "stretch 5y", and the pick screen never reads
+// stretch. The years are the route for someone WITHOUT the degree. Only when
+// the degree side names no years itself — "Bachelor's and 3 years, or 5 years"
+// is still a 3-year ask.
+const DEGREE_OR_YEARS_RE = /\bbachelor(?:['’]?s)?\b([^.\n;]{0,90}?)\bor\s+(?:an?\s+|the\s+)?(?:equivalent\s+)?(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s*\+?\s*(?:\(\d+\)\s*)?(?:or\s+more\s+)?(?:years?|yrs?)\b/i;
+function degreeOrYears(line) {
+  const s = String(line);
+  const m = s.match(DEGREE_OR_YEARS_RE);
+  if (!m) return false;
+  if (LINE_YEARS_RE.test(m[1]) || /\bmaster|\bph\.?\s?d|\bdoctor/i.test(m[1])) return false;
+  // "5+ years with a Bachelor's or 3+ years with a Master's" (1X): the years sit
+  // BEFORE the degree, and the "or" years belong to another degree.
+  const before = s.slice(Math.max(0, m.index - 40), m.index);
+  if (/(?:\d|\byears?\b|\byrs?\b)[^.;]{0,25}$/i.test(before)) return false;
+  const after = s.slice(m.index + m[0].length, m.index + m[0].length + 40);
+  if (/^\s*[^.;]{0,15}\b(?:with|and)\s+(?:an?\s+)?(?:master|ph\.?\s?d|doctor|associate|bachelor)/i.test(after)) return false;
   return true;
 }
+function degreeNeedsNoYears(text) {
+  for (const line of String(text || '').split('\n')) {
+    if (degreeOrYears(line)) return line.trim();
+    const m = line.match(NO_EXPERIENCE_RE);
+    if (!m) continue;
+    const before = line.slice(0, m.index);
+    if (!/\bbachelor/i.test(before) || LINE_YEARS_RE.test(line)) continue;
+    if (WAIVER_FOR_HIGHER_RE.test(line.slice(m.index + m[0].length, m.index + m[0].length + 30)) || WAIVER_FOR_HIGHER_RE.test(before.slice(-30))) continue;
+    return line.trim();
+  }
+  return null;
+}
+
+// How a years figure is written, which section it sits in, and what is not a
+// requirement at all (a 2-year program, a roadmap horizon, "graduated within
+// the last 2 years", a pay band): requirements.mjs, shared with prescreen.mjs
+// and degree.mjs so a fix reaches all three (F-724). F-466 in FAULTS.md is
+// the history of each pattern.
 
 /**
  * The sentence a match sits in — the evidence he reads on the card.
@@ -253,40 +223,15 @@ export function classifyExperience(title, description) {
   // rejection as the EE-degree requirement in degree.mjs. This is F-32 again
   // (pay was scored on the ceiling of the band); an ask is judged by what it
   // demands at minimum, not by the friendliest reading of it.
-  let m;
-  const hits = [];
-  for (const yre of YEARS_PATTERNS) {
-    const re = new RegExp(yre.source, 'gi');
-    while ((m = re.exec(text)) !== null) {
-      const n = parseInt(m[1], 10);
-      // >15 years is company-history boilerplate ("KLA has 40 years of
-      // experience in…"), not a candidate requirement — ignore it. Zero is
-      // kept: "0+ years" and "0 to 2 years" are how the reqs written for him
-      // say so, and dropping the figure would leave them level-unknown.
-      if (Number.isNaN(n) || n > 15) continue;
-      if (!isRequirementYears(text, m)) continue;
-      hits.push({ at: m.index, end: m.index + m[0].length, n });
-    }
-  }
-
-  // ONE PHRASE READ BY TWO PATTERNS IS ONE REQUIREMENT, AT ITS FLOOR.
-  // Zipline's "worked for a minimum of 2-15+ years" is matched by the
-  // "minimum of N" pattern at the 2 and by the "N years in <field>" pattern at
-  // the 15. Keeping both and taking the larger read a two-year floor as
-  // fifteen. Sorted by position, the earliest match wins its span — which is
-  // the one that starts at the floor, because that is the order English
-  // states a range in.
-  hits.sort((a, b) => a.at - b.at || a.n - b.n);
-  const kept = [];
-  for (const h of hits) {
-    if (kept.some((k) => h.at < k.end && k.at < h.end)) continue;
-    kept.push(h);
-  }
+  // Each figure is the FLOOR of its phrase, and one phrase read by two
+  // patterns is one requirement (Zipline's "a minimum of 2-15+ years" is two,
+  // not fifteen) — requirements.mjs yearsMentions.
+  const kept = yearsMentions(text);
 
   let requiredYears = null, preferredYears = null;
   const firstHit = kept.length ? kept[0] : null;
   for (const h of kept) {
-    if (inPreferredSection(text, h.at)) {
+    if (h.section === 'pref') {
       if (preferredYears == null || h.n > preferredYears) preferredYears = h.n;
     } else if (requiredYears == null || h.n > requiredYears) {
       requiredYears = h.n;
@@ -313,9 +258,23 @@ export function classifyExperience(title, description) {
     // job he can get — the expensive error.
     level = 'entry';
     note = `Titled for new grads; ${preferredYears}y is listed as preferred, not required.`;
+  } else if (kept.some((h) => h.section !== 'pref' && h.n === 0)) {
+    // A REQUIRED RANGE THAT STARTS AT ZERO IS A WAY IN (2026-10-16). Therm-X's
+    // "Mechanical Engineer I/II": "Level I: 0–2 years of relevant experience,
+    // or strong internship and project work. Level II: 3+ years" — the
+    // highest floor (3) was read as the ask and the card said "stretch" over
+    // a quote that says otherwise. The curator already passes a zero range.
+    const zero = kept.find((h) => h.section !== 'pref' && h.n === 0);
+    level = 'entry';
+    note = maxYears > 0 ? `A 0-year route is offered; the ${maxYears}-year figure is a higher level of the same role.` : 'Asks for 0+ years — entry-friendly.';
+    evidence.unshift(sentenceAround(text, zero.at, zero.end));
+  } else if (maxYears != null && degreeNeedsNoYears(text)) {
+    level = 'entry';
+    note = `A Bachelor's needs no experience here; the ${maxYears}-year figure is another route in.`;
+    evidence.unshift(degreeNeedsNoYears(text).replace(/^[•*\-\s]+/, ''));
   } else if (maxYears != null) {
     if (maxYears <= 2) { level = 'entry'; note = `Asks for ~${maxYears}y experience — entry-friendly.`; }
-    else if (maxYears <= 5) { level = 'stretch'; note = `Asks for ${maxYears}+ years — he graduates May 2027 with none, so this is a stretch.`; }
+    else if (maxYears <= 5) { level = 'stretch'; note = `Asks for ${maxYears}+ years — ${IS_HIM ? `he graduates ${person.gradLabel} with none` : `a new grad (${person.gradLabel}) has none`}, so this is a stretch.`; }
     else { level = 'exclude'; note = `Asks for ${maxYears}+ years — likely too senior, but shown so you can judge.`; }
   } else if (titleEntry) {
     level = 'entry';
@@ -333,26 +292,21 @@ export function classifyExperience(title, description) {
     note = 'No explicit years requirement and title is level-neutral — inspect the posting.';
   }
 
-  return { level, years: maxYears, note, evidence: evidence.filter(Boolean) };
+  // The zero route's floor is the ask that matters ("entry 0y", never "entry 3y"),
+  // and one sentence quoted twice is one quote.
+  const years = level === 'entry' && kept.some((h) => h.section !== 'pref' && h.n === 0) ? 0 : maxYears;
+  return { level, years, note, evidence: [...new Set(evidence.filter(Boolean))] };
 }
 
 // ── relevance (informational only) ──────────────────────────────────
 //
-// A soft score to help SORTING, never filtering. Built from Alex's broad ME
-// target space. A low score is displayed, not hidden.
+// A soft score to help SORTING, never filtering. Built from the preset's
+// target space (Alex's broad ME one by default). A low score is displayed, not
+// hidden. The word lists moved to the preset so a second user can run Jarvis.
 
-const RELEVANCE_SIGNALS = [
-  'mechanical', 'manufacturing', 'process engineer', 'industrial engineer', 'automation',
-  'controls', 'semiconductor', 'equipment engineer', 'mechatronics', 'robotics',
-  'design engineer', 'product engineer', 'npi', 'new product introduction', 'reliability',
-  'test engineer', 'validation', 'quality engineer', 'supplier quality', 'applications engineer',
-  'field service', 'field engineer', 'customer engineer', 'facilities', 'production',
-  'operations', 'project engineer', 'sustaining', 'process integration', 'metrology',
-  'cnc', 'additive', 'tooling', 'fixture', 'gd&t', 'solidworks', 'cad', 'fea',
-  'thermal', 'fluid', 'vacuum', 'motion', 'actuator', 'yield', 'failure analysis',
-  'assembly', 'fabrication', 'machining', 'wafer', 'fab ', 'cleanroom', 'hardware',
-];
-const MAJOR_SIGNALS = /\b(mechanical|manufacturing|industrial|electromechanical|mechatronic|aerospace|materials|engineering)\b/i;
+const RELEVANCE_SIGNALS = screen.relevanceSignals;
+const MAJOR_SIGNALS = screen.majorSignals;
+const ACCEPTS_ALL_RE = screen.relevanceAcceptsAll;
 
 /**
  * Informational relevance score 0–100 and the signals that matched.
@@ -366,7 +320,7 @@ export function scoreRelevance(title, description) {
   const titleLower = (title || '').toLowerCase();
   let score = 0;
   for (const s of matched) score += titleLower.includes(s) ? 8 : 3;
-  if (MAJOR_SIGNALS.test(title || '') || /accepts?\s+(all\s+)?engineering/i.test(hay)) score += 10;
+  if (MAJOR_SIGNALS.test(title || '') || ACCEPTS_ALL_RE.test(hay)) score += 10;
   return { score: Math.min(100, score), matched };
 }
 
@@ -392,12 +346,14 @@ export { classifyLocation };
 // reveal; flag-not-delete as always). "Engineer" in the title always wins:
 // "Manufacturing Engineering Technician" is hands-on, "Test Engineer" is not.
 
-const HANDS_ON_RE = /\b(technician|tech\b|operator|machinist|assembler|welder|fabricator|inspector|material\s+handler|warehouse|custodian|janitor|driver|production\s+(associate|worker)|line\s+(lead|worker)|installer|mechanic|apprentice(?!\s+engineer))\b/i;
+// Both patterns are the preset's (a teller is the finance preset's hands-on track).
+const HANDS_ON_RE = screen.handsOnTitle;
+const PROFESSIONAL_RE = screen.professionalTitle;
 
 /** 'hands-on' (technician/operator/trades) or 'professional'. */
 export function classifyRoleKind(title) {
   const t = String(title || '');
-  if (/\bengineer\b/i.test(t)) return 'professional';
+  if (PROFESSIONAL_RE.test(t)) return 'professional';
   return HANDS_ON_RE.test(t) ? 'hands-on' : 'professional';
 }
 
@@ -414,18 +370,24 @@ export function classifyRoleKind(title) {
 // sides — the same reasoning as the visa guard. As always this FLAGS, never
 // drops: a stated window is a strong signal but recruiters do make exceptions.
 
-// Alex's graduation. Kept here (not read from a file) so triage stays pure and
-// synchronous — it runs over 26k jobs per scan. Change it here if his date moves.
-const DEFAULT_GRAD_DATE = { year: 2027, month: 5 };
+// The user's graduation, from config/profile.yml through targeting.mjs (read
+// once at import, so triage stays synchronous over 26k jobs per scan). Tests
+// get the default person's May 2027.
+const DEFAULT_GRAD_DATE = person.gradDate;
 
-const INTERNSHIP_RE = /\b(intern|internship|co-?op|summer\s+(analyst|associate|program)|industrial\s+placement)\b/i;
+// Plurals too (2026-09-26): "NVIDIA 2027 Internships: Hardware Engineering",
+// "Interns (m/f/div) in the fields of…" — 141 live internships carried no
+// flag and stayed in the deck he browses. His answer the same day: full-time
+// roles only.
+const INTERNSHIP_RE = /\b(interns?|internships?|co-?ops?|summer\s+(analyst|associate|program)|industrial\s+placement)\b/i;
 // "New grad" naming varies by tenant: NVIDIA says "New College Graduate",
 // Intel says "University Graduate", others say "Early Career" or "Rotational".
 // NOTE on "rotational": matched only when followed by a program word.
 // "Rotational molding" is a plastics process and "rotating/rotational
 // equipment engineer" is a standard mechanical title — neither is a new-grad
 // signal, and a bare \brotational\b would wrongly badge both.
-const NEW_GRAD_RE = /\b(new\s+col?lege\s+grad(uate)?s?|new\s+grad(uate)?s?|recent\s+grad(uate)?s?|university\s+(grad(uate)?|hire|recruiting)|campus\s+hire|graduate\s+(program|scheme|engineer)|early\s+career|rotational\s+(?:\w+\s+)?program|leadership\s+development\s+program|class\s+of\s+20\d\d)\b/i;
+// Moved to the preset ("graduate engineer" for one field, "analyst program" for another).
+const NEW_GRAD_RE = screen.newGradTitle;
 
 // The matcher above reads words and cannot see a negation in front of them.
 // Applied Materials writes, in the body of a req that wants 5+ years:
@@ -631,8 +593,9 @@ export function triage(job, opts = {}) {
   // that is the only location evidence a "2 Locations" placeholder leaves.
   const locationBucket = classifyLocation(location, title, url);
   const roleKind = classifyRoleKind(title);
-  // Graduation defaults to Alex's own date so every existing caller keeps
-  // working; pass opts.gradDate to triage for someone else.
+  // Graduation defaults to the user's own date (person.gradDate; Alex's May
+  // 2027 by default) so every existing caller keeps working; pass
+  // opts.gradDate to triage for someone else.
   const program = classifyProgram(title, description, opts.gradDate || DEFAULT_GRAD_DATE);
   // "it needs electrical engineering degree i am mechanical bruh its instant
   // rejection genuinely" — his own words, on a Micron req that scored 95.

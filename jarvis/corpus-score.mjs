@@ -80,7 +80,7 @@ export function scoreAnswer(text, { kind = '' } = {}) {
   // keyed on `other` alone, which silently switched it off for the empire
   // question — the very answer it was written for. A scorer that quietly stops
   // scoring is worse than no scorer.
-  const EMPLOYERS = /\b(applied materials|acme|state university|makerspace|mars rover|manufacturing technology center)\b/gi;
+  const EMPLOYERS = /\b(applied materials|acme|lakeside|makerspace|mars rover|manufacturing technology center)\b/gi;
   const WORK_NOUNS = /\b(intern(ship)?|production|tolerances?|machining|cnc|throughput|assembly line|material procurement|final inspection|train(ed|ing)? \d|students)\b/gi;
   //
   // NAMING THE SETTING ONCE IS NOT SELLING, and the first version of this

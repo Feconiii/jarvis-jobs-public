@@ -18,6 +18,12 @@
 //
 // Everything here reads the posting. Nothing infers anything about him beyond
 // those two facts, which come from cv.md.
+//
+// Both facts are the user's now (targeting.mjs): the level is
+// person.degreeLevel, and the subject's field and title patterns live in the
+// preset, moved there so a second user can run Jarvis.
+
+import { person, screen } from './targeting.mjs';
 
 /** Degree lines are bullets far more often than sentences, so split on both.
  *
@@ -131,10 +137,10 @@ export function degreeBar(text, title = '') {
 // "…or a related technical discipline" is deliberately NOT here. Related to
 // WHAT is the whole question, and it is answered further down by sending the
 // posting to him as maybe-related rather than deciding it either way.
-const HIS_FIELD = /\b(mechanical|mechatronic|manufactur\w*|industrial engineer\w*|any engineering|all engineering|engineering discipline|\bstem\b|engineering (technology|science))\b/i;
+const HIS_FIELD = screen.hisField;
 // Fields that are somebody else's degree. Only used to detect a list that
 // EXCLUDES him — never on its own.
-const OTHER_FIELD = /\b(electrical|electronic|computer (science|engineering)|software|comp sci|cs\b|data science|information (systems|technology)|chemical engineer|chemistry|biology|biomedical|civil engineer|finance|accounting|business administration|marketing|human resources|supply chain|nursing|physics)\b/i;
+const OTHER_FIELD = screen.otherField;
 
 // "Engineering" with no discipline in front of it is HIS — a posting open to
 // engineering generally is open to a mechanical engineer. With a discipline in
@@ -147,7 +153,9 @@ const OTHER_FIELD = /\b(electrical|electronic|computer (science|engineering)|sof
 // so every electrical role read as generically-engineering and the screen
 // passed all of them. Asking the question directly, of each occurrence, is both
 // simpler and the only version that survived being measured.
-const GENERIC_ENG = /(?<!\b(?:electrical|electronic|computer|software|chemical|civil|biomedical|biological|nuclear|petroleum|environmental|agricultural|architectural|marine|mining|data|financial|sales)\s{1,3})\bengineering\b/i;
+// (The preset's `genericField`: for the finance preset, "a quantitative or
+// business field".)
+const GENERIC_ENG = screen.genericField;
 
 /**
  * Does the posting name a degree subject, and is his one of them?
@@ -200,7 +208,7 @@ export function subjectFit(text, title = '') {
 // Engineer", "Process Engineer" and "Fab Automation Engineer" are mechanical
 // work sitting inside an electrical industry — so this lists only titles that
 // are unambiguously another discipline's, and everything else passes.
-const OTHER_TITLE = /\b(asic|rtl|verilog|vhdl|firmware|design for test|\bdft\b|physical design|analog|circuit design|\bsoc\b|tapeout|mask operations|wafer test|software (development )?engineer|\bsde\b|full[- ]stack|web developer|web front[- ]end|data (scientist|analyst|engineer)|business (analyst|intelligence)|machine learning (engineer|scientist)|cybersecurity|security analyst|network engineer|cloud (hardware|infrastructure|engineer)|devops|\bsre\b|marketing|sales|recruit|human resources|finance|accountant|legal|paralegal|nurse|supply chain|\bbuyer\b|procurement|logistics|account manager|data science|\banalyst,|,\s*analyst|manufacturing it\b|\bit\s+analyst)/i;
+const OTHER_TITLE = screen.otherTitle;
 // THESE ONLY COUNT WHEN THE TITLE DOES NOT ALSO NAME HIS WORK.
 //
 // "Customer Support Engineer - Equipment Engineer" at KLA was refused on
@@ -210,7 +218,7 @@ const OTHER_TITLE = /\b(asic|rtl|verilog|vhdl|firmware|design for test|\bdft\b|p
 // "Manufacturing Workflow Automation Engineer": thirty-four live rows whose
 // title names his field, flagged by a softer word beside it. Left as hard, and
 // with the reconcile path unable to touch them, the flag was permanent.
-const SOFT_OTHER_TITLE = /\b(verification|machine learning|product support|customer (success|support)|workflow automation)\b/i;
+const SOFT_OTHER_TITLE = screen.softOtherTitle;
 
 /** Is the title unambiguously another discipline's work? */
 export function titleIsElsewhere(title) {
@@ -245,7 +253,7 @@ function findEvidence(text, title, deg, subj) {
 //
 // So the description passing is necessary and not sufficient: the TITLE has to
 // name his work too. Narrow and auditable on purpose.
-const HIS_TITLE = /\b(mechanical|mechatronic|manufactur\w+|industrial engineer|process engineer|equipment engineer|fab automation|factory automation|robotics and automation|tooling|machining|fixture|thermal|hvac|quality engineer|reliability engineer|field service)\b/i;
+const HIS_TITLE = screen.hisTitle;
 
 /** Does the title itself name work a mechanical engineer does? */
 export function titleIsHis(title) {
@@ -258,12 +266,24 @@ export function titleIsHis(title) {
  * in words he can read. Never silently drops — 'not-eligible' still travels
  * with its reason so a wrong call is visible and arguable.
  */
+// degreeBar describes the POSTING ("does it bar a bachelor's holder?"); whether
+// that bars THIS user depends on the degree they will hold. A Master's holder
+// is barred only by a doctorate-only ask, and a PhD by nothing.
+const LEVEL = /^(phd|doctor)/i.test(person.degreeLevel) ? 'phd'
+  : /^master/i.test(person.degreeLevel) ? 'master' : 'bachelor';
+function levelBarred(deg, description, title) {
+  if (deg !== 'advanced-only' || LEVEL === 'phd') return false;
+  if (LEVEL === 'bachelor') return true;
+  const t = `${title || ''}\n${description || ''}`;
+  return /ph\.?\s?d|doctora/i.test(t) && !/\bmaster|\bm\.?s\.?c?\b|\bmba\b/i.test(t);
+}
+
 export function eligibility(job, description) {
   const reasons = [];
   const deg = degreeBar(description, job?.title);
   const subj = subjectFit(description, job?.title);
-  if (deg === 'advanced-only') reasons.push('wants a Master’s or PhD');
-  if (subj === 'excluded') reasons.push('names degree subjects and mechanical is not one');
+  if (levelBarred(deg, description, job?.title)) reasons.push('wants a Master’s or PhD');
+  if (subj === 'excluded') reasons.push(screen.subjectExcludedReason);
   if (titleIsElsewhere(job?.title)) reasons.push('the title is another discipline’s work');
   // The sentence that decided it, so the card can quote the posting back at him
   // instead of asserting a verdict he has no way to check. Computed AFTER the
@@ -276,9 +296,10 @@ export function eligibility(job, description) {
 
   const soft = [];
   if (deg === 'unknown') soft.push('degree level not stated');
-  if (deg === 'mixed') soft.push('says Master’s in one place and Bachelor’s in another — read it');
+  const mixed = deg === 'mixed' && LEVEL === 'bachelor';
+  if (mixed) soft.push('says Master’s in one place and Bachelor’s in another — read it');
   if (subj === 'unknown') soft.push('degree subject not stated');
   if (subj === 'maybe-related') soft.push('lists other majors but opens it to related fields — worth a look');
-  const unsure = subj === 'maybe-related' || deg === 'mixed' || soft.length === 2;
+  const unsure = subj === 'maybe-related' || mixed || soft.length === 2;
   return { verdict: unsure ? 'check' : 'apply', reasons: soft, deg, subj };
 }

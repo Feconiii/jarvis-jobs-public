@@ -24,7 +24,7 @@
 import { chromium } from 'playwright';
 import { renderHtml, renderPdf, linkCheck } from './resume.mjs';
 import { applyRewrites } from './resume-tailor.mjs';
-import { shortenOneBullet, shortenBulletEnding, shortenOneProject, withoutOneBullet, withBullet, ONE_OF } from './resume-plan.mjs';
+import { shortenOneBullet, shortenBulletEnding, shortenOneProject, withoutOneBullet, mergeInsteadOf, withBullet, ONE_OF } from './resume-plan.mjs';
 import { judgeLayout, rasterize, acceptance, RULES } from './resume-qa.mjs';
 import { proofreadSpec } from './proofread.mjs';
 import { termsIn } from './jd-terms.mjs';
@@ -228,6 +228,11 @@ export async function polish(spec, {
         }
         const cut = withoutOneBullet(spec);
         if (!cut.dropped) { notes.push('spills past one page and nothing is left to cut'); break; }
+        // TWO BULLETS SAID AS ONE BEFORE EITHER CLAIM GOES (2026-09-29): the
+        // RoboDK and rack bullets become the one cobot-cell bullet when the cut
+        // would come out of Applied Materials.
+        const merged = mergeInsteadOf(spec, cut.dropped, pool);
+        if (merged) { spec = merged.spec; notes.push(`spilled past one page — ${merged.parts.join(' and ')} said as one (${merged.into}) instead of dropping ${cut.dropped}`); continue; }
         spec = cut.spec; notes.push(`spilled past one page — dropped ${cut.dropped}`); continue;
       }
 

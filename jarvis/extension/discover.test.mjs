@@ -128,6 +128,26 @@ test("a select's option list does not leak into its label", async () => {
   assert.equal(fields[0].options.length, 4, 'the options themselves are still reported');
 });
 
+test('Spirit AeroSystems on iCIMS, 2026-10-02: a <style> above the options is not the question, and a date label is not its dropdowns', async () => {
+  const fields = await discoverIn(`
+    <div class="iCIMS_Form">
+      <div class="q">Have you ever been employed by "Deloitte, LLP"?</div>
+      <style>#remainderSection{background-color:white;position:absolute;top:25px;right:0;}</style>
+      <div><label><input type="radio" name="q5" value="yes"> yes</label><label><input type="radio" name="q5" value="no"> no</label></div>
+    </div>
+    <div class="sig">
+      <label>Month <select id="m"><option></option><option>Jan</option><option>Feb</option></select>
+        Day <select id="d"><option></option><option>1</option><option>2</option></select>
+        Year <input id="y" type="text"></label>
+    </div>`);
+  const radio = fields.find((f) => f.type === 'radio');
+  assert.ok(radio, JSON.stringify(fields));
+  assert.ok(!/remainderSection|background-color/.test(radio.label), radio.label);
+  assert.match(radio.label, /Deloitte/);
+  const year = fields.find((f) => f.type === 'text');
+  assert.ok(!/JanFeb|Jan Feb/.test(year.label), year.label);
+});
+
 test('an unlabelled file input is still recognisable as the resume slot', async () => {
   const fields = await discoverIn('<input type="file" name="">');
   assert.equal(fields.length, 1);
@@ -270,6 +290,106 @@ test('the Workday start modal is recognised, and only Apply Manually is offered'
   });
   assert.equal(picked, 'applyManually',
     'Autofill lets Workday parse the PDF over our answers; Use My Last copies another job\'s');
+});
+
+test('ADP\'s privacy notice after Apply is a gate, and its Consent & Continue is the way through (Mando, F-692)', async () => {
+  await page.setContent(`
+    <button id="recruitment_jobDescription_apply">Apply</button>
+    <div id="jdv_privacy_dailog" role="dialog" aria-modal="true">
+      <h2>Privacy Policy</h2>
+      <p>Certain jurisdictions require notice of how we use and protect your personal information.</p>
+      <div><span role="button" id="go">Consent &amp; Continue</span><span role="button" id="no">Decline &amp; Close</span></div>
+    </div>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.startGate()?.id || null), 'go');
+  // Every consent is his yes now, a cookie notice's too (2026-10-03)…
+  await page.setContent(`<div role="dialog"><p>We use cookies. See our privacy statement.</p><button id="ok">Accept</button></div>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.startGate()?.id || null), 'ok');
+  // …but a sign-in box's Continue is never one, whatever its fine print says.
+  await page.setContent(`<div role="dialog"><p>By continuing you agree to our Terms and Privacy Policy.</p><input type="email"><button>Continue</button></div>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.startGate()), null);
+});
+
+test('Paylocity\'s State menu: its label is "State", not "StateWashington", and it is a dropdown (Optomec, F-691)', async () => {
+  await page.setContent(`
+    <div data-automation-id="public-site-address-us-state-wrapper">
+      <label for="public-site-address-us-state"><span>State</span>
+        <div aria-haspopup="listbox" aria-expanded="false" aria-owns="st-list">
+          <div class="input-select-input-single-value">Select a state</div>
+          <div><input aria-autocomplete="list" id="public-site-address-us-state" type="text" value=""></div>
+        </div>
+      </label>
+    </div>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const f = await page.evaluate(() => globalThis.__jarvis.discover().map((x) => ({ label: x.label, type: x.type, kind: x.promptKind, current: x.current })));
+  assert.equal(f.length, 1);
+  assert.equal(f[0].label, 'State');
+  assert.equal(f[0].type, 'prompt');
+  assert.equal(f[0].kind, 'combo');
+  assert.equal(f[0].current || '', '', '"Select a state" is the placeholder, not an answer');
+});
+
+test('Eightfold\'s readonly radios are questions — AMAT\'s whole Position Specific block was dropped (F-694)', async () => {
+  await page.setContent(`<form>
+    <label id="q_label" for="q"><span>Do you currently need any immigration support or sponsorship from Applied Materials?</span></label>
+    <div role="radiogroup" id="q" aria-labelledby="q_legend">
+      <div><input aria-label="Yes, Do you currently need any immigration support or sponsorship from Applied Materials?" id="q-1" name="q" type="radio" readonly value="1"><label for="q-1"><span></span><span>Yes</span></label></div>
+      <div><input aria-label="No, Do you currently need any immigration support or sponsorship from Applied Materials?" id="q-2" name="q" type="radio" readonly value="2"><label for="q-2"><span></span><span>No</span></label></div>
+    </div>
+    <label for="t">Read only text</label><input id="t" type="text" readonly value="kept"></form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const f = await page.evaluate(() => globalThis.__jarvis.discover().map((x) => ({ label: x.label, type: x.type, options: (x.options || []).map((o) => o?.text ?? o) })));
+  const q = f.find((x) => x.type === 'radio');
+  assert.ok(q, 'the radio question is found');
+  assert.match(q.label, /sponsorship/);
+  assert.deepEqual(q.options, ['Yes', 'No']);
+  assert.ok(!f.some((x) => /Read only text/.test(x.label)), 'a readonly TEXT box is still not a question');
+});
+
+test('UNSEEN: a question on the page that no field covers is listed, one line per question (2026-10-03)', async () => {
+  await page.setContent(`<form>
+    <label for="fn">First Name</label><input id="fn">
+    <fieldset><legend>Are you authorized to work in the US?</legend>
+      <label><input type="radio" name="auth" value="y"> Yes</label><label><input type="radio" name="auth" value="n"> No</label></fieldset>
+    <div class="cookie-banner"><label>We use cookies<input type="checkbox" id="ck"></label></div>
+    <input name="hp_7f2b" tabindex="-1" aria-hidden="true" style="position:absolute;left:-9999px">
+  </form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const r = await page.evaluate(() => ({
+    all: globalThis.__jarvis.unseenControls().map((u) => u.label),
+    // As if discover() had dropped everything: what would be reported.
+    none: globalThis.__jarvis.unseenControls([]).map((u) => `${u.kind}|${u.label}`),
+  }));
+  assert.deepEqual(r.all, [], 'a form discover() reads fully reports nothing');
+  assert.ok(r.none.some((x) => /^input\[text\]\|First Name/.test(x)), r.none.join(' ; '));
+  assert.equal(r.none.filter((x) => /authorized/.test(x)).length, 1, 'a radio group is one line');
+  assert.ok(!r.none.some((x) => /cookies|hp_7f2b/i.test(x)), 'cookie notices and honeypots are never questions');
+});
+
+test('UNSEEN: a locked Email box is not a missed question; a read-only radio still is (Lam signed in, F-716)', async () => {
+  await page.setContent(`<form>
+    <label for="Contact_Information_email">Email</label>
+    <input id="Contact_Information_email" aria-readonly="true" readonly autocomplete="email">
+    <fieldset><legend>Do you need sponsorship?</legend>
+      <label><input type="radio" name="sp" value="y" readonly> Yes</label><label><input type="radio" name="sp" value="n" readonly> No</label></fieldset>
+  </form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const none = await page.evaluate(() => globalThis.__jarvis.unseenControls([]).map((u) => u.label));
+  assert.ok(!none.some((x) => /^Email/.test(x)), none.join(' ; '));
+  assert.ok(none.some((x) => /sponsorship/.test(x)), none.join(' ; '));
+});
+
+test('UNSEEN: a read-only date picker already showing today is answered; an empty one is still a miss (Micron, F-737)', async () => {
+  const picker = (id, value) => `<label id="${id}_label" for="${id}">Date</label>
+    <input role="combobox" aria-expanded="false" aria-haspopup="dialog" aria-label="Select date" id="${id}" readonly placeholder="Select date"
+      aria-labelledby="${id}_label" aria-required="true" aria-readonly="true" value="${value}">`;
+  await page.setContent(`<form><div>${picker('signed', '16 Oct 2026')}</div><div>${picker('blank', '')}</div></form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const ids = await page.evaluate(() => globalThis.__jarvis.unseenControls([]).map((u) => u.el.id));
+  assert.ok(!ids.includes('signed'), 'the filled date is not "answer it yourself"');
+  assert.ok(ids.includes('blank'), 'an empty required date still is');
 });
 
 test('no start gate on an ordinary form', async () => {
@@ -1281,6 +1401,19 @@ test('"THANK YOU FOR APPLYING" IS RECOGNISED, AND ONLY WITHOUT A FORM', async ()
     'a Review step with a Submit button is not a sent application');
   assert.equal(await doneIn('<h1>Test Engineer</h1><p>Thank you for your interest in Acme! Your application has been received by our team in the past? Apply below.</p><a href="/apply">Apply</a>', true), null,
     'a posting with an Apply control is not a sent application, whatever it says');
+  // A CANDIDATE DASHBOARD LISTS APPLICATIONS; it confirms none (Werfen's
+  // iCIMS /jobs/dashboard, 2026-09-24: "this application is done").
+  assert.equal(await doneIn('<h1>Welcome back</h1><h2>Jobs you have applied to</h2><p>None yet.</p>', true), null,
+    '"jobs you have applied to" is a list heading');
+  assert.match(await doneIn('<h1>You have applied to this job</h1>', true), /you have applied/i);
+  await page.goto('about:blank');
+  await page.evaluate(() => history.replaceState?.(null, '', location.href));
+  await page.route('https://careers-acme.icims.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<h2>Status</h2><p>Mechanical Engineer — Application Submitted</p>' }));
+  await page.goto('https://careers-acme.icims.com/jobs/dashboard');
+  await page.addScriptTag({ content: ATSJS });
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.applicationDone()), null, 'a dashboard\'s status column is not this application\'s confirmation');
+  await page.unroute('https://careers-acme.icims.com/**');
 });
 
 test('A VERIFICATION-CODE PAGE IS A WALL', async () => {
@@ -1459,6 +1592,115 @@ test('A CONSENT BOX WHOSE WORDS ARRIVE THROUGH A SLOT IS LABELLED BY THEM (F-333
   assert.match(fields[0].label, /read and understand the privacy notice/);
 });
 
+test('A QUESTION WRITTEN ABOVE A BARE BOX NAMES IT; A RANDOM NAME NEVER DOES (F-569)', async () => {
+  // Rippling's custom short answer, measured on Cintal 2026-09-24: no label, no
+  // placeholder, a fresh random name per load. It was reported as "o8tr6xgz5N".
+  const fields = await discoverIn(`
+    <form>
+      <div><div><div><p>What is your salary expectation?<div></div></p></div></div>
+        <div data-testid="field"><div><div><input id="field-62" aria-required="true" maxlength="50" name="WgaoKnKViAz"></div></div></div>
+        <div><p>0/50</p></div></div>
+      <div><input id="field-70" name="VzmmSOYuL9i"></div>
+      <div><input id="field-71" name="firstName"></div>
+    </form>`);
+  assert.equal(fields[0].label, 'What is your salary expectation?');
+  assert.equal(fields[1].label, '', 'a random token is not a question');
+  assert.equal(fields[2].label, 'firstName', 'a real camelCase name still reads');
+});
+
+test('TSMC: closed section headers are opened, dropdowns and menus are not (F-577)', async () => {
+  // SuccessFactors, measured 2026-09-24: every section of the application is a
+  // <button aria-expanded="false"> inside an <h2>, and its fields are hidden
+  // until it is opened.
+  await page.setContent(`
+    <nav><h3><button aria-expanded="false" id="menu" onclick="window.__menu=1">Options</button></h3></nav>
+    <div class="rcmFormSection"><h2><button class="rcmFormSectionTopBar" aria-expanded="false" id="s1"
+      onclick="this.setAttribute('aria-expanded','true');document.getElementById('b1').style.display='block'">Profile Information</button></h2>
+      <div id="b1" style="display:none"><label for="f">First Name</label><input id="f"></div></div>
+    <div><h2><button aria-expanded="false" aria-haspopup="listbox" id="dd" onclick="window.__dd=1">Country</button></h2></div>
+    <label for="c">Degree</label><input id="c" role="combobox" aria-expanded="false">`);
+  await page.addScriptTag({ content: DISCOVER });
+  const opened = await page.evaluate(() => globalThis.__jarvis.expandSections());
+  assert.equal(opened, 1, 'only the section header');
+  assert.equal(await page.evaluate(() => [window.__menu, window.__dd]).then((x) => x.filter(Boolean).length), 0, 'no menu, no dropdown');
+  const labels = await page.evaluate(() => globalThis.__jarvis.discover().map((f) => f.label));
+  assert.ok(labels.includes('First Name'), 'the opened section\'s field is read');
+});
+
+test('WAYMO: a Job Alerts form is not the application, and a hex code is not part of a label (F-575)', async () => {
+  // Measured 2026-09-24: a second <form> under "Job Alerts" (opening with an
+  // empty <legend>) was read as the application, and every label ended in a
+  // <span>0830c081</span> code.
+  const fields = await discoverIn(`
+    <div><div><h3>Job Alerts</h3><p>Sign up to receive tailored job alerts delivered straight to your inbox!</p></div>
+      <div><form id="new_form_submission_1_3"><fieldset><legend></legend></fieldset>
+        <label for="a1"><span>First Name <small>(required)</small></span> <span>80aff57e</span></label><input id="a1" required>
+      </form></div></div>
+    <h2>Apply for this job</h2>
+    <form id="new_form_submission_7_0">
+      <label for="b1"><span>First Name <small>(required)</small></span> <span>27277ec8</span></label><input id="b1" required>
+      <label for="b2"><span>Website</span> <span>ddde699c</span></label><input id="b2">
+    </form>`);
+  assert.deepEqual(fields.map((f) => f.label), ['First Name (required)', 'Website']);
+});
+
+test('A TIMED-OUT SESSION IS NOT A DEAD POSTING (F-579)', async () => {
+  // SmartRecruiters, Western Digital, 2026-09-24: read as "this posting is gone".
+  await page.setContent(`<main><p>Due to inactivity, the form has been closed to protect your data. Click on the button below to start your application process again.</p><button>Start again</button></main>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.postingGone()), null);
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.pageBlocked()?.kind), 'session');
+  await page.setContent(`<main><h1>Sorry, this position has been closed.</h1></main>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.ok(await page.evaluate(() => globalThis.__jarvis.postingGone()), 'a really closed posting is still gone');
+});
+
+test('AN APPLICATION ALREADY IN PROGRESS is said as one, and never hides a form (F-574)', async () => {
+  await page.setContent(`<main><h1>Hardware Engineer</h1><h2>You already have an application in progress</h2>
+    <p>It looks like you have already started an application for this role using this email address.</p>
+    <button>Send me a link to my application</button></main>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const walled = await page.evaluate(() => globalThis.__jarvis.pageBlocked());
+  assert.equal(walled?.kind, 'in-progress');
+  await page.setContent(`<main><p>You already have an application in progress.</p><label>First name <input name="first"></label></main>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.pageBlocked()), null, 'a page with a form is a form');
+});
+
+test('DOVER: plain <div> lines name the boxes, and the autofill parser is not the resume slot (F-570)', async () => {
+  // Measured on app.dover.com, 2026-09-24: no <label> anywhere, so every box
+  // was reported by its internal name, and both bare file inputs were named
+  // "Resume/CV" before the parser check could run — the resume went to the
+  // "Autofill from resume" parser.
+  const fields = await discoverIn(`
+    <form novalidate>
+      <div><div role="button" tabindex="0"><input accept=".pdf" type="file" style="display:none"><div><div><div>Autofill from resume</div><div>Drag &amp; drop or upload to autofill your application.</div></div></div><button type="button">Upload file</button></div></div>
+      <div><div><div>First Name *</div><div><div><input id=":r7:" name="firstName" required type="text"></div></div></div></div>
+      <div><div>Phone Number </div><div><div><input id=":rb:" name="phoneNumber" type="text"></div></div></div>
+      <div><div>Resume (optional)</div><div><div role="button" tabindex="0"><input accept=".pdf" type="file" style="display:none"><div><div>Drag and drop file or <div>browse computer</div></div><div>(PDF, 5 MB maximum)</div></div></div></div></div>
+    </form>`);
+  const byType = (t) => fields.filter((f) => f.type === t).map((f) => f.label);
+  assert.deepEqual(byType('text'), ['First Name', 'Phone Number']);
+  const files = byType('file');
+  assert.match(files[0], /^Autofill from resume — /, 'the parser is named as one');
+  assert.match(files[1], /^Resume \(optional\) — /, 'the real slot is named as the resume');
+});
+
+test('A CHAT WIDGET\'S CLASS ON <body> DOES NOT MAKE THE PAGE FURNITURE (F-567)', async () => {
+  // Measured 2026-09-24 on Western Digital (SmartRecruiters): the chat widget
+  // sets body.has-winston-chat-mobile-apply, the consent box sits outside the
+  // form, and "chat" as a token made it site furniture — never ticked, never
+  // reported. A real search widget on the same page is still furniture.
+  const fields = await discoverIn(`
+    <body class="has-winston-chat-mobile-apply"><main>
+      <h2>Preliminary questions</h2>
+      <label><input type="checkbox" id="c"> You declare that you have read and agree to the privacy notice of Acme.</label>
+      <div id="savesearch"><input type="text" aria-label="Search jobs"></div>
+    </main></body>`);
+  assert.deepEqual(fields.map((f) => f.type), ['checkbox']);
+  assert.match(fields[0].label, /privacy notice of Acme/);
+});
+
 test('ARIA RADIOS WITH NO INPUT BEHIND THEM ARE QUESTIONS (F-334)', async () => {
   const fields = await discoverIn(`
   <h2>Preliminary questions</h2>
@@ -1574,6 +1816,17 @@ test('EVERY REQUISITION TOKEN IS A LITERAL PIECE OF ITS OWN URL (F-402)', async 
   }
 });
 
+test('A WORKDAY REQUISITION LIKE "26-798" IS A REQUISITION, on the posting and its form alike (Wolfspeed, F-715)', async () => {
+  const t = await page.evaluate((urls) => urls.map((u) => globalThis.__jarvisAts.reqToken(u)), [
+    'https://cree.wd108.myworkdayjobs.com/EXT/job/Durham-North-Carolina/Manufacturing-Engineer_26-798',
+    'https://cree.wd108.myworkdayjobs.com/en-US/EXT/job/Durham%2C-North-Carolina/Manufacturing-Engineer_26-798/apply/autofillWithResume',
+    'https://x.wd5.myworkdayjobs.com/site/job/A/Engineer_12',
+  ]);
+  assert.equal(t[0], 'workday:Manufacturing-Engineer_26-798');
+  assert.equal(t[1], t[0], 'the form is the same posting');
+  assert.equal(t[2], null, 'two digits alone are still not a requisition');
+});
+
 test('SMARTRECRUITERS NAMES ONE JOB TWO WAYS, and the two never read as two jobs (F-338)', async () => {
   const t = await page.evaluate((urls) => urls.map((u) => globalThis.__jarvisAts.reqToken(u)), [
     'https://jobs.smartrecruiters.com/BectonDickinson2/743999797968244-advanced-manufacturing-engineer-i',
@@ -1619,6 +1872,16 @@ test('A "WE HAVE MOVED" BANNER OVER AN ATS FRAME IS NOT A MOVE (F-342)', async (
   await load(`<p>We have moved to Eightfold, use this link to new job applications: <a href="https://gf.eightfold.ai/careers">here</a></p>`,
     'https://globalfoundries.wd1.myworkdayjobs.com/en-US/External/job/x');
   assert.ok(await page.evaluate(() => globalThis.__jarvis.atsMoved()), 'a page with no frame and a moved notice still is one');
+  // F-732: GlobalFoundries' live Workday form between two steps — no controls
+  // drawn yet, loose wording, a footer LinkedIn link — is not a moved tenant.
+  await load(`<p>We are now reviewing your answers.</p><a href="https://www.linkedin.com/company/globalfoundries">LinkedIn</a>`,
+    'https://globalfoundries.wd1.myworkdayjobs.com/en-US/External/job/x/apply?utm_source=jackandjill');
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.atsMoved()), null, 'mid-application, only the migration notice itself counts');
+  await load(`<p>We have moved to Eightfold. <a href="https://www.linkedin.com/company/gf">LinkedIn</a></p>`,
+    'https://globalfoundries.wd1.myworkdayjobs.com/en-US/External/job/x');
+  const moved = await page.evaluate(() => globalThis.__jarvis.atsMoved());
+  assert.ok(moved, 'the notice itself still counts');
+  assert.equal(moved.link, null, 'a footer social link is not where he applies');
 });
 
 test('A STYLED CHECKBOX WITH ITS NATIVE INPUT HIDDEN IS STILL A BOX TO TICK (F-345)', async () => {
@@ -1767,7 +2030,7 @@ test('F-388: a bot trap is never a field', async () => {
     `only the real question survives; got ${fields.map((f) => f.label).join(' | ')}`);
 });
 
-test('F-389: a cookie banner in hashed-class divs is still declined', async () => {
+test('F-389: a cookie banner in hashed-class divs is still answered — Accept, his rule since 2026-10-03', async () => {
   // Workday's own banner (HP's tenant, screenshotted 2026-09-07) sits in divs
   // whose classes are build hashes, is positioned `static`, and is not a
   // dialog — so the region pass found nothing to look at and the banner stayed
@@ -1784,7 +2047,325 @@ test('F-389: a cookie banner in hashed-class divs is still declined', async () =
     <form><label>Email<input type="email" name="email"></label></form>`);
   await page.addScriptTag({ content: DISCOVER });
   const r = await page.evaluate(() => ({ label: globalThis.__jarvis.dismissCookieBanner(), declined: !!window.__declined, accepted: !!window.__accepted }));
-  assert.equal(r.declined, true, 'the most private choice, every time');
-  assert.equal(r.accepted, false, 'and never the other one');
-  assert.match(r.label || '', /decline/i);
+  assert.equal(r.accepted, true, '"press consent on everything" (2026-10-03)');
+  assert.equal(r.declined, false, 'and not the decline beside it');
+  assert.match(r.label || '', /accept/i);
+});
+
+test('EMPTY ARIA ANCHORS NAMED BY A LABEL BESIDE THEM (TSMC SuccessFactors, 2026-09-24)', async () => {
+  const fields = await discoverIn(`
+  <style>a[role=radio]{display:inline-block;width:12px;height:12px;border:1px solid}</style>
+  <div class="row"><span class="q">What year will you graduate?</span></div>
+  <div class="row"><span class="opts">
+    <a id="486:_anchor" role="radio" aria-checked="false" href="#"></a><label for="486:_anchor">2025</label>
+    <a id="487:_anchor" role="radio" aria-checked="false" href="#"></a><label for="487:_anchor">2026</label>
+    <a id="488:_anchor" role="radio" aria-checked="false" href="#"></a><label for="488:_anchor">2027</label>
+  </span></div>
+  <div class="row"><span class="q">Are you willing to work in a cleanroom?</span></div>
+  <div class="row"><span class="opts">
+    <a id="493:_anchor" role="radio" aria-checked="false" aria-labelledby="493:_l" href="#"></a><span id="493:_l">Yes</span>
+    <a id="494:_anchor" role="radio" aria-checked="false" aria-labelledby="494:_l" href="#"></a><span id="494:_l">No</span>
+  </span></div>`);
+  const radios = fields.filter((f) => f.type === 'radio');
+  assert.deepEqual(radios.map((f) => f.options), [['2025', '2026', '2027'], ['Yes', 'No']]);
+  assert.deepEqual(radios.map((f) => f.label), ['What year will you graduate?', 'Are you willing to work in a cleanroom?'],
+    'the question is the text above the group, never its first option');
+});
+
+test('HIDDEN NATIVE INPUTS BEHIND STYLED BOXES, AND DIV COMBOBOXES (Rippling, 2026-09-24)', async () => {
+  const fields = await discoverIn(`
+  <style>.hid{display:none}.box{display:inline-block;padding:4px;border:1px solid}</style>
+  <div class="q"><p>Are you open to relocate within the US?</p>
+    <div class="opts">
+      <div class="box"><div><input class="hid" type="checkbox" name="cq.reloc" value="y"></div>Yes</div>
+      <div class="box"><div><input class="hid" type="checkbox" name="cq.reloc" value="n"></div>No</div>
+    </div>
+  </div>
+  <label id="g-label">Gender</label>
+  <div id="g" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-labelledby="g-label" tabindex="0"><p>Select...</p></div>
+  <p>Which shift can you work?</p>
+  <div><div id="s" role="combobox" aria-expanded="false" aria-label="Select" tabindex="0"><p>Select</p></div></div>`);
+  const reloc = fields.find((f) => /relocate/.test(f.label));
+  assert.ok(reloc, 'the styled Yes/No question is read');
+  assert.deepEqual(reloc.options, ['Yes', 'No']);
+  assert.equal(reloc.type, 'checkbox');
+  const gender = fields.find((f) => f.label === 'Gender');
+  assert.ok(gender, 'a div combobox named by aria-labelledby is read');
+  assert.equal(gender.type, 'prompt');
+  assert.equal(gender.current, undefined, '"Select..." is a placeholder, not an answer');
+  assert.ok(fields.some((f) => /which shift/i.test(f.label)), 'a combobox named only "Select" takes the question above it');
+});
+
+test("ASHBY'S YES/NO BUTTONS OVER A HIDDEN CHECKBOX (Mariana Minerals, 2026-09-25)", async () => {
+  const fields = await discoverIn(`
+  <form>
+    <div class="_fieldEntry">
+      <label class="ashby-application-form-question-title" for="q1">Do you now, or in the future, require visa sponsorship?</label>
+      <div class="_yesno"><button type="button" class="_option">Yes</button><button type="button" class="_option">No</button>
+        <input type="checkbox" id="q1" name="q1" tabindex="-1" style="position:absolute;opacity:0;width:1px;height:1px"></div>
+    </div>
+    <div class="_fieldEntry">
+      <label for="q2">I agree to the privacy notice</label>
+      <input type="checkbox" id="q2" name="q2">
+    </div>
+  </form>`);
+  const spon = fields.find((f) => /visa sponsorship/.test(f.label));
+  assert.ok(spon, 'the question is read');
+  assert.equal(spon.type, 'radio', 'two buttons are a choice, not a tick');
+  assert.deepEqual(spon.options, ['Yes', 'No']);
+  const consent = fields.find((f) => /privacy notice/.test(f.label));
+  assert.equal(consent?.type, 'checkbox', 'a plain checkbox stays a checkbox');
+
+  // The live markup (measured 2026-09-25): no id, the label's `for` is the
+  // checkbox's NAME, and the checkbox has no box on screen.
+  const live = await discoverIn(`<form>
+    <div class="ashby-application-form-field-entry">
+      <label class="ashby-application-form-question-title _required" for="a370d02c">Do you now, or in&nbsp; the future, require visa sponsorship?</label>
+      <div class="ashby-application-form-input-yesno"><button aria-pressed="false" data-option="yes">Yes</button><button aria-pressed="false" data-option="no">No</button>
+        <input type="checkbox" tabindex="-1" name="a370d02c" style="display:none"></div>
+    </div></form>`);
+  assert.equal(live.length, 1);
+  assert.equal(live[0].type, 'radio');
+  assert.deepEqual(live[0].options, ['Yes', 'No']);
+  assert.match(live[0].label, /require visa sponsorship\?$/);
+});
+
+test('A FILE SLOT NAMED ONLY BY ITS BUTTON TAKES THE QUESTION ABOVE IT (Formlabs, 2026-09-25)', async () => {
+  const slot = (id, q) => `
+    <div class="file-upload">
+      <div class="upload-label">${q}</div>
+      <div class="button-container"><button type="button">Attach</button>
+        <label for="${id}" style="position:absolute;width:1px;height:1px;overflow:hidden">Attach</label>
+        <input id="${id}" type="file" style="position:absolute;width:1px;height:1px;opacity:0">
+        <button type="button">Dropbox</button><button type="button">Google Drive</button><button type="button">Enter manually</button></div>
+      <p>Accepted file types: pdf, doc, docx, txt, rtf</p>
+    </div>`;
+  const fields = await discoverIn(`<form>
+    <div><label for="fn">First Name</label><input id="fn"></div>
+    ${slot('resume', 'Resume/CV*')}
+    ${slot('cover_letter', 'Cover Letter')}
+    ${slot('question_1', 'If your portfolio is not available online, please attach it here')}
+  </form>`);
+  const files = fields.filter((f) => f.type === 'file').map((f) => f.label);
+  assert.equal(files.length, 3);
+  assert.match(files[0], /^Resume\/CV/);
+  assert.match(files[1], /^Cover Letter — Attach$/);
+  assert.match(files[2], /^If your portfolio is not available online/);
+});
+
+test('THE QUESTION IN THE BLOCK BEFORE THE FIELD (Rippling, Boom Supersonic 2026-09-25)', async () => {
+  const q = (text, control) => `
+    <div>
+      <div><div><p>${text}<span></span></p></div></div>
+      <div data-testid="field"><div><div data-testid="customQuestions.x"><div><div data-testid="select-controller"><div><div><div>${control}</div></div></div></div></div></div></div>
+    </div>`;
+  const fields = await discoverIn(`<form>
+    ${q('Please explain why you want to work at Boom and why you would make an extraordinary contribution.', '<textarea maxlength="10000"></textarea>')}
+    ${q('Are you a U.S. Person?', '<div id="c1" role="combobox" aria-label="Select" aria-expanded="false" tabindex="0"><p>Select</p></div>')}
+    ${q('Which of the following best describes how you found out about this opportunity?', '<input role="combobox" aria-label="Select" placeholder="Select" name="W2Rx">')}
+  </form>`);
+  const labels = fields.map((f) => f.label);
+  assert.ok(labels.some((l) => /^Please explain why you want to work at Boom/.test(l)), 'the essay box');
+  assert.ok(labels.includes('Are you a U.S. Person?'), 'the div dropdown');
+  assert.ok(labels.includes('Which of the following best describes how you found out about this opportunity?'), 'the searchable dropdown');
+  assert.ok(!labels.includes('Select'), '"Select" is never a question');
+});
+
+test("A DATE PICKER'S OWN BOX IS NOT A QUESTION (Rippling, 2026-09-25)", async () => {
+  const fields = await discoverIn(`<form>
+    <label for="n">First name</label><input id="n">
+    <div role="dialog"><label for="cal">//September2026SMTWTFS12345678910TodayClear</label><input id="cal" required></div>
+  </form>`);
+  assert.deepEqual(fields.map((f) => f.label), ['First name']);
+});
+
+test('A MONTH LIST AND THE UNNAMED YEAR LIST AFTER IT ARE ONE DATE (Ashby education history, 2026-09-25)', async () => {
+  const months = ['Month', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((m) => `<option>${m}</option>`).join('');
+  const years = ['Year', ...Array.from({ length: 12 }, (_, i) => String(2030 - i))].map((y) => `<option>${y}</option>`).join('');
+  const fields = await discoverIn(`<form>
+    <div><label for="sm">Start Date</label><div><select id="sm">${months}</select><select>${years}</select></div></div>
+    <div><label for="em">End Date</label><div><select id="em">${months}</select><select>${years}</select></div></div>
+  </form>`);
+  assert.deepEqual(fields.map((f) => f.label), ['Start Date month', 'Start Date year', 'End Date month', 'End Date year']);
+});
+
+test('A DATE PICKER\'S "Pick date..." PLACEHOLDER IS PASSED ON (Atomic Semi, 2026-09-25)', async () => {
+  await discoverIn(`<form><label for="d">Ideal start date in office</label><input id="d" type="text" placeholder="Pick date..."></form>`);
+  const ph = await page.evaluate(() => globalThis.__jarvis.discover()[0].placeholder);
+  assert.equal(ph, 'Pick date...');
+});
+
+test('A QUESTION ABOUT A LIST PRINTED UNDER IT CARRIES THE LIST (Atomic Semi, 2026-09-25)', async () => {
+  await discoverIn(`<form><fieldset><legend>If no, is your home country listed below?</legend>
+    <p>Armenia, Azerbaijan, China, Cuba, Vietnam, Yemen</p>
+    <label><input type="radio" name="hc" value="Yes"> Yes</label><label><input type="radio" name="hc" value="No"> No</label></fieldset></form>`);
+  const near = await page.evaluate(() => globalThis.__jarvis.discover().find((f) => /home country/.test(f.label))?.near || '');
+  assert.match(near, /Vietnam/);
+});
+
+test('A PAY-PERIOD LIST WITH NO NAME IS NAMED FOR ITS SALARY (Sabanto Breezy, 2026-09-25)', async () => {
+  const fields = await discoverIn(`<form><label for="s">Desired Salary</label><input id="s" type="text">
+    <select name=""><option>Hourly</option><option>Weekly</option><option>Monthly</option><option>Yearly</option></select></form>`);
+  assert.equal(fields[1].label, 'Desired Salary — period');
+});
+
+test('A LONG OPTION IN A GROUP IS NOT THE QUESTION (Capstan Medical Lever, 2026-09-26)', async () => {
+  const fields = await discoverIn(`<form><ul><li class="application-question custom-question"><div><div><div class="application-label">Are you currently enrolled in, or actively pursuing, a Bachelor's, Master's, or Doctoral degree?</div></div>
+    <div><ul data-qa="multiple-choice">
+      <li><label><input type="radio" name="cards[x][field2]" value="Yes - I'm attending our pursuing higher education currently"><span>Yes - I'm attending our pursuing higher education currently</span></label></li>
+      <li><label><input type="radio" name="cards[x][field2]" value="No"><span>No</span></label></li></ul></div></div></li></ul>
+    <label><input type="checkbox" id="c1"> I agree to the privacy notice and the processing of my data</label></form>`);
+  assert.match(fields[0].label, /^Are you currently enrolled/);
+  assert.match(fields[1].label, /privacy notice/, 'a lone box still carries its own sentence');
+});
+
+test('WHAT THE PAGE SAYS IN RED IS READ, WITH ITS FIELD (his ask, 2026-10-02)', async () => {
+  await page.setContent(`<style>.err{color:#d32f2f}.brand{color:rgb(200,16,46)}.req{color:red}</style>
+    <h2 class="brand">Spirit AeroSystems Careers</h2>
+    <a class="brand" href="#">Benefits</a>
+    <p><span class="req">*</span> indicates a required field</p>
+    <form>
+      <div class="q"><label for="fn">First Name <span class="req">*</span></label><input id="fn"><div class="err">This field is required.</div></div>
+      <div class="q"><label for="ph">Phone</label><input id="ph" aria-invalid="true" aria-describedby="ph-msg"><span id="ph-msg">Enter a valid phone number</span></div>
+      <div class="q"><label for="zip">Postal Code</label><input id="zip"><b class="req">!</b> <span class="req">Wrong format</span></div>
+      <div role="alert">Your resume could not be uploaded. Try a PDF under 5 MB.</div>
+      <div role="alert">Alex Rivera Resume.pdf successfully uploaded</div>
+      <div role="alert">Saving</div>
+      <div role="alert">You're all set, Alex!</div>
+      <div role="alert">Your form needs corrections</div>
+    </form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const errs = await page.evaluate(() => globalThis.__jarvis.errorsOnPage());
+  const by = (re) => errs.find((e) => re.test(e.text));
+  assert.equal(by(/This field is required/)?.how, 'red');
+  assert.match(by(/This field is required/)?.field || '', /First Name/, 'the red line is tied to the box above it');
+  assert.equal(by(/valid phone number/)?.how, 'invalid');
+  assert.match(by(/valid phone number/)?.field || '', /Phone/);
+  assert.equal(by(/Wrong format/)?.how, 'red', 'red words beside a box count without an error word');
+  assert.match(by(/Wrong format/)?.field || '', /Postal Code/);
+  assert.ok(by(/could not be uploaded/), 'an alert banner is read');
+  assert.ok(!by(/successfully uploaded/), 'an alert that reports success is not an error');
+  assert.ok(!by(/^Saving$|all set/), 'a status announcement is not an error (F-670)');
+  assert.ok(by(/needs corrections/), 'Ashby\'s grey banner still counts');
+  assert.ok(!by(/Spirit AeroSystems Careers|Benefits/), 'a red brand heading or link is not a message');
+  assert.ok(!by(/^\*$|indicates a required field/), 'the required-field marker is not an error');
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.redness('rgb(211, 47, 47)')), true);
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.redness('rgb(51, 51, 51)')), false);
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.redness('rgba(220, 20, 60, 0.1)')), false, 'a faint red wash is not red text');
+});
+
+test('PHENOM (Honda, JPL, 2026-10-02): the posting\'s Apply Now is followed; Honda\'s step Next is walked; "Next Next" is one name', async () => {
+  const at = async (url, html) => {
+    await page.route(url, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: html }));
+    await page.goto(url);
+    await page.addScriptTag({ content: DISCOVER });
+  };
+  // The posting page, with the furniture that hid its Apply: a job-alert
+  // email, the chatbot box and the rating stars.
+  await at('https://careers.honda.test/us/en/job/AHMAHMUS12351EXTERNALENUS/Manufacturing-Equipment-Engineer', `
+    <h1>Manufacturing Equipment Engineer</h1>
+    <a data-ph-at-id="apply-link" class="phw-btn" href="https://careers.honda.test/us/en/hvhapply?jobSeqNo=AHMAHMUS12351EXTERNALENUS">Apply Now<span class="phw-sr">Apply Now Manufacturing Equipment Engineer</span></a>
+    <div class="phw-subscribe"><label for="em">Email address</label><input id="em" type="email"><button data-ph-at-id="subscribe-jobs-link">Submit</button></div>
+    <div class="chatbot"><input aria-label="Chatbot User Input box with Send button"></div>
+    <fieldset><legend>How would you rate your experience?</legend><label><input type="radio" name="r">No rating</label><label><input type="radio" name="r">1 star</label></fieldset>
+    <h3>Similar jobs</h3><a data-ph-at-id="apply-link" href="https://careers.honda.test/us/en/hvhapply?jobSeqNo=OTHER">Apply Now</a>`);
+  const apply = await page.evaluate(() => globalThis.__jarvis.applyControl()?.getAttribute('href'));
+  assert.match(apply || '', /jobSeqNo=AHMAHMUS12351EXTERNALENUS/, 'the posting\'s own Apply, not a similar job\'s');
+
+  // A step of the apply flow: Next is type=submit inside the step's form.
+  const step = (name) => `<form class="rjsf"><label for="fn">First Name</label><input id="fn">
+    <div class="navigation ${name}-step"><div></div><button type="submit" class="btn btn-navigate btn-next" id="next" aria-label="Next">Next</button></div></form>`;
+  await at('https://careers.honda.test/us/en/apply?jobSeqNo=AHMAHMUS12351EXTERNALENUS&step=1&stepname=personalInformation', step('personalInformation'));
+  const next = await page.evaluate(() => {
+    const J = globalThis.__jarvis;
+    const n = J.nextControl();
+    return { id: n?.id || null, name: J.buttonName(document.getElementById('next')), apply: !!J.applyControl() };
+  });
+  assert.equal(next.id, 'next', 'Honda\'s Next is walked, not left as a submit');
+  assert.equal(next.name, 'Next', 'its text and aria-label are one name');
+  assert.equal(next.apply, false, 'on the form itself nothing is an Apply to follow');
+
+  // …and the last step's Submit, and any other submit, is still his.
+  await at('https://careers.honda.test/us/en/apply?jobSeqNo=AHMAHMUS12351EXTERNALENUS&step=5&stepname=review',
+    '<form><label for="x">Sig</label><input id="x"><div class="navigation review-step"><button type="submit" class="btn btn-navigate btn-submit">Submit</button></div></form>');
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.nextControl()), null);
+  await at('https://forms.example.test/apply?step=1',
+    '<form><label for="y">Name</label><input id="y"><button type="submit" class="btn-next">Next</button></form>');
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.nextControl()), null, 'a plain form\'s submit-type Next is still his');
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+});
+
+test('HONDA STEP 2 (captured 2026-10-03): entry fields carry their entry\'s key, date boxes say they are calendar pickers, the open calendar is not a question', async () => {
+  await page.goto('about:blank');
+  await page.setContent(`<form class="rjsf"><fieldset id="experienceData[1]"><div class="row no-gutter form-fields">
+    <div class="col-md-6"><div class="form-group field field-string"><label class="control-label" for="experienceData[1].companyName">Company Name<span class="required">*</span></label>
+      <input aria-label="Company Name" class="form-control" required id="experienceData[1].companyName" type="text"></div></div>
+    <div class="col-md-12"><div class="form-group field field-string"><label class="control-label" for="experienceData[1].presentEmployer">Current Employer<span class="required">*</span></label>
+      <select id="experienceData[1].presentEmployer" class="form-control" required><option value="">Please Select</option><option value="6628">Current</option><option value="6629">Prior</option></select></div></div>
+    <div class="col-md-12"><div id="experienceData_1_fromTo" class="date-range-fromTo">
+      <div class="form-group field field-string"><label class="control-label" for="experienceData[1].fromTo.startDate">From Date<span class="required">*</span></label>
+        <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container"><input type="text" id="experienceData[1].fromTo.startDate" class="form-control"></div></div></div>
+      <div class="form-group field field-string"><label class="control-label" for="experienceData[1].fromTo.endDate">End Date</label>
+        <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container"><input type="text" id="experienceData[1].fromTo.endDate" class="form-control"></div></div>
+        <div class="react-datepicker-popper"><div class="react-datepicker"><div class="react-datepicker__header"><div class="range-div">
+          <button aria-label="Previous Month">&lt;</button><select class="range-select"><option>2025</option><option>2026</option></select>
+          <select class="range-select"><option>January</option><option>February</option></select><button aria-label="Next Month">&gt;</button></div></div></div></div></div>
+    </div></div></div></fieldset></form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const got = await page.evaluate(() => globalThis.__jarvis.discover().map((f) => ({ label: f.label, type: f.type, key: f.key, picker: f.picker || '' })));
+  assert.deepEqual(got.map((f) => f.key), ['experienceData[1].companyName', 'experienceData[1].presentEmployer', 'experienceData[1].fromTo.startDate', 'experienceData[1].fromTo.endDate']);
+  assert.deepEqual(got.map((f) => f.picker), ['', '', 'mdy', 'mdy']);
+  assert.ok(!got.some((f) => /^<$|January|2026/.test(f.label)), `the calendar's own lists are not questions: ${JSON.stringify(got.map((f) => f.label))}`);
+});
+
+test('A MODERNIZR PAGE IS NOT A VIDEO PLAYER (ADP Workforce Now, Therm-X, 2026-10-16)', async () => {
+  const fields = await discoverIn(`<!doctype html><html class="hydrated js flexbox canvas video audio localstorage"><body>
+    <h2>Personal Information</h2>
+    <label for="fn">First Name*</label><input id="fn" type="text">
+    <label for="ln">Last Name*</label><input id="ln" type="text">
+    <div class="video-player"><label for="vol">Volume</label><input id="vol" type="text"></div>
+  </body></html>`);
+  const labels = fields.map((f) => f.label);
+  assert.ok(labels.some((l) => /First Name/.test(l)), `the form's own boxes are read (got ${JSON.stringify(labels)})`);
+  assert.ok(labels.some((l) => /Last Name/.test(l)));
+  assert.ok(!labels.some((l) => /Volume/.test(l)), 'a box inside a real player is still not a question');
+});
+
+test('A GREYED-OUT NEXT IS NOT THE LAST STEP (ADP resume step, 2026-10-16)', async () => {
+  await page.setContent(`<h2>Resume</h2><p>Required</p><input type="file" id="r"><button type="button">Previous</button><button type="button" disabled aria-disabled="true">Next</button>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const said = await page.evaluate(() => ({ next: !!globalThis.__jarvis.nextControl(), why: globalThis.__jarvis.advanceBlockedBy() }));
+  assert.equal(said.next, false, 'a disabled Next is never pressed');
+  assert.match(String(said.why), /greyed out/);
+});
+
+test('A SIGN-UP THAT SENDS A CODE AND OFFERS GOOGLE IS A SIGN-IN WALL (ADP talent community, 2026-10-16)', async () => {
+  const sso = `<button type="button">Sign in with Google</button>`;
+  await page.setContent(`<h2>Join Our Talent Community</h2>
+    <label for="f">First Name</label><input id="f"><label for="l">Last Name</label><input id="l">
+    <label for="e">Email</label><input id="e" type="email"><label for="m">Mobile Number</label><input id="m" type="tel">
+    <p>Where would you like to receive a verification code?</p>
+    <label><input type="radio" name="to"> +1-555-010-0000</label><label><input type="radio" name="to"> v@example.test</label>
+    <button type="button">Send</button>${sso}`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.signInWall()), true, 'Google is pressed rather than the sign-up filled');
+  // …and before its Continue, when the code question has not appeared yet.
+  await page.setContent(`<h2>Join Our Talent Community</h2>
+    <p>Please be advised that the mobile number or email associated with this verification process is intended to be unique to you.</p>
+    <label for="f">First Name</label><input id="f"><label for="l">Last Name</label><input id="l">
+    <label for="e">Email</label><input id="e" type="email"><label for="m">Mobile Number</label><input id="m" type="tel">
+    <button type="button">Continue</button><p>Alternatively, you can sign in through your social media accounts.</p>${sso}`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.signInWall()), true, 'before Continue too');
+  await page.setContent(`<h2>Apply</h2>
+    <label for="f">First Name</label><input id="f"><label for="l">Last Name</label><input id="l">
+    <label for="e">Email</label><input id="e" type="email"><label for="m">Phone</label><input id="m" type="tel">${sso}`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.signInWall()), false, 'an application with a Google button and no code is still a form');
+});
+
+test('"COMPLETE YOUR APPLICATION" ON A STARTED POSTING IS ITS APPLY (ADP Pending Submission, 2026-10-16)', async () => {
+  await page.setContent(`<h1>Mechanical Engineer I/II – Thermal Systems</h1><p>Pending Submission</p><button type="button">Back</button><button type="button">Complete Your Application</button>`);
+  await page.addScriptTag({ content: DISCOVER });
+  assert.equal(await page.evaluate(() => globalThis.__jarvis.buttonName(globalThis.__jarvis.applyControl())), 'Complete Your Application');
 });

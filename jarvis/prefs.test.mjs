@@ -213,6 +213,32 @@ console.log('\n🧪 prefs: a never rule names a kind of JOB, so it must match th
     parseRules('avoid travel 75%')[0].except, []);
 }
 
+// ── `except … in title or company`: field robotics (2026-10-12) ──────────
+//
+// "i can do field robotics": Humanoid's "Field Application Engineer", which he
+// applied to, says robotics only in the employer's name. The description stays
+// out of the exception — Applied Materials writes "robotics" into every field
+// service posting's boilerplate.
+{
+  const rules = parseRules('no field in title except robot, robots, robotic, robotics, humanoid in title or company');
+  check('the exception scope is parsed off the list', rules[0].except, ['robot', 'robots', 'robotic', 'robotics', 'humanoid']);
+  check('…into the fields it reads', rules[0].exceptFields, ['title', 'company']);
+  check('the rule still reads the title', rules[0].field, 'title');
+  const hard = (title, company, description = 'x') => applyPrefs(job({ title, company, description }), rules).hard.length;
+  check('a field role at a robotics employer is spared', hard('Field Application Engineer', 'Humanoid'), 0);
+  check('…and at Universal Robots', hard('Field Service Engineer', 'Universal Robots'), 0);
+  // The shared Teradyne board brought back ~60 chip-test field roles.
+  check('a board shared with a robotics employer does not spare it',
+    hard('Field Application Engineer (SEG, San Jose, CA)', 'Teradyne / Universal Robots'), 1);
+  check('…unless the title says robots', hard('Cobot Field Application Engineer, Robotics', 'Teradyne / Universal Robots'), 0);
+  check('…or every employer on it is a robotics one', hard('Field Service Engineer', 'Path Robotics / Humanoid'), 0);
+  check('robotics in the title still spares it', hard('Field Robotics Engineer', 'Hitachi'), 0);
+  check('a field role elsewhere is still blocked', hard('Field Process Engineer I', 'Hitachi'), 1);
+  check('robotics in the description does not spare it',
+    hard('Field Service Engineer III', 'Applied Materials', 'the underpinnings for robotics, AI and displays'), 1);
+  check('a plain except still reads only the rule\'s field', parseRules('no cloud in title except hardware')[0].exceptFields, ['title']);
+}
+
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -30,7 +30,10 @@
 const TIMEOUT_MS = 8_000;
 // Strict path-segment charset. Anything with a slash, dot-dot, or other char is
 // rejected before it can reach the fixed-host API URL template.
-const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
+// One escape is allowed: `%2C`, a comma. Workday writes it into every location
+// with a state ("San-Diego%2C-California", 2026-09-25), and without it no such
+// posting could be read. A comma cannot make a slash or a dot-dot.
+const SAFE_SEGMENT = /^(?:[A-Za-z0-9._-]|%2[Cc])+$/;
 
 // Each ATS: detect its posting URL, then map to a public JSON API URL.
 // `match` returns the extracted path params (or null); `api` builds the FIXED-host URL.
@@ -50,6 +53,39 @@ const ATS_PROVIDERS = [
     api: ({ board, id }) => `https://boards-api.greenhouse.io/v1/boards/${board}/jobs/${id}`,
   },
   {
+    id: 'greenhouse',
+    // A GREENHOUSE POSTING ON THE COMPANY'S OWN SITE (Lucid, 2026-09-25):
+    // lucidmotors.com/careers/search/5228239007?gh_jid=5228239007 carries the
+    // job id but not the board, so the posting was never asked about. It had
+    // left Lucid's board four days earlier and was still in his picks, and a
+    // drive of it landed on the careers search page. Greenhouse's embed page
+    // takes the id alone: a pulled job answers 404, a live one redirects to
+    // its own board — `for=<board>&token=<id>` — and only that exact redirect
+    // counts as live.
+    match(u) {
+      if (/(^|\.)greenhouse\.io$/.test(u.hostname)) return null;
+      const id = u.searchParams.get('gh_jid');
+      return id && /^\d{5,}$/.test(id) ? { id } : null;
+    },
+    api: ({ id }) => `https://boards.greenhouse.io/embed/job_app?token=${id}`,
+    redirectMeansLive: ({ id }, location) => new RegExp(`^https://job-boards\\.greenhouse\\.io/embed/job_app\\?for=[A-Za-z0-9_-]+&token=${id}$`).test(location || ''),
+  },
+  {
+    id: 'rippling',
+    // ats.rippling.com/{board}/jobs/{uuid}. A pulled posting answers 308 to
+    // the board with `rr_message=job_not_found` (Aalo Atomics, measured
+    // 2026-09-25); a live one serves its page. The redirect is read, never
+    // followed.
+    match(u) {
+      if (u.hostname !== 'ats.rippling.com') return null;
+      const m = u.pathname.match(/^\/([^/]+)\/jobs\/([0-9a-f-]{36})\/?$/i);
+      return m ? { board: m[1], id: m[2] } : null;
+    },
+    api: ({ board, id }) => `https://ats.rippling.com/${board}/jobs/${id}`,
+    redirectMeansLive: () => false,
+    redirectMeansGone: (_, location) => /[?&]rr_message=job_not_found\b/.test(location || ''),
+  },
+  {
     id: 'lever',
     // jobs.lever.co/{slug}/{id}
     match(u) {
@@ -58,6 +94,31 @@ const ATS_PROVIDERS = [
       return m ? { slug: m[1], id: m[2] } : null;
     },
     api: ({ slug, id }) => `https://api.lever.co/v0/postings/${slug}/${id}`,
+  },
+  {
+    id: 'linkedin',
+    // linkedin.com/jobs/view/{slug-}{id}. A LinkedIn copy was never checked by
+    // anything (F-674): 15 of the 41 picks he could see on 2026-10-03, and the
+    // sweep called every one "could not decide". LinkedIn's public guest
+    // endpoint serves the posting card without a sign-in and says so in its
+    // own words when the posting is closed: "No longer accepting
+    // applications". An unknown id answers 404. A 429 or any other page is
+    // inconclusive.
+    match(u) {
+      if (!/(^|\.)linkedin\.com$/.test(u.hostname)) return null;
+      const m = u.pathname.match(/^\/jobs\/view\/(?:[^/]*?-)?(\d{6,})\/?$/);
+      return m ? { id: m[1] } : null;
+    },
+    api: ({ id }) => `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${id}`,
+    async interpret(res) {
+      const html = await res.text();
+      if (/No longer accepting applications/i.test(html)) {
+        return { result: 'expired', code: 'linkedin_api_gone', reason: 'LinkedIn: "No longer accepting applications"' };
+      }
+      return /top-card-layout__title/.test(html)
+        ? { result: 'active', code: 'linkedin_api_ok', reason: 'LinkedIn still lists the posting as accepting applications' }
+        : null;
+    },
   },
   {
     id: 'ashby',
@@ -105,7 +166,13 @@ const ATS_PROVIDERS = [
     match(u) {
       const h = /^([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com$/i.exec(u.hostname);
       if (!h) return null;
-      const m = /^\/(?:[a-z]{2}-[A-Za-z]{2}\/)?([^/]+)\/job\/(.+?)\/?$/.exec(u.pathname);
+      // THE FORM NAMES ITS POSTING: `…/job/<loc>/<slug>/apply/autofillWithResume`
+      // is the posting `…/job/<loc>/<slug>`. Without this a form he opened
+      // straight from another site (Solar Turbines, from Jack & Jill,
+      // 2026-09-25) could not be looked up, and the panel called it "not a
+      // posting".
+      const path = u.pathname.replace(/\/apply(?:\/[A-Za-z]+)?\/?$/i, '');
+      const m = /^\/(?:[a-z]{2}-[A-Za-z]{2}\/)?([^/]+)\/job\/(.+?)\/?$/.exec(path);
       if (!m) return null;
       // Location and slug are returned SEPARATELY, never joined. resolveAtsApi
       // validates every value it is handed against SAFE_SEGMENT, which forbids
@@ -241,7 +308,7 @@ export function resolveAtsApi(rawUrl) {
     if (!parts) continue;
     // SSRF guard: every derived segment must be a single safe path segment.
     if (!Object.values(parts).every((v) => SAFE_SEGMENT.test(v) && !v.includes('..'))) return null;
-    return { ats: provider.id, apiUrl: provider.api(parts), parts, timeoutMs: provider.timeoutMs, interpret: provider.interpret };
+    return { ats: provider.id, apiUrl: provider.api(parts), parts, timeoutMs: provider.timeoutMs, interpret: provider.interpret, redirectMeansLive: provider.redirectMeansLive, redirectMeansGone: provider.redirectMeansGone };
   }
   return null;
 }
@@ -342,7 +409,7 @@ async function tenantStillLists({ tenant, dc, site, slug }, signal) {
 export async function checkLivenessViaApi(url) {
   const resolved = resolveAtsApi(url);
   if (!resolved) return null;
-  const { ats, apiUrl, parts, interpret, timeoutMs } = resolved;
+  const { ats, apiUrl, parts, interpret, timeoutMs, redirectMeansLive, redirectMeansGone } = resolved;
 
   // The timeout guards the whole classification (fetch + any `interpret` body read),
   // since aborting the shared signal also tears down an in-flight res.json().
@@ -354,11 +421,21 @@ export async function checkLivenessViaApi(url) {
       res = await fetch(apiUrl, {
         method: 'GET',
         headers: { 'user-agent': 'career-ops-liveness/1.0', accept: 'application/json' },
-        redirect: 'error', // refuse server-side redirects (SSRF + ambiguity guard)
+        // Refuse server-side redirects (SSRF + ambiguity guard). A provider
+        // whose answer IS a redirect reads it without following it.
+        redirect: redirectMeansLive ? 'manual' : 'error',
         signal: controller.signal,
       });
     } catch {
       return null; // network / timeout / redirect → inconclusive, let Playwright decide
+    }
+    if (redirectMeansGone && res.status >= 300 && res.status < 400 && redirectMeansGone(parts, res.headers.get('location'))) {
+      return { result: 'expired', code: `${ats}_api_gone`, reason: 'the site redirects this posting to its board as not found — posting removed' };
+    }
+    if (redirectMeansLive && res.status >= 300 && res.status < 400) {
+      return redirectMeansLive(parts, res.headers.get('location'))
+        ? { result: 'active', code: `${ats}_api_ok`, reason: 'ATS API returns the posting (live)' }
+        : null;
     }
 
     if (res.status === 404 || res.status === 410) {
@@ -427,7 +504,7 @@ export async function checkLivenessViaApi(url) {
  */
 export async function fetchPostingMeta(url) {
   const resolved = resolveAtsApi(url);
-  if (!resolved) return null;
+  if (!resolved) return oraclePosting(url) ? fetchOracleMeta(oraclePosting(url)) : null;
   const { ats, apiUrl, parts, timeoutMs } = resolved;
 
   const controller = new AbortController();
@@ -450,6 +527,55 @@ export async function fetchPostingMeta(url) {
     try { json = await res.json(); } catch { return null; }
 
     return postingMetaFrom(ats, json, parts);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * AN ORACLE RECRUITING CLOUD POSTING, BY ITS OWN TENANT (F-714).
+ *
+ * Legrand's form on iadugs.fa.ocs.oraclecloud.com was not in the store, so
+ * the panel had nothing to show — and before F-714 it borrowed another
+ * employer's job 1246. The tenant's detail endpoint names the posting. It is
+ * NOT a liveness provider: what a pulled Oracle posting answers has not been
+ * measured, and a false "expired" is the expensive error.
+ */
+const ORC_POSTING_RE = /^https:\/\/([a-z0-9-]+\.fa\.[a-z0-9-]+\.oraclecloud\.com)\/hcmUI\/CandidateExperience\/[a-z]{2}(?:-[A-Za-z]{2})?\/sites\/([A-Za-z0-9_-]+)\/(?:job|preview)\/(\d+)(?:[/?#]|$)/i;
+export function oraclePosting(url) {
+  const m = String(url || '').match(ORC_POSTING_RE);
+  return m ? { host: m[1].toLowerCase(), site: m[2], id: m[3] } : null;
+}
+
+/** Title and employer from Oracle's requisition detail. Pure, like postingMetaFrom. */
+export function oracleMetaFrom(json) {
+  const it = Array.isArray(json?.items) ? json.items[0] : null;
+  const title = String(it?.Title || '').replace(/\s+/g, ' ').trim();
+  if (!title) return null;
+  // Oracle has no employer field that tenants fill in reliably; a "Brand" or
+  // "Company" flexfield is the tenant's own word for it (Legrand), else the
+  // legal employer or business unit when the tenant publishes one.
+  const flex = (Array.isArray(it.requisitionFlexFields) ? it.requisitionFlexFields : [])
+    .find((f) => /^(?:brand|company|employer|legal employer|business)$/i.test(String(f?.Prompt || '').trim()) && f?.Value);
+  const company = String(flex?.Value || it.LegalEmployer || it.BusinessUnit || it.Organization || '').replace(/\s+/g, ' ').trim();
+  return { title, company, ats: 'oracle-orc' };
+}
+
+async function fetchOracleMeta({ host, site, id }) {
+  if (!SAFE_SEGMENT.test(site) || !/^\d+$/.test(id)) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`https://${host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails`
+      + `?expand=all&onlyData=true&finder=ById%3BId%3D%22${id}%22%2CsiteNumber%3D%22${encodeURIComponent(site)}%22`, {
+      headers: { 'user-agent': 'career-ops-liveness/1.0', accept: 'application/json' },
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    if (res.status !== 200) return null;
+    return oracleMetaFrom(await res.json());
   } catch {
     return null;
   } finally {
@@ -488,7 +614,14 @@ export function postingMetaFrom(ats, json, parts = {}) {
     company = json?.name || fromSlug(parts.org);
   } else if (ats === 'workday') {
     title = json?.jobPostingInfo?.title || json?.jobPostingInfo?.jobPostingTitle || '';
-    company = fromSlug(parts.tenant);
+    // hiringOrganization.name comes back empty. The SITE often names the
+    // employer better than the tenant does — Caterpillar's tenant "cat" runs
+    // Solar Turbines' board as "SolarTurbines", Samsung's "sec" runs
+    // "Samsung_Careers" — unless it is a generic word ("External", "Search").
+    const site = String(parts.site || '').replace(/[_-]?(?:External)?[_-]?(?:Careers?|Jobs|Site)$/i, '');
+    const generic = /^(?:external|internal|search|careers?|jobs?|en|us|global|site|ext)?$/i.test(site);
+    company = json?.hiringOrganization?.name
+      || (generic ? fromSlug(parts.tenant) : site.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim());
   }
 
   title = String(title).replace(/\s+/g, ' ').trim();

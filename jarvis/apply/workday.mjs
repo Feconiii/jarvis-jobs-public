@@ -16,9 +16,11 @@
 // Requires a signed-in Workday session in the browser profile (a one-time
 // Google sign-in unlocks every tenant via SSO — see apply.mjs --login).
 
-import { resolveLabel, yesNo } from './_answers.mjs';
+// The wrapper that collapses a rule's alternatives to one typable value —
+// importing the raw table here typed "A,B" into a box whenever a rule offered two.
+import { yesNo } from './_answers.mjs';
 import { wdValue } from './_workday-keys.mjs';
-import { chooseOption } from './_form.mjs';
+import { chooseOption, resolveLabel } from './_form.mjs';
 import { workEntries, educationEntries, hasAnyExperience } from './_experience.mjs';
 // `record` is aliased: this module already has a record() for review entries.
 import { time, record as recordMs } from './_timing.mjs';
@@ -440,7 +442,7 @@ async function tickCheckbox(page, fieldId, label, profile, result) {
 
   // "I have a preferred name": tick it when his preferred name genuinely differs
   // from his legal name, because the preferred-name fields only RENDER once it is
-  // ticked. His legal name is Anna Maria Alex Rivera; he goes by Alex Rivera, and without
+  // ticked. His legal name has three given names; he goes by Alex Rivera, and without
   // this the application carries a name nobody at the company would recognise.
   if (/preferred name/i.test(label || '')) {
     const I = profile.identity || {};

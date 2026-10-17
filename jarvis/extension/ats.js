@@ -40,7 +40,9 @@
       // underscore and a requisition number. Simplify's extractor takes the
       // same segment.
       token: (u) => {
-        const m = u.pathname.match(/\/job\/(?:[^/]+\/)?([^/]*_[A-Za-z]*-?\d{3,}[^/]*)(?:\/|$)/);
+        // Wolfspeed numbers its requisitions "26-798" (F-715): two digits, a
+        // dash, more digits, so `\d{3,}` alone never saw them.
+        const m = u.pathname.match(/\/job\/(?:[^/]+\/)?([^/]*_[A-Za-z]*-?(?:\d{3,}|\d+-\d{2,})[^/]*)(?:\/|$)/);
         return m ? `workday:${m[1]}` : null;
       },
       // Workday's Submit is the same footer button as Next, told apart by
@@ -133,6 +135,33 @@
       token: (u) => { const id = q(u, 'job'); return id ? `taleo:${id}` : null; },
       submit: 'input[type="button"][id*="submitCmd"]',
       next: 'input[type="button"][value*="Save and Continue" i], input[type="button"][value="Next" i]',
+    },
+    {
+      // PageUp (Enpro, 2026-10-02). The posting lives at careers.pageuppeople.com
+      // /1050/cw/en-us/job/497392; the form at secure.dc4.pageuppeople.com/apply/
+      // 1050/aw/applicationForm/initApplication.asp?lJobID=497392. Its first
+      // page (preFill.asp?sData=…) names no job at all — the tab carries it.
+      key: 'pageup',
+      host: /(?:^|\.)pageuppeople\.com$/i,
+      token: (u) => {
+        const id = q(u, 'lJobID') || q(u, 'ljobid') || (u.pathname.match(/\/job\/(\d{4,})(?:\/|$)/) || [])[1];
+        return id && /^\d{4,}$/.test(id) ? `pageup:${id}` : null;
+      },
+    },
+    {
+      // ApplicantPro (Mycronic, 2026-10-02): mycronicusa.applicantpro.com/jobs/
+      // <id>.html, then /account/ to sign in and the application after it.
+      // Unlisted, the tab was not followed past the sign-in, and nothing filled.
+      key: 'applicantpro',
+      host: /\.applicantpro\.com$/i,
+      token: (u) => { const m = u.pathname.match(/\/jobs\/(\d{4,})(?:[./]|$)/) || [null, q(u, 'job_id') || q(u, 'jobId')]; return m[1] && /^\d{4,}$/.test(m[1]) ? `applicantpro:${m[1]}` : null; },
+    },
+    {
+      // Zoho Recruit (RKS Design, 2026-09-28): …zohorecruit.com/jobs/Careers/
+      // 657802000005145001/<slug> — the long number is the job.
+      key: 'zoho',
+      host: /\.zohorecruit\.(?:com|eu|in)$/i,
+      token: (u) => { const m = u.pathname.match(/\/jobs\/[^/]+\/(\d{10,})(?:\/|$)/); return m ? `zoho:${m[1]}` : null; },
     },
     {
       key: 'oracle',
@@ -268,7 +297,10 @@
   // Not "thank you for your interest": every careers page says that. And no
   // phrase here is trusted on a page that still offers Apply or Submit — see
   // discover.js applicationDone, which asks that before asking this.
-  const SUBMITTED_RE = /thank(?:s| you) for (?:applying|your application|submitting)|application (?:has been |was )(?:submitted|received|sent|completed|successful)|(?:successfully|you have) (?:submitted|applied)|we (?:have |'ve )?(?:got|received) your application|application (?:submitted|sent|complete|received)\b|your application (?:has been|was) (?:sent|received)/i;
+  // "Jobs YOU HAVE APPLIED to" is a candidate dashboard's list heading, not a
+  // confirmation (Werfen's iCIMS /jobs/dashboard, 2026-09-24, read as "this
+  // application is done"): "applied to/for" counts only as "…to/for this".
+  const SUBMITTED_RE = /thank(?:s| you) for (?:applying|your application|submitting)|application (?:has been |was )(?:submitted|received|sent|completed|successful)|successfully (?:submitted|applied)|you have (?:successfully )?(?:submitted|applied)(?!\s+(?:to|for)\b(?!\s+this\b))|we (?:have |'ve )?(?:got|received) your application|application (?:submitted|sent|complete|received)\b|your application (?:has been|was) (?:sent|received)/i;
 
   /** Confirmation pages an ATS sends to after Submit, by URL. */
   const CONFIRMATION_URL_RE = /\/(?:confirmation|applyConfirmation|SuccessfulRegistration|thank-?you|application-?(?:complete|submitted|received))(?:\/|\?|$)/i;

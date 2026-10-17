@@ -82,8 +82,24 @@ const before = { hardBlock: 0, handsOn: 0, internship: 0, newGrad: 0, gradMismat
 const after = { ...before };
 const changed = { hardBlock: 0, handsOn: 0, internship: 0, newGrad: 0, gradMismatch: 0, degreeMismatch: 0, level: 0 };
 
+// A SCAN HOLDING THE WRITE LOCK STOPS THE PASS CLEANLY, it does not crash it
+// (F-483 in rescore.mjs; here F-727, 2026-10-13: the deck pass after F-724 died
+// on its first write as a raw "database is locked" stack while the dashboard's
+// scan ran). A lock is waited out briefly; one that holds is a clean stop at
+// the row reached, with the command that resumes.
+const writeJob = (job) => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try { putJob(job, { description: false }); return true; }
+    catch (err) {
+      if (!/lock|busy/i.test(String(err?.message || ''))) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000 * (attempt + 1));
+    }
+  }
+  return false;
+};
+
 const STARTED = Date.now();
-let cursor = AFTER, ranOut = false, seen = 0;
+let cursor = AFTER, ranOut = false, lockedOut = false, seen = 0;
 for (const id of jobIds) {
   if (Date.now() - STARTED > BUDGET_MS) { ranOut = true; break; }
   cursor = id; seen++;
@@ -105,9 +121,11 @@ for (const id of jobIds) {
 
   if (!DRY) {
     job.triage = next;
-    putJob(job, { description: false });
+    if (!writeJob(job)) { lockedOut = true; seen--; break; }
   }
 }
+// The row that could not be written is the one to start from.
+const resumeAfter = lockedOut ? jobIds[jobIds.indexOf(cursor) - 1] || '' : cursor;
 
 const pad = (s, n) => String(s).padEnd(n);
 console.log(`\n${pad('flag', 14)} ${pad('before', 8)} ${pad('after', 8)} changed`);
@@ -115,4 +133,10 @@ for (const k of Object.keys(before)) {
   console.log(`${pad(k, 14)} ${pad(before[k].toLocaleString(), 8)} ${pad(after[k].toLocaleString(), 8)} ${changed[k].toLocaleString()}`);
 }
 console.log(`${pad('experience', 14)} ${pad('', 8)} ${pad('', 8)} ${changed.level.toLocaleString()}`);
-console.log(DRY ? '\nDry run — nothing written.' : '\nStore updated.');
+if (ranOut || lockedOut) {
+  const flags = ARGV.filter((a, i) => a !== '--after' && ARGV[i - 1] !== '--after').join(' ');
+  console.log(`\n${lockedOut ? 'Stopped: another process (a scan?) holds the store\'s write lock.' : 'Budget spent.'} ${seen.toLocaleString()} of ${jobIds.length.toLocaleString()} done. Resume with:`);
+  console.log(`  node jarvis/retriage.mjs${flags ? ` ${flags}` : ''}${resumeAfter ? ` --after ${resumeAfter}` : ''}`);
+}
+console.log(DRY ? '\nDry run — nothing written.' : !seen ? '\nNothing written.' : lockedOut || ranOut ? '\nStore partly updated.' : '\nStore updated.');
+if (lockedOut) process.exitCode = 2;

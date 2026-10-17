@@ -24,6 +24,8 @@
 import { openDb, readDescription, getDictionary } from './db.mjs';
 import { eligibility } from './eligibility.mjs';
 import { loadPrefs, applyPrefs } from './prefs.mjs';
+import { classifyVisa } from './visa.mjs';
+import { person, screen } from './targeting.mjs';
 import path from 'node:path';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
@@ -48,6 +50,9 @@ const arg = (name, fallback) => {
 const SCREEN = `
   gone_at IS NULL
   AND status = 'new'
+  -- A second copy of a posting, or of a role he already applied to or hid
+  -- (dedupe.mjs, F-715), is never a pick: the lists already leave it out.
+  AND superseded_by IS NULL
   AND f_hard_block = 0
   -- THE COLUMN THAT CARRIES HIS OWN RULES.
   --
@@ -96,6 +101,9 @@ const SCREEN = `
   -- Pass --grad-anyway to put them back, the same way --interns does.
   AND (f_grad_mismatch = 0 @gradClause)
   AND has_desc = 1
+  -- LinkedIn Easy Apply only: no company site, so no tailored resume, and he
+  -- does not apply that way (2026-10-02, linkedin-route.mjs).
+  AND (apply_route IS NULL OR apply_route <> 'easy-apply')
   -- Read in full and rejected once already. The reason is on the row.
   AND (pick_note IS NULL OR pick_note NOT LIKE 'Not curated%')
   AND (posted_at IS NULL OR posted_at >= date('now', @window))
@@ -186,8 +194,9 @@ export function whereIsIt(location) {
 // makes this genuinely hard to separate, because "Equipment Engineer" and
 // "Process Engineer" ARE mechanical work at a fab while sitting in the same
 // industry as circuit design. So: penalise the titles that are unambiguously
-// somebody else's discipline, and leave everything else alone.
-const NOT_HIS_DISCIPLINE = /\b(asic|rtl|verilog|vhdl|firmware|design\s+for\s+test|\bdft\b|physical design|analog design|circuit design|soc\b|software (development )?engineer|full[- ]stack|data (scientist|engineer)|machine learning engineer|cybersecurity|network engineer|cloud (hardware|infrastructure)|devops|\bsre\b)/i;
+// somebody else's discipline, and leave everything else alone. The pattern is
+// the preset's, moved so a second user can run Jarvis.
+const NOT_HIS_DISCIPLINE = screen.notHisDiscipline;
 
 export function disciplineMiss(title) {
   return NOT_HIS_DISCIPLINE.test(String(title || ''));
@@ -209,6 +218,43 @@ const HAS_REQUIREMENTS = /\b(qualifications?|requirements?|what\s+you'?ll\s+(?:d
  * and with none present every verdict about the posting is a verdict about
  * text nobody fetched.
  */
+/**
+ * THE EXPORT-CONTROL BAR FOR HIS PICKS, or null.
+ *
+ * His rule, 2026-09-30 ("i still saw us person jobs btw so be mindful"), and
+ * again on 10-02 hiding Freeform, Cowboy Space, Northwood and Sierra Space
+ * ("fuckin itar", "space comapnty us person???? big fuck up"): a role that
+ * needs ITAR access or names a U.S.-person requirement is not put in his
+ * inbox. It lived only in hand curation; the daily curator never had it, and
+ * PCB Piezotronics ("legally authorized to access … International Traffic in
+ * Arms Regulations") was filed on 10-01.
+ *
+ * NOT the routine EAR line semiconductor employers carry — "…except US
+ * Citizens, US Permanent Residents, and protected individuals as defined by 8
+ * U.S.C. 1324b(a)(3) – may have to go through an export licensing review"
+ * (Analog Devices, Onto). That one he applies through; it stays.
+ *
+ * @returns the sentence that bars it, or null
+ */
+const LICENCE_REVIEW = /export\s+licens\w*\s+(review|process)|may\s+(?:need|have\s+to|require|be\s+required\s+to)[^.]{0,60}\blicen[cs]e|deemed\s+export|license\s+(?:may|might)\s+be\s+required/i;
+export function exportBar(title, text) {
+  // A U.S. person (citizen, green card) IS what these postings ask for, so
+  // nothing here bars them.
+  if (person.usPerson) return null;
+  const body = String(text || '');
+  const itar = body.match(/[^.\n]{0,160}\b(?:ITAR|International\s+Traffic\s+in\s+Arms)\b[^.\n]{0,160}/i);
+  if (itar) return itar[0].replace(/\s+/g, ' ').trim();
+  let v;
+  try { v = classifyVisa(title, body); } catch { return null; }
+  for (const w of v?.warnings || []) {
+    if (w.key !== 'us_person' && w.key !== 'export_authorization') continue;
+    const quote = String(w.quote || '');
+    if (LICENCE_REVIEW.test(quote)) continue;
+    return quote.replace(/\s+/g, ' ').trim() || w.key;
+  }
+  return null;
+}
+
 export function isThinBody(text) {
   const s = String(text || '').trim();
   if (!s) return true;
@@ -254,29 +300,31 @@ export function winnability(j) {
   if (j.f_newgrad) { s += 25; why.push('written for new grads'); }
   else if (j.f_intern) { s += 18; why.push('intern/co-op posting'); }
   // Sponsorship history is the single best predictor available for an F-1
-  // candidate: it says this employer has actually done it before.
-  if (j.sponsors_h1b === 1) { s += 20; why.push('has sponsored H-1B before'); }
+  // candidate: it says this employer has actually done it before. For someone
+  // who needs no sponsorship it says nothing, so none of these four terms count.
+  const sponsor = person.needsSponsorship;
+  if (sponsor && j.sponsors_h1b === 1) { s += 20; why.push('has sponsored H-1B before'); }
   // …AND WHETHER THEY HAVE DONE IT IN HIS OWN FIELD, which is a different
   // question. Until 2026-09-12 this column was 24 hand-typed booleans; it is
   // now the Department of Labor's own record (F-454), and the record
   // distinguishes an employer that files three thousand software LCAs from one
   // that files for mechanical and industrial engineers.
-  if (j.lca_eng_certified >= 3) { s += 8; why.push(`${j.lca_eng_certified} H-1B filings in his own field`); }
+  if (sponsor && j.lca_eng_certified >= 3) { s += 8; why.push(`${j.lca_eng_certified} H-1B filings in his own field`); }
   // THE WAGE LEVEL IS A LOTTERY MULTIPLIER, not a salary note. Since
   // 2026-02-27 a Level I offer is entered in the cap draw once and a Level IV
   // four times, so two employers who both sponsor can be four times apart on
   // whether it ever becomes status. Small on purpose: it breaks ties between
   // employers, it does not outrank whether the job suits him.
-  const lvl = j.lca_eng_modal_level || 0;
+  const lvl = sponsor ? (j.lca_eng_modal_level || 0) : 0;
   if (lvl >= 3) { s += (lvl === 4 ? 8 : 5); why.push(`files at Level ${lvl === 4 ? 'IV' : 'III'} — ${lvl} lottery entries`); }
   else if (lvl === 1) { s -= 4; why.push('files at Level I — one lottery entry'); }
-  if (j.f_visa_good === 1) { s += 8; why.push('posting is visa-friendly'); }
+  if (sponsor && j.f_visa_good === 1) { s += 8; why.push('posting is visa-friendly'); }
   if (j.f_stretch === 1) { s -= 25; why.push('stretch role'); }
   if (j.level_years != null) {
     if (j.level_years <= 1) { s += 12; why.push('asks ≤1 yr experience'); }
     else if (j.level_years <= 2) { s += 6; why.push('asks ≤2 yrs'); }
     else if (j.level_years >= 4) { s -= 18; why.push(`asks ${j.level_years} yrs`); }
-  } else if (j.salary_min >= 190000 && (j.salary_interval || 'year') === 'year') {
+  } else if (j.salary_min >= screen.aboveNewGradPay && (j.salary_interval || 'year') === 'year') {
     // WHAT A POSTING PAYS IS A SENIORITY STATEMENT WHEN IT STATES NO YEARS
     // (F-466). OpenAI "Mechanical Engineer, Dynamometer and Actuator Testing"
     // names no years requirement at all and pays $225–318K. A US mechanical
@@ -310,11 +358,14 @@ export function winnability(j) {
 export function desirability(j) {
   let s = j.fit_score ?? 0;
   const why = [];
-  if (j.role_kind === 'hands-on') { s += 6; why.push('hands-on'); }
-  // $80K floor. Only judged when the posting states a number — most do not, and
-  // absence is not evidence of a low number.
-  if (j.salary_max != null && j.salary_max < 80000) { s -= 20; why.push(`tops out at $${Math.round(j.salary_max / 1000)}k`); }
-  else if (j.salary_min != null && j.salary_min >= 80000) { s += 6; why.push(`from $${Math.round(j.salary_min / 1000)}k`); }
+  // What the hands-on track is worth is the preset's: he keeps choosing it; in
+  // finance it is the teller / clerk track.
+  if (j.role_kind === 'hands-on') { s += screen.handsOn.bonus; why.push(screen.handsOn.why); }
+  // His $80K floor (person.salaryFloor). Only judged when the posting states a
+  // number — most do not, and absence is not evidence of a low number.
+  const floor = person.salaryFloor;
+  if (j.salary_max != null && j.salary_max < floor) { s -= 20; why.push(`tops out at $${Math.round(j.salary_max / 1000)}k`); }
+  else if (j.salary_min != null && j.salary_min >= floor) { s += 6; why.push(`from $${Math.round(j.salary_min / 1000)}k`); }
   return { score: Math.max(0, Math.min(100, Math.round(s))), why };
 }
 
@@ -350,7 +401,7 @@ export function rank(rows, { perCompany = 3, limit = 40 } = {}) {
       // admitted at full score. The city list will never converge, so an
       // unverified location costs points and says so, and stays visible.
       combined: Math.round((w.score + d.score) / 2) - (disciplineMiss(j.title) ? 25 : 0) - (where === 'unclear' ? 15 : 0),
-      why: [...d.why, ...w.why, ...(disciplineMiss(j.title) ? ['reads as EE/CS, not mechanical'] : []), ...(where === 'unclear' ? ['location not recognised — verify it is in the US'] : [])],
+      why: [...d.why, ...w.why, ...(disciplineMiss(j.title) ? [screen.disciplineMissWhy] : []), ...(where === 'unclear' ? ['location not recognised — verify it is in the US'] : [])],
     };
   });
 
@@ -501,6 +552,15 @@ export function loadCandidates(dbPath = DB_PATH, { minFit = 70, days = 60, withD
       // in the list, carrying the reason, and the caller prints the remedy.
       r.thin = isThinBody(text);
       r.eligible = eligibility(r, text);
+      // HIS PICKS SKIP ITAR AND U.S.-PERSON ROLES (2026-09-30; the gate in
+      // visa.mjs still only cautions, so the library keeps them). See
+      // exportBar above.
+      {
+        const bar = exportBar(r.title, text);
+        if (bar && r.eligible.verdict !== 'not-eligible') {
+          r.eligible = { ...r.eligible, verdict: 'not-eligible', reasons: ['needs ITAR access or U.S.-person status — not picked (his rule, 2026-09-30)'], evidence: bar };
+        }
+      }
       if (r.thin) {
         r.eligible = {
           ...r.eligible,

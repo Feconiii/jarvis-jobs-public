@@ -28,9 +28,22 @@
  */
 (() => {
   const {
-    discover, setNativeValue, enterText, SUBMIT_RE, nextControl, stepSignature, settle, startGate, signInWall, signInWallKind, applyControl, atsMoved,
+    discover, setNativeValue, enterText, SUBMIT_RE, nextControl, stepSignature, expandSections, settle, startGate, signInWall, signInWallKind, applyControl, atsMoved,
     advanceBlockedBy, comboValue, postingGone, pageBlocked, readPosting, applicationDone, alreadyApplied, looksLikeApplication, ssoControl, waitForSomething, dismissCookieBanner, experienceSections, ENTRY_IDS, ENTRY_PRIMARY, deepQuerySelectorAll, labelFor, allControls, onScreen, headingAbove, buttonName, wouldSubmit,
+    errorsOnPage, consentGate, unseenControls,
   } = globalThis.__jarvis || {};
+  /**
+   * WHOSE FILES. The worker keeps the dashboard's person in storage
+   * (`jarvisPerson`); a file the server sent without a name falls back to
+   * theirs. The original user's name until that is read.
+   */
+  let PERSON_NAME = 'Alex Rivera';
+  try {
+    chrome.storage?.local?.get?.('jarvisPerson')?.then?.((s) => {
+      const n = s?.jarvisPerson?.fullName;
+      if (typeof n === 'string' && n.trim()) PERSON_NAME = n.trim();
+    })?.catch?.(() => {});
+  } catch { /* no storage here: the default name stands */ }
   /** Apply through somebody else's account: never chosen for him (F-347). */
   const SOCIAL_APPLY_RE = /linkedin|indeed|google|facebook|seek\b|xing|glassdoor|apple|microsoft/i;
   /**
@@ -57,7 +70,9 @@
   }
 
   /** What the page calls the job, for the server to match when the URL does not say (F-330). */
-  const pageHeading = () => (document.querySelector('h1')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  // An <h2> when the page has no <h1>: ADP's form names its job only in
+  // <h2 class="applying-for-title">Applying for …</h2> (2026-10-16).
+  const pageHeading = () => ((document.querySelector('h1') || document.querySelector('h2.applying-for-title, h2'))?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
   /**
    * COMMIT A CUSTOM VALUE TO AN AUTOCOMPLETE COMPONENT (F-354).
    *
@@ -86,7 +101,23 @@
   }
 
   /** Is this box or radio on — a real input's `checked`, or an ARIA one's `aria-checked` (F-334). */
-  const isOn = (el) => (typeof el.checked === 'boolean' ? el.checked : el.getAttribute('aria-checked') === 'true');
+  // …or a styled box standing in for a hidden native input (Rippling,
+  // 2026-09-24): the box is what gets clicked, the input inside says whether it took.
+  // …or one of Ashby's Yes/No buttons (2026-09-25): pressed, or styled as
+  // the chosen one; "Yes" also ticks the hidden checkbox beside it.
+  const isOn = (el) => {
+    if (typeof el.checked === 'boolean') return el.checked;
+    if (el.tagName === 'BUTTON') {
+      if (el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-checked') === 'true') return true;
+      if (/(^|[\s_-])(active|selected|checked|chosen)(?=[\s_-]|$)/i.test(String(el.className || ''))) return true;
+      const box = /^\s*yes\s*$/i.test(el.textContent || '') && el.parentElement?.parentElement?.querySelector('input[type="checkbox"]');
+      return !!box?.checked;
+    }
+    const aria = el.getAttribute('aria-checked');
+    if (aria != null) return aria === 'true';
+    const inner = el.querySelector?.('input[type="radio"], input[type="checkbox"]');
+    return inner ? inner.checked : false;
+  };
   /**
    * A PAUSE THAT STAYS A PAUSE IN A BACKGROUND TAB (F-355, widened by F-464).
    *
@@ -108,10 +139,25 @@
    * module-level now and it is the ONLY way this file waits. Do not write
    * `pause(n)` here again.
    */
+  //
+  // AND A HIDDEN TAB'S TIMERS STILL NEVER FIRE SOONER THAN ONCE A SECOND
+  // (2026-09-25, "why is jarvis fill speed now painfully slow"): a 120 ms poll
+  // cost a whole second, eight times over, on every dropdown. Hidden, the wait
+  // is kept by the extension's worker, whose timers are not held back
+  // (background.js, "A CLOCK FOR A HIDDEN TAB"). The page timer still runs
+  // beside it as the fallback, so a worker that never answers costs a second,
+  // not the run.
   const pause = (ms) => new Promise((r) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; r(); } };
+    if (document.visibilityState === 'hidden' && ms > 0) {
+      try {
+        chrome.runtime.sendMessage({ type: 'sleep', ms }, () => { void chrome.runtime.lastError; finish(); });
+      } catch { /* the extension was reloaded under this page: the timer below still ends it */ }
+    }
     let port;
-    try { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); r(); }; port = ch.port2; } catch { /* no ports here */ }
-    setTimeout(() => (port ? port.postMessage(0) : r()), ms);
+    try { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); finish(); }; port = ch.port2; } catch { /* no ports here */ }
+    setTimeout(() => (port ? port.postMessage(0) : finish()), ms);
   });
 
   /**
@@ -214,20 +260,35 @@
    */
   // Its own copy: the filler's is declared far below, and a script that
   // returns early never reaches it.
-  const SNAP_PLACEHOLDER_RE = /^\s*(select|choose|please select|please choose|--|—|none selected)?\s*(one|an option|a value)?\s*[.:…-]*\s*$/i;
+  const SNAP_PLACEHOLDER_RE = /^\s*(select|choose|please select|please choose|--|—|none selected|no selection)?\s*(one|an option|a value)?\s*[.:…-]*\s*$/i;
   const SNAP_NEXT_RE = /^\s*(save and continue|save & continue|continue|next|next step|save and next|review|proceed)\s*$/i;
   function valueNow(f) {
     const els = f.elements || [];
     const el = els[0];
     const optText = (o) => String(o?.text ?? o ?? '').trim();
     try {
+      // ONE BOX IS TICKED OR NOT (2026-09-25). `current` for a Workday
+      // checkbox is its LABEL when ticked ("I am fluent in this language. |
+      // …"), so every snapshot logged the box as "changed" and hid whether
+      // the tick had landed. The box's own state first; an ARIA box too.
+      if (f.type === 'checkbox' && els.length <= 1 && el) {
+        if (typeof el.checked === 'boolean' && el.tagName === 'INPUT') return el.checked ? 'checked' : 'unchecked';
+        const aria = el.getAttribute?.('aria-checked');
+        if (aria === 'true' || aria === 'false') return aria === 'true' ? 'checked' : 'unchecked';
+      }
+      // …and a group whose copies all say the same thing is one box (F-369):
+      // Workday's fluent box read as its text twice, never as ticked (F-670).
+      if (f.type === 'checkbox' && els.length > 1 && new Set((f.options || []).map((o) => optText(o).toLowerCase())).size === 1) {
+        const on = els.filter(isOn).length;
+        return on === els.length ? 'checked' : on ? `${on} of ${els.length} checked` : 'unchecked';
+      }
       if (f.current !== undefined) return String(f.current || '');
       if (el?.tagName === 'SELECT') {
         const o = el.options[el.selectedIndex];
         return o && el.selectedIndex >= 0 && !SNAP_PLACEHOLDER_RE.test(o.textContent || '') ? o.textContent.trim() : '';
       }
       if (f.type === 'radio' || (f.type === 'checkbox' && els.length > 1)) {
-        return els.map((e, i) => (e.checked ? optText(f.options?.[i]) || String(e.value || '') : null)).filter(Boolean).join(' | ');
+        return els.map((e, i) => (isOn(e) ? optText(f.options?.[i]) || String(e.value || '') : null)).filter(Boolean).join(' | ');
       }
       if (f.type === 'checkbox') return el?.checked ? 'checked' : 'unchecked';
       if (f.type === 'file') return f.attached ? `${f.attached} file(s) attached` : '';
@@ -247,13 +308,58 @@
         : (SNAP_NEXT_RE.test(name) || /pageFooterNextButton|bottom-navigation-next-button/.test(auto)) ? 'step' : '';
       if (!stage || !discover) return;
       const fields = discover().filter((f) => f.label).map((f) => ({
-        label: f.label, type: f.type,
+        // Workday's key tells two fields with one label apart: Legal Name and
+        // Preferred Name both say "First Name" (2026-09-26).
+        label: f.label, type: f.type, ...(f.key ? { key: String(f.key).slice(0, 120) } : {}),
+        // A split date's three boxes share one key (F-618).
+        ...(f.datePart ? { datePart: f.datePart } : {}),
         options: (f.options || []).slice(0, 25).map((o) => String(o?.text ?? o).slice(0, 80)),
         value: valueNow(f).slice(0, 4000),
       }));
       if (!fields.length) return;
       send({ type: 'snapshot', stage, button: name.slice(0, 80), by: ev.isTrusted ? 'you' : 'jarvis', pageUrl: location.href, heading: pageHeading(), pageTitle: document.title, fields });
     } catch { /* a record, never the form */ }
+  }
+  // AFTER HIS SUBMIT, WAIT FOR THE THANK-YOU (2026-10-02). Ashby keeps the
+  // same URL and swaps the form for "Thank you for applying" only when its
+  // upload finishes; the one check after the press ran five seconds in, saw
+  // the posting, and nothing looked again — Capable, Charge Robotics, Kovari,
+  // Haast, 1X and Collaborative Robotics were sent and never marked applied.
+  // So the page is read every 1.5 s for two minutes, and a confirmation goes
+  // to the worker exactly as a run's would: the card moves to Applied and
+  // the tab stands down. Nothing is pressed.
+  function watchAfterPress(ev) {
+    try {
+      if (!ev.isTrusted) return;
+      const path = typeof ev.composedPath === 'function' ? ev.composedPath() : [ev.target];
+      const control = path.find((n) => n?.tagName && (/^(BUTTON|A)$/.test(n.tagName)
+        || (n.tagName === 'INPUT' && /^(submit|button|image)$/i.test(n.type || ''))
+        || n.getAttribute?.('role') === 'button'));
+      if (!control) return;
+      const name = String((buttonName && buttonName(control)) || control.value || control.textContent || '').replace(/\s+/g, ' ').trim();
+      if (SUBMIT_RE && SUBMIT_RE.test(name)) watchForSent();
+    } catch { /* never in the way of his press */ }
+  }
+  let watchingSent = false;
+  function watchForSent() {
+    if (watchingSent || typeof applicationDone !== 'function') return;
+    watchingSent = true;
+    const until = Date.now() + 120_000;
+    const tick = () => {
+      let said = null;
+      try { said = applicationDone(); } catch { said = null; }
+      if (said) {
+        watchingSent = false;
+        send({ type: 'filled', result: {
+          frame: location.href, pageUrl: location.href, filled: 0, checked: 0, uploaded: false,
+          submitted: String(said), stoppedBecause: `the page says "${said}" — this application is done`,
+        } });
+        return;
+      }
+      if (Date.now() > until) { watchingSent = false; return; }
+      setTimeout(tick, 1500);
+    };
+    setTimeout(tick, 1500);
   }
   // WHEN HIS "SAVE AND CONTINUE" IS REFUSED (F-550). Workday runs its
   // required check on the press; a box it lost shows an error while holding
@@ -281,9 +387,68 @@
     globalThis.__jarvisRepairOn = true;
     document.addEventListener('click', repairAfterPress, true);
   }
+  if (!globalThis.__jarvisSentWatchOn && reachable()) {
+    globalThis.__jarvisSentWatchOn = true;
+    document.addEventListener('click', watchAfterPress, true);
+  }
   if (!globalThis.__jarvisSnapshotOn && reachable()) {
     globalThis.__jarvisSnapshotOn = true;
     document.addEventListener('click', snapshotOnPress, true);
+  }
+  // WHAT THE PAGE SAID BACK (his ask, 2026-10-02). Red text, alert banners and
+  // boxes marked invalid go to the dashboard's page-error log
+  // (data/jarvis/page-errors.jsonl, `npm run jarvis:page-errors`), so a step
+  // that would not move is logged with the form's own words. Read 1.5 s and
+  // 4 s after any Next / Submit press (his or the walk's), and whenever the
+  // page changes on a form — a message drawn on blur counts too. Each
+  // message once per page; reading only.
+  const ERRORS_SENT = new Set();
+  function reportPageErrors(trigger) {
+    try {
+      if (typeof errorsOnPage !== 'function') return;
+      const fresh = errorsOnPage().filter((e) => !ERRORS_SENT.has(`${location.pathname}|${e.text}`));
+      if (!fresh.length) return;
+      for (const e of fresh) ERRORS_SENT.add(`${location.pathname}|${e.text}`);
+      send({ type: 'page-errors', trigger, pageUrl: location.href, heading: pageHeading(), pageTitle: document.title, errors: fresh });
+    } catch { /* a record, never the form */ }
+  }
+  function errorsAfterPress(ev) {
+    try {
+      const path = typeof ev.composedPath === 'function' ? ev.composedPath() : [ev.target];
+      const control = path.find((n) => n?.tagName && (/^(BUTTON|A)$/.test(n.tagName)
+        || (n.tagName === 'INPUT' && /^(submit|button|image)$/i.test(n.type || ''))
+        || n.getAttribute?.('role') === 'button'));
+      if (!control) return;
+      const name = String((buttonName && buttonName(control)) || control.value || control.textContent || '').replace(/\s+/g, ' ').trim();
+      const auto = control.getAttribute?.('data-automation-id') || '';
+      const isSubmit = SUBMIT_RE && SUBMIT_RE.test(name);
+      if (!isSubmit && !SNAP_NEXT_RE.test(name) && !/pageFooterNextButton|bottom-navigation-next-button/.test(auto)) return;
+      const trigger = `after ${ev.isTrusted ? 'your' : 'Jarvis\'s'} press of "${name.slice(0, 60)}"`;
+      setTimeout(() => reportPageErrors(trigger), 1500);
+      setTimeout(() => reportPageErrors(trigger), 4000);
+      watchErrors();
+    } catch { /* never in the way of his press */ }
+  }
+  let errorObserver = null;
+  function watchErrors() {
+    if (errorObserver || typeof MutationObserver !== 'function' || !document.body) return;
+    let timer = null;
+    let lastRun = 0;
+    errorObserver = new MutationObserver(() => {
+      if (timer) return;
+      // Trailing, at most every 3 s: a React form re-renders on each keystroke.
+      const wait = Math.max(1200, 3000 - (Date.now() - lastRun));
+      timer = setTimeout(() => { timer = null; lastRun = Date.now(); reportPageErrors('appeared on the page'); }, wait);
+    });
+    errorObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'aria-invalid', 'style', 'hidden'] });
+  }
+  if (!globalThis.__jarvisErrorsOn && reachable()) {
+    globalThis.__jarvisErrorsOn = true;
+    document.addEventListener('click', errorsAfterPress, true);
+    // Only on a form: every page this script reaches is not an application.
+    try {
+      if (looksLikeApplication && looksLikeApplication()) { watchErrors(); setTimeout(() => reportPageErrors('on the page as it loaded'), 2500); }
+    } catch { /* never in the way */ }
   }
   // Whether the side panel is open beside this tab, as the worker last said.
   let PANEL_OPEN = false;
@@ -470,11 +635,59 @@
     if (g === w) return true;
     if (!g) return false;
     const bare = (x) => x.toLowerCase().replace(/[^a-z0-9]/g, '');
-    return bare(g) === bare(w);
+    if (bare(g) === bare(w)) return true;
+    // THE SAME NUMBER IS KEPT (F-633). Onto Innovation's Workday (2026-10-01):
+    // the date boxes hold "6" and "1" for "06" and "01", and the salary box
+    // keeps only "90000" of "$90000/year" — all three reported as faults to
+    // fix by hand on a step that held exactly the answer. A box holding just a
+    // number keeps an answer whose only digits are that number; never one
+    // written with k or m ("$90k" is not a box holding "90").
+    if (/^\d+$/.test(g.trim()) && /^\d+$/.test(w.trim()) && Number(g) === Number(w)) return true;
+    // THE SAME PHONE NUMBER WITH ITS COUNTRY CODE ADDED (2026-10-16). ADP's
+    // phone box turns "555-010-0000" into "+1 555 010 0000": same ten digits,
+    // a "+1" in front, reported as lost on Therm-X's form while it held his
+    // number. Only phone-shaped values, and only a 1–3 digit prefix.
+    const dg = g.replace(/\D/g, ''), dw = w.replace(/\D/g, '');
+    const phoneish = (x) => /^[\s+()\d.-]{7,}$/.test(x);
+    if (phoneish(g) && phoneish(w) && Math.min(dg.length, dw.length) >= 10) {
+      const [long, short] = dg.length >= dw.length ? [dg, dw] : [dw, dg];
+      if (long.endsWith(short) && long.length - short.length <= 3) return true;
+    }
+    if (/^\s*\d[\d,]*\s*$/.test(g) && !/\d\s*[kKmM]\b/.test(w) && /^[\s$€£]*[\d,]+(\.0+)?\s*(\/\s*(yr|year|annum)|per\s+(year|annum)|annually|usd|a\s+year)?\s*$/i.test(w)
+      && g.replace(/\D/g, '') === w.replace(/\.0+\s*/, ' ').replace(/[^\d]/g, '')) return true;
+    // A PAGE THAT TIDIES A URL KEPT IT. BambooHR turns "alexrivera.example"
+    // into "http://alexrivera.example" on blur (Cornelis Networks, measured
+    // 2026-09-24), and the run reported "the page did not keep the value" for
+    // a box holding exactly his address.
+    const url = (x) => x.trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+    return /^[a-z0-9-]+(\.[a-z0-9-]+)+/i.test(url(w)) && url(g) === url(w);
   };
   const kept = kept_same;
 
+  /**
+   * THE UPLOADER'S MARKUP, WHEN AN UPLOAD DOES NOT LAND (F-655, 2026-10-02).
+   * Spirit AeroSystems' iCIMS profile planned the resume, the run never
+   * reported, and the box was empty when he submitted — with nothing to say
+   * why. The control's surroundings (four levels up, 24 KB at most) go to his
+   * dashboard: no values, no script or style, no hidden-field contents. Sent
+   * before the attempt too, because an uploader that reloads its frame on
+   * `change` ends this script before it could report anything.
+   */
+  function captureAround(el, why, label = '') {
+    try {
+      let box = el;
+      for (let i = 0; i < 4 && box.parentElement && box.parentElement !== document.body; i += 1) box = box.parentElement;
+      const copy = box.cloneNode(true);
+      copy.querySelectorAll('script, style, noscript, svg, img, iframe').forEach((x) => x.remove());
+      copy.querySelectorAll('input, textarea').forEach((x) => { x.removeAttribute('value'); if (x.tagName === 'TEXTAREA') x.textContent = ''; });
+      copy.querySelectorAll('[value]').forEach((x) => { if (x.tagName !== 'OPTION') x.removeAttribute('value'); });
+      const html = copy.outerHTML.replace(/\s+/g, ' ').slice(0, 24000);
+      send({ type: 'capture', pageUrl: location.href, why, label: String(label).slice(0, 200), html });
+    } catch { /* a record, never the form */ }
+  }
+
   async function attachResume(input) {
+    captureAround(input, 'resume upload, before the attempt', labelFor ? labelFor(input, 'file') : '');
     // WAIT FOR THE RESUME RATHER THAN GIVING UP ON IT.
     //
     // Clicking Jarvis on a form the dashboard has never seen used to attach
@@ -504,7 +717,7 @@
     // draws, exactly which resume went on. The server names it; this only
     // falls back if an older worker sent no name.
     const named = String(got.filename || '').trim();
-    const file = new File([bytes], named || 'Alex Rivera Resume.pdf', { type: 'application/pdf' });
+    const file = new File([bytes], named || `${PERSON_NAME} Resume.pdf`, { type: 'application/pdf' });
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
@@ -538,20 +751,81 @@
       catch { return false; }
     })();
     if (ownDrawn) {
-      for (let i = 0; i < 3 && !fileShowing(file.name); i += 1) await pause(300);
+      // UP TO EIGHT SECONDS FOR THE NAME. SmartRecruiters prints it only once
+      // the upload has finished on its server — about 1-4 s on a real resume —
+      // and 0.9 s here called a resume that landed a failure, then dropped it
+      // a second time (Western Digital, 2026-09-24).
+      for (let i = 0; i < 20 && !fileShowing(file.name); i += 1) { agreeToUploadNotice(); await pause(400); }
       if (!fileShowing(file.name)) {
         dropOnto(input, file);
         for (let i = 0; i < 3 && !fileShowing(file.name); i += 1) await pause(300);
       }
     }
+    // TAKEN AND CLEARED IS STILL TAKEN. Rippling moves the file into its own
+    // state and empties the input, then prints the name ("Alex Rivera -
+    // Cinta...pdf remove", 2026-09-24) — the run said "the page did not keep
+    // the file" beside a chip showing it. The chip is the evidence this
+    // function already trusts; an empty input next to it is not a failure.
+    // AND AN INPUT THAT EMPTIED ITSELF, whether or not it looked hidden: the
+    // component took the file. SmartRecruiters' dropzone input is not hidden
+    // by any of the tests above, so the name was never looked for and a
+    // resume sitting in the zone was reported "the page did not keep the
+    // file" (Western Digital, 2026-09-24). Wait for the name the same way.
+    if (!ownDrawn && !(input.files?.length)) {
+      for (let i = 0; i < 20 && !fileShowing(file.name); i += 1) { agreeToUploadNotice(); await pause(400); }
+    }
+    const shownNow = fileShowing(file.name);
+    if (!((input.files?.length || 0) > 0 || shownNow) || (ownDrawn && !shownNow)) captureAround(input, 'resume upload did not show on the page');
     return {
-      ok: (input.files?.length || 0) > 0,
+      ok: (input.files?.length || 0) > 0 || shownNow,
       // Only a claim where it was checked. `null` is "no evidence either way",
       // and the caller says nothing about it — a warning nobody can act on is
       // worse than silence.
       showing: ownDrawn ? fileShowing(file.name) : null,
       name: file.name,
     };
+  }
+
+  /**
+   * A NOTICE THAT HOLDS THE FILE (F-621). Micron's Eightfold form opens "Notice
+   * Related to Micron's Use of the Eightfold AI Recruiting Software" the moment
+   * a resume is chosen, with I Agree and Cancel, and the file goes nowhere
+   * until it is answered: every Micron fill since 2026-09-25 said "attached,
+   * but the page never showed the file". His standing answer to AI screening
+   * and consent is yes. Only an agree/accept/acknowledge button, only inside a
+   * notice that says what it is about, never Cancel, Decline or a submit.
+   */
+  // …AND APPLIED MATERIALS' "Data Privacy Agreement" (Eightfold, 2026-09-27):
+  // "Please confirm that you agree to the Applied Materials Data Privacy
+  // Policy", Cancel / Confirm, raised when the file is chosen — every AMAT fill
+  // said "the page never showed the file". A bare Confirm / OK / Continue only
+  // inside a MODAL DIALOG about privacy, consent or a notice that says nothing
+  // of submitting, withdrawing or deleting (F-623).
+  function agreeToUploadNotice() {
+    try {
+      const shown = (n) => { const r = n.getBoundingClientRect?.(); return !!r && r.width > 0 && r.height > 0 && getComputedStyle(n).visibility !== 'hidden'; };
+      const btn = [...document.querySelectorAll('button, [role="button"]')].find((b) => {
+        const said = String(b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+        const agree = /^(i\s+)?(agree|accept|acknowledge|consent)(\s+and\s+continue)?\.?$|^i\s+understand\.?$/i.test(said);
+        const confirm = !agree && /^(confirm|ok|okay|continue)\.?$/i.test(said);
+        if (!agree && !confirm) return false;
+        // A submit button INSIDE A FORM is never pressed (Eightfold marks every
+        // dialog button type="submit", in a dialog outside the form, where it
+        // submits nothing); clickNoSubmit also blocks any submission.
+        if (!shown(b) || (/submit/i.test(b.getAttribute('type') || '') && b.closest('form'))) return false;
+        if (confirm) {
+          const dialog = b.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+          const text = String(dialog?.innerText || '').slice(0, 4000);
+          return !!dialog && /\b(privacy|consent|agree(ment)?|notice)\b/i.test(text) && !/\b(submit|submission|withdraw|delete|remove|discard)\b/i.test(text);
+        }
+        let box = b; for (let k = 0; k < 8 && box.parentElement; k += 1) box = box.parentElement;
+        return /\b(artificial intelligence|AI|recruiting software|privacy|notice|consent|terms)\b/i.test(String(box.innerText || '').slice(0, 4000));
+      });
+      if (!btn) return false;
+      console.log(`[jarvis] a notice held the file — pressed "${String(btn.innerText || '').trim()}"`);
+      clickNoSubmit(btn);
+      return true;
+    } catch { return false; }
   }
 
   /** His name, then a .pdf on the same line — the shape every ATS chip prints. */
@@ -567,8 +841,19 @@
    */
   function fileShowing(name) {
     try {
-      const text = document.body?.innerText || '';
+      // THROUGH SHADOW ROOTS TOO. SmartRecruiters prints the file name inside
+      // its <spl-dropzone>'s shadow root, which document.body.innerText never
+      // reads — so a resume that landed was reported "the page did not keep
+      // the file", and was dropped on the zone a second time (Western
+      // Digital, measured 2026-09-24).
+      const shadows = deepQuerySelectorAll ? deepQuerySelectorAll('*').filter((e) => e.shadowRoot).map((e) => e.shadowRoot.textContent || '').join('\n') : '';
+      const text = `${document.body?.innerText || ''}\n${shadows}`;
       if (RESUME_NAME_RE.test(text)) return true;
+      // PHENOM KEEPS IT IN HIDDEN BOXES (Honda, 2026-10-03): the apply form
+      // carries `#resumeName` / `#resumePath`, empty until its server has the
+      // file; the uploader prints nothing a reader would see in time.
+      const held = ['resumeName', 'resumePath', 'resumeRelativePath'].map((id) => document.getElementById(id)?.value || '').join(' ');
+      if (held.trim() && /\.(pdf|docx?|txt|html?)\b|\//i.test(held)) return true;
       const base = String(name || '').replace(/\.pdf$/i, '').trim();
       return base.length > 8 && text.includes(base.slice(0, Math.min(base.length, 24)));
     } catch { return false; }
@@ -674,7 +959,7 @@
     chip('Jarvis is filling…');
     if (!got?.ok) throw new Error(got?.error || 'no cover letter from the server');
     const bytes = new Uint8Array(got.bytes);
-    const file = new File([bytes], String(got.filename || '').trim() || 'Alex Rivera Cover Letter.pdf', { type: 'application/pdf' });
+    const file = new File([bytes], String(got.filename || '').trim() || `${PERSON_NAME} Cover Letter.pdf`, { type: 'application/pdf' });
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
@@ -714,6 +999,25 @@
    * The listener is capture-phase and removed on the next tick, so nothing
    * about the page's behaviour outlives the click.
    */
+  /**
+   * Enter, with the codes a real keyboard carries (Workday reads keyCode).
+   * A script's Enter never submits a form — only a trusted one does — and the
+   * submit guard stands anyway.
+   */
+  function pressEnter(el) {
+    const init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    const form = el.closest?.('form');
+    const stop = (e) => { e.preventDefault(); e.stopImmediatePropagation(); };
+    form?.addEventListener('submit', stop, true);
+    try {
+      el.dispatchEvent(new KeyboardEvent('keydown', init));
+      el.dispatchEvent(new KeyboardEvent('keypress', init));
+      el.dispatchEvent(new KeyboardEvent('keyup', init));
+    } finally {
+      if (form) setTimeout(() => form.removeEventListener('submit', stop, true), 0);
+    }
+  }
+
   function clickNoSubmit(el) {
     const form = el.closest?.('form');
     if (!form) { el.click(); return; }
@@ -739,7 +1043,17 @@
    * and filters correctly on a typed prefix — both mechanisms this code relies
    * on work — and the field still came out empty.
    */
-  const optionSelector = '[role="option"], [data-automation-id="promptOption"], li[role="option"], [data-automation-id="promptLeafNode"]';
+  // spl-select-option: SmartRecruiters' option component, which is what listens
+  // for the click — its inner role=option row does not (2026-09-24).
+  // .dropdown-results .dropdown-location: Lever's "Current location" rows —
+  // plain divs, no role, so the box looked like it found nothing and the
+  // location was "not kept" (Phoenix Tailings, 2026-09-25).
+  // .cx-select__list-item: ORACLE RECRUITING CLOUD's rows are role="gridcell"
+  // in a role="grid" (F-695): every Oracle dropdown — address, ZIP, city,
+  // state, gender, veteran, start/end month — read "0 rows" on Denso, Cummins
+  // and "Global Careers", with the list open on screen. Only Oracle's own
+  // class, so a calendar's day grid is never taken for a list.
+  const optionSelector = '[role="option"], [data-automation-id="promptOption"], li[role="option"], [data-automation-id="promptLeafNode"], spl-select-option, .dropdown-results .dropdown-location, [role="gridcell"].cx-select__list-item';
   // THROUGH SHADOW ROOTS, BOTH THE LIST AND ITS ROWS' TEXT (F-331).
   //
   // SmartRecruiters' City is an autocomplete whose input, listbox and rows
@@ -752,15 +1066,38 @@
   const rowText = (n) => {
     let h = n;
     for (let i = 0; h && i < 4 && !(h.textContent || '').trim(); i += 1) h = h.getRootNode?.()?.host || null;
-    return ((h || n).textContent || '').replace(/\s+/g, ' ').trim();
+    const raw = ((h || n).textContent || '').replace(/\s+/g, ' ').trim();
+    // A ROW BUILT FROM STACKED BLOCKS READS AS ONE WORD in textContent (F-632):
+    // Ashby's school results are name / country / domain in three divs, and
+    // "Lakeside UniversityUnited Stateslakeside.edu" matched nothing. innerText
+    // keeps the line breaks — taken only when spacing is all it changes, so a
+    // text-transform or a visually hidden span never alters what is matched.
+    const shown = String((h || n).innerText || '').replace(/\s+/g, ' ').trim();
+    return shown && shown !== raw && shown.replace(/\s/g, '') === raw.replace(/\s/g, '') ? shown : raw;
   };
   const openRows = (el) => {
-    const owned = el?.getAttribute?.('aria-controls') ? byId(el.getAttribute('aria-controls')) : null;
+    const mine = el?.getAttribute?.('aria-controls') || '';
+    const owned = mine ? byId(mine) : null;
     const scope = owned && all(optionSelector, owned).length ? owned : document;
+    // ANOTHER FIELD'S LIST IS NOT THIS ONE'S (John Deere's Eightfold, F-697):
+    // State's own list (aria-controls="list-32") had not opened yet, the
+    // document-wide look found the Veteran list still open, offered "I am not
+    // a Veteran" as State's and Race's options, and — rows being present —
+    // never tried to open State's at all. A row inside a list some OTHER
+    // control names as its own is skipped.
+    // (Asked with no field — "is any list open at all?" — every list counts.)
+    const others = el && scope === document
+      ? new Set(all('[aria-controls]', document).map((c) => c.getAttribute('aria-controls')).filter((id) => id && id !== mine))
+      : null;
+    const foreign = (n) => {
+      if (!others || !others.size) return false;
+      for (let p = n; p && p !== document.body; p = p.parentElement || p.getRootNode?.()?.host) if (p.id && others.has(p.id)) return true;
+      return false;
+    };
     return all(optionSelector, scope)
       // `getClientRects`, not `offsetParent`: a popover is `position: fixed`
       // and every row inside one has offsetParent null (F-336).
-      .filter((n) => n.getClientRects().length > 0 && !NO_RESULTS_RE.test(rowText(n)));
+      .filter((n) => n.getClientRects().length > 0 && !NO_RESULTS_RE.test(rowText(n)) && !foreign(n));
   };
 
   /**
@@ -774,6 +1111,7 @@
    */
   function rowRank(n) {
     const a = n.getAttribute?.('data-automation-id') || '';
+    if (/^SPL-.*OPTION$/.test(n.tagName || '')) return -1;
     return a === 'promptLeafNode' ? 0 : a === 'promptOption' ? 1 : 2;
   }
 
@@ -841,6 +1179,63 @@
    * react-virtualized throws away the nodes you scrolled past, so the node
    * `revealTexts` saw is usually gone by the time a choice is made.
    */
+  /**
+   * A TEXT BOX THAT SUGGESTS AS YOU TYPE: choose the row, or close the list.
+   *
+   * Only rows that appeared BECAUSE of this typing count — a list already on
+   * screen belongs to something else. A location box that finds nothing for
+   * "Springfield, Washington" (Lever: "No location found") is asked again with the
+   * city alone, and its first row naming the city is taken; if that finds
+   * nothing either, the full answer goes back in and the list is shut.
+   */
+  async function pickSuggestion(el, want, rowsBefore, label) {
+    try {
+      if (!el || el.tagName !== 'INPUT' || !want) return false;
+      const locationish = /location|\bcity\b|where\b.{0,30}\b(live|located|based)/i.test(label || '');
+      // Only a box that can suggest is waited on — a pause after every text
+      // box cost seconds on a long form. Anything else gets one look now.
+      const suggests = locationish || el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete')
+        || el.hasAttribute('aria-controls') || el.hasAttribute('aria-owns') || el.hasAttribute('list');
+      if (suggests) await pause(450);
+      let rows = openRows(el);
+      if (rows.length <= rowsBefore && locationish && want.includes(',')) {
+        const city = want.split(',')[0].trim();
+        // Staying in the box: its list closes on blur (Lever, 2026-09-25).
+        if (enterText) await enterText(el, city, { stay: true }); else setNativeValue(el, city);
+        // Until the rows arrive, not a fixed beat: Lever's lookup answered in
+        // under a second on Phoenix Tailings and in more on Machina Labs, and
+        // the fixed 900 ms read that as "nothing found" (2026-09-25).
+        for (let waited = 0; waited < 3000; waited += 150) {
+          // eslint-disable-next-line no-await-in-loop
+          await pause(150);
+          if (openRows(el).length > rowsBefore) break;
+        }
+        rows = openRows(el);
+        if (rows.length <= rowsBefore) {
+          if (enterText) await enterText(el, want); else setNativeValue(el, want);
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return false;
+        }
+      }
+      if (rows.length <= rowsBefore) return false;
+      const texts = rows.map(rowText);
+      const asked = await send({ type: 'choose', want, options: texts }).catch(() => null);
+      let i = asked?.ok ? asked.index : -1;
+      if ((i == null || i < 0) && locationish) {
+        const city = norm(want.split(',')[0]);
+        i = texts.findIndex((t) => norm(t).startsWith(city));
+      }
+      if (Number.isInteger(i) && i >= 0 && i < texts.length) {
+        const ok = await clickRowByText(el, texts[i]);
+        await pause(300);
+        console.log(`[jarvis] "${String(label).slice(0, 40)}": chose the suggestion "${texts[i].slice(0, 50)}"`);
+        return ok && String(el.value || '').trim() !== '';
+      }
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return false;
+    } catch { return false; }
+  }
+
   async function clickRowByText(owner, text) {
     const all = () => openRows(owner).filter((n) => norm(rowText(n)) === norm(text))
       .sort((a, b) => rowRank(a) - rowRank(b));
@@ -922,6 +1317,10 @@
         const E = /^pointer/.test(type) && window.PointerEvent ? PointerEvent : MouseEvent;
         hit.dispatchEvent(new E(type, /^pointer/.test(type) ? { ...opts, pointerId: 1, isPrimary: true, pointerType: 'mouse' } : opts));
       }
+      // A WEB-COMPONENT OPTION TAKES A PLAIN click(). SmartRecruiters'
+      // <spl-select-option> ignores the pointer sequence Workday needs and
+      // selects on click() (GPA menu, Western Digital, measured 2026-09-24).
+      if (/-OPTION$/.test(hit.tagName || '')) hit.click();
     } finally {
       if (form) setTimeout(() => form.removeEventListener('submit', stop, true), 0);
     }
@@ -949,13 +1348,19 @@
    * The local match still runs first (it is free and usually right) and is the
    * fallback if the server cannot be reached, so this can only add matches.
    */
-  async function waitForOption(want, owner = null, capMs = 2500) {
+  // `alsoOk`: the other spellings of the same answer, asked of the SAME open
+  // list in preference order. `settle`: a list that has stopped changing is
+  // the whole list — a static menu opened from a button, never a remote search
+  // still filtering (F-618).
+  async function waitForOption(want, owner = null, capMs = 2500, { alsoOk = [], settle = false } = {}) {
     const deadline = Date.now() + capMs;
     let seen = [];
     // "No Items." held steady is the search's answer, not a list still
     // loading: a miss ends in under a second instead of costing the whole cap,
     // which is what lets a skills box try more of his list (F-552).
     let emptyFor = 0;
+    let steady = 0;
+    let lastShape = '';
     while (Date.now() < deadline) {
       await pause(120);
       const rows = openRows(owner);
@@ -966,21 +1371,34 @@
       }
       emptyFor = 0;
       if (rows.length) seen = rows;
+      // WHOLE WORDS ONLY (F-618). "No" was found inside "just NOT a protected
+      // veteran" and HP's form said he is a veteran. Anything short of the
+      // answer's own words at the row's start goes to the matcher, which
+      // knows what "No" means for a veteran question.
+      const words = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const w = words(want);
       const hit = rows.find((n) => norm(rowText(n)) === norm(want))
-        || rows.find((n) => norm(rowText(n)).startsWith(norm(want)))
-        || rows.find((n) => norm(rowText(n)).includes(norm(want)));
+        || rows.find((n) => words(rowText(n)).startsWith(`${w} `))
+        || (w.split(' ').length >= 2 ? rows.find((n) => ` ${words(rowText(n))} `.includes(` ${w} `)) : null);
       if (hit) return hit;
+      // A MENU THAT HAS FINISHED DRAWING will not grow the answer by waiting.
+      // Every miss used to cost the whole 2.5 s cap before the matcher was
+      // even asked (F-618: Hyve's "How Did You Hear About Us?", 25 s).
+      const shape = rows.map(rowText).join('|');
+      if (settle && rows.length && shape === lastShape) { steady += 1; if (steady >= 3) break; } else steady = 0;
+      lastShape = shape;
     }
 
     if (!seen.length) return null;
-    LAST_PROMPT_ROWS = seen.map(rowText).slice(0, 12);
-    const asked = await send({
-      type: 'choose',
-      want: String(want),
-      options: seen.map(rowText),
-    }).catch(() => null);
-    const i = asked?.ok ? asked.index : -1;
-    return Number.isInteger(i) && i >= 0 && i < seen.length ? seen[i] : null;
+    const texts = seen.map(rowText);
+    LAST_PROMPT_ROWS = texts.slice(0, 12);
+    for (const w of [want, ...alsoOk]) {
+      // eslint-disable-next-line no-await-in-loop
+      const asked = await send({ type: 'choose', want: String(w), options: texts }).catch(() => null);
+      const i = asked?.ok ? asked.index : -1;
+      if (Number.isInteger(i) && i >= 0 && i < seen.length) return seen[i];
+    }
+    return null;
   }
 
   /**
@@ -999,11 +1417,17 @@
   // A SKILLS box is worth more than any other optional list (F-552): it is
   // what an ATS keyword-matches on, and a taxonomy that lacks the first two
   // spellings usually has the next ones. Longer budget, more misses allowed.
-  const SKILLS_BUDGET_MS = 25000;
-  const SKILLS_MISSES = 5;
+  // He wants 10-15 skills in the box, not one (2026-09-24): the box is given
+  // his whole list ranked for the posting and stops at fifteen.
+  const SKILLS_BUDGET_MS = 60000;
+  const SKILLS_MISSES = 8;
+  const SKILLS_ENOUGH = 15;
   // The rows the last prompt showed, so a miss can say what WAS on offer
   // instead of only what was wanted (F-551: Intel's fluency lists).
   let LAST_PROMPT_ROWS = [];
+  // Did the last prompt find its row and click it? A pick that did not hold
+  // is a page problem, not a matching one (F-716).
+  let LAST_PROMPT_PICKED = false;
 
   /**
    * Drive a Workday prompt by doing what a person does.
@@ -1019,7 +1443,11 @@
    * Both lists render into a portal at the end of <body> rather than inside the
    * field, so the rows have to be looked for globally.
    */
-  async function pickFromPrompt(el, want, kind) {
+  // `alsoOk`: the rule's OTHER acceptable answers. Inside a submenu the one
+  // being tried may not exist while another does — Applied Materials files
+  // LinkedIn under a category, and the career site that led there has no leaf
+  // of its own (F-390, re-met 2026-09-24 when the career site moved first).
+  async function pickFromPrompt(el, want, kind, alsoOk = [], { remote = false } = {}) {
     // WHAT WAS ALREADY THERE. The failure paths below clear the search box so a
     // half-typed term is not left on a real application — but if the field was
     // ALREADY answered, clearing it destroys a correct value.
@@ -1042,6 +1470,19 @@
     const button = el.tagName === 'BUTTON' ? el
       : wrap?.querySelector('button[aria-haspopup], button');
 
+    // ANOTHER FIELD'S LIST STILL OPEN IS CLOSED FIRST (F-581). Workday draws
+    // every prompt's list into one portal at the end of the page, so a list
+    // left open is read as this field's options: Wolfspeed's "How Did You Hear
+    // About Us?" was offered "United States of America (+1)" — the phone-code
+    // list — beside its own categories, and LinkedIn never landed. Simplify
+    // clicks the page's main area before this field for the same reason.
+    if (kind !== 'combo' && !remote && openRows(null).length) {
+      document.activeElement?.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+      const main = document.querySelector('#mainContent, [data-automation-id="mainContent"], main') || document.body;
+      for (const t of ['mousedown', 'mouseup', 'click']) main.dispatchEvent(new MouseEvent(t, { bubbles: true }));
+      await pause(200);
+    }
+
     if (kind === 'combo' || kind === 'multi' || !button) {
       // An ARIA combobox IS its own search box. Hunting the wrapper for one
       // would find a neighbouring field's input on forms that stack them.
@@ -1053,7 +1494,10 @@
       // react-select does; `click()` alone left it shut on some tenants.
       for (const t of ['mousedown', 'mouseup', 'click']) box.dispatchEvent(new MouseEvent(t, { bubbles: true }));
       box.click();
-      await pause(350);
+      // A REMOTE search (a skills taxonomy) has nothing to show until a term
+      // is searched, so it is not waited on or read first (F-581: skills cost
+      // ~2.5 s each; Simplify does one in under a second).
+      await pause(remote ? 120 : 350);
 
       // OPEN THE LIST BEFORE TYPING, and let the server read it.
       //
@@ -1085,13 +1529,25 @@
         // rows appear.
         document.activeElement?.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await pause(120);
+        // A LIST THAT IS ALREADY OPENING IS WAITED FOR, NOT CLICKED AGAIN
+        // (2026-10-16). Micron's Eightfold dropdowns open late — measured in
+        // his Opera, the list appeared ~0.5 s after the press, after the first
+        // look — and a second press on a box already saying aria-expanded
+        // "true" shuts it. Three presses in a row left the five screening
+        // questions (U.S. worker, sponsorship, export, veteran, terms) with
+        // "0 rows" while the same form filled in Playwright. Rows are watched
+        // for after each press instead of read once.
         for (let go = 0; go < 3 && !openRows(box).length; go += 1) {
-          box.focus();
-          for (const t of ['mousedown', 'mouseup', 'click']) {
-            box.dispatchEvent(new MouseEvent(t, { bubbles: true }));
+          if (box.getAttribute('aria-expanded') !== 'true') {
+            box.focus();
+            for (const t of ['mousedown', 'mouseup', 'click']) {
+              box.dispatchEvent(new MouseEvent(t, { bubbles: true }));
+            }
           }
-          // eslint-disable-next-line no-await-in-loop
-          await pause(go === 0 ? 400 : 700);
+          for (let waited = 0; waited < (go === 0 ? 900 : 1200) && !openRows(box).length; waited += 100) {
+            // eslint-disable-next-line no-await-in-loop
+            await pause(100);
+          }
         }
 
         // Two goes: the list as it opens, then the list filtered by a PREFIX.
@@ -1106,15 +1562,45 @@
         // nothing. A prefix filters the list down to a handful and still
         // contains the right row, and then the server matches it properly —
         // which is the same division of labour as everywhere else here.
-        const prefix = String(want).trim().split(/\s+/)[0].slice(0, 12);
+        // A number is opened by its first digit: typing all of "3.85" is the
+        // whole answer (so the filtered pass was skipped), and a SmartRecruiters
+        // list stays shut until something is typed (GPA, 2026-09-24).
+        // A STREET ADDRESS is looked up by its number and street, not its first
+        // digit: "9" offered Optomec's form "9 N Browne St…" (F-691).
+        const streetish = /^\s*\d+[a-z]?\s+\S+\s+\S/i.test(String(want)) && /[a-z]{3}/i.test(String(want));
+        // A ZIP is a LOOKUP: "9" is thousands of codes, "992" a handful with
+        // 12345 among them (Oracle's ZIP Code, Denso F-695). A short number —
+        // a GPA's "3" — keeps its first digit.
+        const prefix = streetish ? String(want).trim().split(/\s+/).slice(0, 3).join(' ')
+          : /^\s*\d{4,}\s*$/.test(String(want)) ? String(want).trim().slice(0, 3)
+          : /^\s*\d/.test(String(want)) ? String(want).trim()[0] : String(want).trim().split(/\s+/)[0].slice(0, 12);
         for (const attempt of ['open', 'filtered']) {
           if (attempt === 'filtered') {
-            if (prefix.length < 3 || norm(prefix) === norm(want)) break;
-            setNativeValue(box, prefix);
-            for (const t of ['keydown', 'keypress', 'keyup']) {
-              box.dispatchEvent(new KeyboardEvent(t, { key: 'a', bubbles: true }));
+            // A <div> combobox has nothing to type into; its open list is all there is.
+            if ((prefix.length < 3 && !/^\d$/.test(prefix)) || norm(prefix) === norm(want) || !/^(INPUT|TEXTAREA)$/.test(box.tagName)) break;
+            // TYPED, as a person types: SmartRecruiters opens its list on real
+            // text insertion and not on a value set from outside plus
+            // synthetic keys (measured 2026-09-24). The old path stays the
+            // fallback for a page that refuses execCommand.
+            box.focus();
+            let typedIn = false;
+            try { box.select?.(); typedIn = document.execCommand('insertText', false, prefix); } catch { typedIn = false; }
+            if (!typedIn || !String(box.value || '').includes(prefix)) {
+              setNativeValue(box, prefix);
+              for (const t of ['keydown', 'keypress', 'keyup']) {
+                box.dispatchEvent(new KeyboardEvent(t, { key: 'a', bubbles: true }));
+              }
             }
             await pause(600);
+            // A LIST THAT ASKS A SERVER IS WATCHED UNTIL IT ANSWERS (F-632).
+            // Ashby's "Search schools..." waits 300 ms after the last key and
+            // then queries; measured on Applied Intuition's live form, the
+            // rows landed 1.0 s after typing — after the one look at 0.6 s, so
+            // School came back "nothing matched" with no list offered.
+            for (let waited = 600; waited < 2500 && !openRows(box).length; waited += 150) {
+              // eslint-disable-next-line no-await-in-loop
+              await pause(150);
+            }
           }
           const rows = openRows(box);
           if (!rows.length) continue;
@@ -1124,10 +1610,57 @@
             want: String(want),
             options: rows.map(rowText),
           }).catch(() => null);
-          const i = asked?.ok ? asked.index : -1;
-          if (Number.isInteger(i) && i >= 0 && i < rows.length) {
-            await clickRowByText(box, rowText(rows[i]));
-            if (await committed(el, alreadyHad)) return true;
+          let i = asked?.ok ? asked.index : -1;
+          let texts = rows.map(rowText);
+          // A LIST LONGER THAN ITS WINDOW: Western Digital's GPA menu paints four
+          // rows and "3.5 and above" is the fifth (2026-09-24). Read them all
+          // before deciding nothing fits.
+          if (!(Number.isInteger(i) && i >= 0) && attempt === 'open') {
+            const every = await revealTexts(box, 400);
+            if (every.length > texts.length) {
+              LAST_PROMPT_ROWS = every.slice(0, 12);
+              const again = await send({ type: 'choose', want: String(want), options: every }).catch(() => null);
+              if (again?.ok && Number.isInteger(again.index) && again.index >= 0) { i = again.index; texts = every; }
+            }
+          }
+          if (Number.isInteger(i) && i >= 0 && i < texts.length) {
+            // ALREADY CHOSEN IS ANSWERED. Clicking a chosen row of a
+            // multi-select un-chooses it (SmartRecruiters' major, 2026-09-24).
+            const now = comboValue ? comboValue(el) : '';
+            // The whole option for a single choice: "No" is not already chosen
+            // because the box reads "No Selection" (TSMC, 2026-09-24). A
+            // multi-select's chips are a list, so there a part is enough.
+            const multiBox = kind === 'multi';
+            if (now && (multiBox ? norm(now).includes(norm(texts[i])) : norm(now) === norm(texts[i]))) return true;
+            const clicked = await clickRowByText(box, texts[i]);
+            if (clicked) LAST_PROMPT_PICKED = true;
+            const took = await committed(el, alreadyHad);
+            console.log(`[jarvis] combo "${String(want).slice(0, 30)}" (${attempt}, ${texts.length} rows): chose "${texts[i].slice(0, 40)}" — ${clicked ? 'clicked' : 'row not found'}, ${took ? 'committed' : `not committed (reads "${String(comboValue ? comboValue(el) : '').slice(0, 40)}")`}`);
+            if (took) return true;
+            // THE ROW WAS THERE WHEN READ AND GONE WHEN CLICKED (F-621):
+            // Micron's Eightfold menus re-render as they open, and the first
+            // menu of the form lost its row every first press — then stayed
+            // open, and the next question read "English | Spanish" as its
+            // own list. Shut it, open it again, and click the same row once.
+            if (!clicked) {
+              document.activeElement?.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+              await pause(300);
+              for (let go = 0; go < 3 && !openRows(box).some((n) => norm(rowText(n)) === norm(texts[i])); go += 1) {
+                box.focus();
+                for (const t of ['mousedown', 'mouseup', 'click']) box.dispatchEvent(new MouseEvent(t, { bubbles: true }));
+                // eslint-disable-next-line no-await-in-loop
+                await pause(go === 0 ? 450 : 700);
+              }
+              const again = await clickRowByText(box, texts[i]);
+              if (again) LAST_PROMPT_PICKED = true;
+              const tookAgain = again && await committed(el, alreadyHad);
+              console.log(`[jarvis] combo "${String(want).slice(0, 30)}": reopened — ${again ? 'clicked' : 'row not found'}, ${tookAgain ? 'committed' : 'not committed'}`);
+              if (tookAgain) return true;
+              // Never leave it open for the next question to read.
+              if (openRows(box).length) document.activeElement?.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            }
+          } else {
+            console.log(`[jarvis] combo "${String(want).slice(0, 30)}" (${attempt}, ${texts.length} rows): nothing fits — ${texts.slice(0, 6).join(' | ').slice(0, 160)}`);
           }
         }
       }
@@ -1154,7 +1687,7 @@
       // again at the level that opened. His profile answers this question at
       // both levels — "LinkedIn" and "Job Board or Social Media" — and the
       // matcher already knows one is a kind of the other.
-      if (kind !== 'combo') {
+      if (kind !== 'combo' && !(remote && !openRows(box).length)) {
         for (let level = 0; level < 3; level += 1) {
           // eslint-disable-next-line no-await-in-loop
           // A short look on the first pass: a list that is a MENU is already
@@ -1165,7 +1698,17 @@
           if (!texts.length) break;
           // eslint-disable-next-line no-await-in-loop
           const asked = await send({ type: 'choose', want: String(want), options: texts }).catch(() => null);
-          const i = asked?.ok ? asked.index : -1;
+          let i = asked?.ok ? asked.index : -1;
+          // Every level, in preference order, on the list already open —
+          // reopening it per alternative cost ~3.5 s each and ran out the
+          // field's budget after two (F-390 fixture, 2026-09-24).
+          if (!Number.isInteger(i) || i < 0) {
+            for (const alt of alsoOk) {
+              // eslint-disable-next-line no-await-in-loop
+              const again = await send({ type: 'choose', want: String(alt), options: texts }).catch(() => null);
+              if (again?.ok && Number.isInteger(again.index) && again.index >= 0) { i = again.index; break; }
+            }
+          }
           if (!Number.isInteger(i) || i < 0 || i >= texts.length) break;
           const before = texts.join('|');
           // eslint-disable-next-line no-await-in-loop
@@ -1194,12 +1737,35 @@
       // not "the answer" but one of them: his skills box holds a dozen, and
       // this guard once made every item after the first fail (F-390).
       if (alreadyHad && kind !== 'multi') { box.blur(); return false; }
-      setNativeValue(box, String(want).slice(0, 40));
+      // TYPED, then ENTER (F-581). Workday's "Type to Add Skills" searches when
+      // Enter is pressed, not as you type: a value set from outside plus a key
+      // event with no key code left the list shut, and every skill came back
+      // "nothing matched" on Viavi, ABB and Novanta after F-552 shipped. The
+      // same recipe Simplify runs on Workday: insert the text as typing does,
+      // and press Enter with the codes Workday reads — only when no list came
+      // up by itself, so a type-ahead list is never answered by Enter.
+      const term = String(want).slice(0, 40);
+      box.focus();
+      let typedTerm = false;
+      try { box.select?.(); typedTerm = document.execCommand('insertText', false, term); } catch { typedTerm = false; }
+      if (!typedTerm || norm(box.value) !== norm(term)) setNativeValue(box, term);
       // Workday's search box runs its lookup off KEYBOARD events, not `input` —
       // setting the value alone searched for the empty string and the list came
       // back "No Items." every time.
       for (const type of ['keydown', 'keypress', 'keyup']) {
         box.dispatchEvent(new KeyboardEvent(type, { key: 'a', bubbles: true }));
+      }
+      // Workday's own search box: Enter at once, as Simplify does — its list
+      // never comes up from typing alone.
+      const workdaySearch = !!box.closest?.('[data-automation-id="multiSelectContainer"], [data-automation-id="monIkerSearchBox"]');
+      if (kind === 'multi' && workdaySearch) pressEnter(box);
+      else if (kind === 'multi') {
+        let listed = false;
+        for (let t = 0; t < 5 && !listed; t += 1) {
+          await pause(120);
+          listed = openRows(box).some((r) => !/^no (items|results|matches|options)\b/i.test(norm(rowText(r))));
+        }
+        if (!listed) pressEnter(box);
       }
       const row = await waitForOption(want, box);
       if (!row) {
@@ -1224,14 +1790,50 @@
       return true;
     }
 
-    clickNoSubmit(button);
-    const row = await waitForOption(want, button);
-    if (!row) { clickNoSubmit(button); return false; }   // close it rather than leave it hanging open
-    // Through the same door as every other pick: every copy of the row, in
-    // preference order, until one of them answers (F-395).
-    await clickRowByText(button, rowText(row));
-    await pause(250);
-    return true;
+    // A MENU OPENED FROM A BUTTON (F-618). Workday's Degree, the language
+    // ladders and some tenants' "How Did You Hear About Us?" open this way.
+    // Two things were missing here that the search-box path above has had:
+    //
+    //  - the other spellings. Only `want` was looked for, so HP's "Bachelors
+    //    (±16 years of education)" never met "Bachelors" and the education
+    //    entry reported "could not set" on every HP and HPE fill; and each
+    //    alternative the caller tried reopened the menu and waited out its
+    //    cap — Hyve's source question took 25 s to reach its ninth spelling.
+    //  - the read-back. A click was returned as a commit. Samsung's Reading
+    //    and Caterpillar's Speaking went out EMPTY with nothing in the report
+    //    (2026-09-25), one ladder in four.
+    const shown = () => (comboValue ? comboValue(button) : '');
+    const sameChoice = (a, b) => { const x = norm(a); const y = norm(b); return !!x && !!y && (x === y || x.includes(y) || y.includes(x)); };
+    for (let go = 0; go < 2; go += 1) {
+      clickNoSubmit(button);
+      // eslint-disable-next-line no-await-in-loop
+      const row = await waitForOption(want, button, 2500, { alsoOk, settle: true });
+      if (!row) { clickNoSubmit(button); return false; }   // close it rather than leave it hanging open
+      const pick = rowText(row);
+      // ALREADY CHOSEN IS ANSWERED, as on the combobox path above. Clicking
+      // the chosen row of a Workday menu again can un-choose it — the pass
+      // over revealed fields re-planned a ladder holding "Excellent" and
+      // Samsung's Reading went out empty (F-618).
+      if (norm(shown()) === norm(pick)) {
+        if (openRows(button).length) clickNoSubmit(button);   // shut, the way it opened
+        return true;
+      }
+      // Through the same door as every other pick: every copy of the row, in
+      // preference order, until one of them answers (F-395).
+      // eslint-disable-next-line no-await-in-loop
+      await clickRowByText(button, pick);
+      if (!comboValue) { await pause(250); return true; }
+      for (let t = 0; t < 12; t += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await pause(120);
+        if (sameChoice(shown(), pick)) return true;
+      }
+      console.log(`[jarvis] prompt "${String(want).slice(0, 30)}": chose "${pick.slice(0, 40)}" but the field reads "${shown().slice(0, 40)}"${go ? '' : ' — once more'}`);
+      if (openRows(button).length) clickNoSubmit(button);
+      // eslint-disable-next-line no-await-in-loop
+      await pause(200);
+    }
+    return false;
   }
 
   // ── Workday My Experience: add and fill Work Experience / Education / Language entries ──
@@ -1339,9 +1941,18 @@
       if (days.length && !date.month) { input.blur(); return false; }
     }
     const mm = String(date.month || 1).padStart(2, '0');
-    for (const v of [`${mm}/${date.year}`, `${date.year}-${mm}`, `${mm}/01/${date.year}`]) {
-      setNativeValue(input, v);
+    // THE BOX'S OWN MASK FIRST, TYPED. Workable's entry dates are a
+    // react-datepicker reading "MM/YYYY" (Verustruct, 2026-09-24): a value
+    // set from outside held for the first job and was dropped for the next
+    // three; typed, it holds every time. The calendar it opens is closed after.
+    const ph = String(input.placeholder || '').trim().toUpperCase().replace(/\s+/g, '');
+    const masked = ph === 'MM/YYYY' ? [`${mm}/${date.year}`] : ph === 'YYYY-MM' ? [`${date.year}-${mm}`] : ph === 'MM/DD/YYYY' ? [`${mm}/01/${date.year}`] : [];
+    for (const v of [...masked, `${mm}/${date.year}`, `${date.year}-${mm}`, `${mm}/01/${date.year}`]) {
+      if (enterText) await enterText(input, v); else setNativeValue(input, v);
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }));
+      if (document.querySelector('.react-datepicker-popper, .react-datepicker__tab-loop')) {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true }));
+      }
       input.blur();
       await pause(200);
       if (String(input.value || '').includes(String(date.year))) return true;
@@ -1442,7 +2053,10 @@
           if (!year) continue;
           const f = take(labels[key], (el) => isDateBox(el) || el.type === 'number');
           if (!f) continue;
-          if (f.el.type === 'number' || !/date|pick/i.test(f.el.placeholder || '')) {
+          // A MASKED "MM/YYYY" box is a month-year date, not a year box: the
+          // bare year typed into Workable's became "20/27" and the proper date
+          // could not land after it (Slip Robotics, 2026-09-25).
+          if (f.el.type === 'number' || !/date|pick|mm|yyyy/i.test(f.el.placeholder || '')) {
             setNativeValue(f.el, String(year));
             if (kept(f.el.value, String(year))) { landed(`entry:education:${i}:${key}`); continue; }
           }
@@ -1453,6 +2067,25 @@
             chip(`${tag}: ${key === 'firstYear' ? 'from' : 'to'} date`);
             if (await setGenericDate(f.el, { year, month })) { landed(`entry:education:${i}:${key}`); continue; }
           }
+          // A FUTURE END DATE THE BOX REFUSES IS A DEGREE STILL UNDER WAY.
+          // Workable's education "To" clears anything after this month —
+          // "05/2025" holds, "05/2027" is wiped — and has no "currently
+          // studying" box, so blank is how it records a degree in progress
+          // (Slip Robotics, 2026-09-25). Not a gap in the application.
+          const now = new Date();
+          const future = key === 'lastYear' && month
+            && (Number(year) > now.getFullYear() || (Number(year) === now.getFullYear() && Number(month) > now.getMonth() + 1));
+          if (future) {
+            // Whatever the refused attempt left in the box goes too: a
+            // half-typed "05/2" is worse than the blank the form wants.
+            if (String(f.el.value || '').trim()) {
+              setNativeValue(f.el, '');
+              f.el.dispatchEvent(new Event('input', { bubbles: true }));
+              f.el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            console.log(`[jarvis] ${tag}: this form takes no future end date — left blank, which it reads as still studying`);
+            continue;
+          }
           // A month-year picker asked for a month he never stated: his pick.
           unanswered.push(`${tag} — ${key === 'firstYear' ? 'From' : 'To'}: pick the month in ${year}`);
         }
@@ -1460,8 +2093,15 @@
       // SAVE THE ENTRY. The sub-form's own Save is not the application's
       // Submit; it closes the panel and lists the entry. Never a control that
       // would submit the form.
+      // Workable's is "Update" (data-ui="save-section", Verustruct 2026-09-24):
+      // left unpressed, the entry stayed open and Workable blocked every other
+      // Add on the page, so the second job never went in.
       const save = buttonsNow().filter((b) => !buttonsBefore.has(b) && !wouldSubmit(b))
-        .find((b) => { const n = buttonName(b); return /\b(save|done|add)\b/i.test(n) && !/cancel|another|file|upload/i.test(n); });
+        .find((b) => {
+          const n = buttonName(b);
+          const id = `${b.getAttribute('data-ui') || ''} ${b.getAttribute('data-automation-id') || ''} ${b.getAttribute('data-testid') || ''}`;
+          return (/\b(save|done|add|update|confirm|ok)\b/i.test(n) || /save/i.test(id)) && !/cancel|another|file|upload|submit|apply/i.test(n);
+        });
       if (save) {
         const stillOpen = () => fresh.some((el) => el.isConnected && el.getClientRects().length > 0);
         const refusal = () => deepQuerySelectorAll('[role="alert"]').map((a) => (a.textContent || '').replace(/\s+/g, ' ').trim()).filter((t) => t && t.length < 100)[0] || '';
@@ -1534,24 +2174,138 @@
       .find((b) => SECTION_HEAD_RE[kind].test(heading(b))) || null;
   }
 
-  /** Type into a Workday date spinner (MM / YYYY) with the events a script can send, and read it back. */
-  function setSpinner(input, val) {
+  /**
+   * Type into a Workday date spinner (MM / DD / YYYY) and read it back AFTER
+   * leaving it — Workday redraws the box from its own model on blur, so a
+   * value only it never took is gone by then.
+   *
+   * F-581 (2026-09-24): the old path set the value from outside and sent key
+   * events with no key code. The box showed the digits, Workday's model never
+   * had them, and the form said "required" on Viavi, ABB, TD Synnex and
+   * Wolfspeed while the date sat there on screen. Two ways in now, each read
+   * back: the text inserted as typing inserts it (Simplify's Workday recipe:
+   * focus, click, select, insertText), then key by key with the codes Workday
+   * reads (key, code, keyCode, which).
+   */
+  async function setSpinner(input, val) {
     const s = String(val);
+    const want = s.replace(/\D/g, '');
+    const holds = () => {
+      const got = String(input.value || '').replace(/\D/g, '');
+      return !!got && (got === want || (want.length <= 2 && Number(got) === Number(want)));
+    };
+    const leave = async () => {
+      input.blur();
+      input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await pause(180);
+    };
+    // 1. As typing inserts it.
+    input.focus();
+    try { input.click(); } catch { /* not clickable */ }
+    try { input.select(); } catch { /* not selectable */ }
+    let inserted = false;
+    try { inserted = document.execCommand('insertText', false, s); } catch { inserted = false; }
+    if (inserted) {
+      await pause(120);
+      await leave();
+      if (holds()) return true;
+    }
+    // 2. Key by key, with the codes a real keyboard carries.
     input.focus();
     try { input.select(); } catch { /* not selectable */ }
     let acc = '';
     for (const ch of s) {
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keypress', { key: ch, bubbles: true }));
+      const code = ch.charCodeAt(0);
+      const init = { key: ch, code: /\d/.test(ch) ? `Digit${ch}` : '', keyCode: code, which: code, charCode: code, bubbles: true, cancelable: true };
+      const before = String(input.value || '');
+      input.dispatchEvent(new KeyboardEvent('keydown', init));
+      input.dispatchEvent(new KeyboardEvent('keypress', init));
       acc += ch;
-      setNativeValue(input, acc);
-      input.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
+      // The page may have taken the key itself; only write what it did not.
+      if (String(input.value || '') === before) setNativeValue(input, acc);
+      input.dispatchEvent(new KeyboardEvent('keyup', init));
     }
-    input.blur();
-    return String(input.value || '').replace(/\D/g, '') === s.replace(/\D/g, '');
+    await pause(120);
+    await leave();
+    return holds();
   }
 
-  function setEntryDate(container, date) {
+  /**
+   * TODAY, FROM THE CALENDAR (F-581). A signature date on Workday's
+   * self-identify pages is today's date, and its calendar has a Today button:
+   * two clicks, no typing, nothing for Workday's model to miss. Simplify
+   * answers these fields the same way.
+   */
+  async function pickToday(wrap) {
+    const icon = wrap?.querySelector('[data-automation-id="dateIcon"], [data-automation-id="dateTimeWidgetIcon"]');
+    if (!icon) return false;
+    clickNoSubmit(icon);
+    let today = null;
+    for (let t = 0; t < 10 && !today; t += 1) {
+      await pause(150);
+      today = document.querySelector('[data-automation-id="datePicker"] [data-automation-id="datePickerToday"], [data-automation-id="datePicker"] [data-automation-id="datePickerSelectedToday"]');
+    }
+    if (!today) { document.activeElement?.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); return false; }
+    clickNoSubmit(today);
+    await pause(300);
+    // WORKDAY'S TODAY IS THE ANSWER, NOT OURS (F-690). After 5 PM in Springfield
+    // it is already tomorrow in UTC: Flowserve's Today set 10/4, this check
+    // wanted his 10/3, called the pick a failure, and the typing that followed
+    // put 10/03 back — "The field Date is required", then "Enter today's
+    // date". A full date within a day of his clock is the calendar's today.
+    const boxes = [...wrap.querySelectorAll('input[data-automation-id^="dateSection"]')];
+    const got = {};
+    for (const b of boxes) {
+      const part = /Month/.test(b.getAttribute('data-automation-id')) ? 'month' : /Day/.test(b.getAttribute('data-automation-id')) ? 'day' : 'year';
+      got[part] = Number(String(b.value || '').replace(/\D/g, ''));
+    }
+    if (!boxes.length || !got.month || !got.day || !got.year) return false;
+    const picked = new Date(got.year, got.month - 1, got.day);
+    const d = new Date();
+    const mine = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    return Math.abs(picked - mine) <= 36 * 3600 * 1000;
+  }
+  const todayTried = new WeakMap();
+
+  /**
+   * THE OTHER TODAY, AFTER WORKDAY REFUSED ONE (F-732). Workday's "today" is
+   * the tenant's, and no single clock matches every tenant: after 5 PM Pacific
+   * Crown, Generac and Samsung took his local date (2026-10-04), Flowserve and
+   * GlobalFoundries (2026-10-16, 23:01 Pacific) refused it — "The field Date is
+   * required", then "Enter today's date". So once Workday has said no, the
+   * signature date is retyped as whichever of his date and the UTC date the
+   * boxes do not hold. Returns false when there is no other date to try.
+   */
+  async function retrySignatureDate() {
+    if (!/(^|\.)myworkday(jobs|site)?\.com$/i.test(location.hostname)) return false;
+    const wrap = document.querySelector('[data-automation-id="formField-dateSignedOn"]');
+    const boxes = wrap ? [...wrap.querySelectorAll('input[data-automation-id^="dateSection"]')] : [];
+    if (!boxes.length) return false;
+    const partOf = (b) => (/Month/.test(b.getAttribute('data-automation-id')) ? 'month' : /Day/.test(b.getAttribute('data-automation-id')) ? 'day' : 'year');
+    const held = {};
+    for (const b of boxes) held[partOf(b)] = Number(String(b.value || '').replace(/\D/g, ''));
+    const now = new Date();
+    const local = { month: now.getMonth() + 1, day: now.getDate(), year: now.getFullYear() };
+    const utc = { month: now.getUTCMonth() + 1, day: now.getUTCDate(), year: now.getUTCFullYear() };
+    const holds = (d) => boxes.every((b) => held[partOf(b)] === d[partOf(b)]);
+    const want = holds(local) ? utc : local;
+    if (holds(want)) return false;
+    for (const b of boxes) {
+      const part = partOf(b);
+      await setSpinner(b, part === 'year' ? String(want.year) : String(want[part]).padStart(2, '0'));
+    }
+    console.log(`[jarvis] Workday refused the signature date; retyped it as ${want.month}/${want.day}/${want.year}`);
+    return true;
+  }
+
+  /** Is this date part today's? A signature date always is. */
+  function isTodayPart(part, value) {
+    const d = new Date();
+    const n = Number(String(value).replace(/\D/g, ''));
+    return part === 'month' ? n === d.getMonth() + 1 : part === 'day' ? n === d.getDate() : part === 'year' ? n === d.getFullYear() : false;
+  }
+
+  async function setEntryDate(container, date) {
     if (!container || !date) return false;
     let any = false; let all = true;
     for (const [id, val] of [['dateSectionMonth-input', date.month], ['dateSectionYear-input', date.year]]) {
@@ -1559,7 +2313,7 @@
       const input = container.querySelector(`[data-automation-id="${id}"]`);
       if (!input) continue;
       any = true;
-      if (!setSpinner(input, String(val).padStart(id.includes('Month') ? 2 : 4, '0'))) all = false;
+      if (!(await setSpinner(input, String(val).padStart(id.includes('Month') ? 2 : 4, '0')))) all = false;
     }
     return any && all;
   }
@@ -1567,17 +2321,19 @@
   const isPromptContainer = (c) => !!c.querySelector('[data-automation-id="promptIcon"], button[aria-haspopup="listbox"], [data-uxi-widget-type="selectinput"], [data-automation-id="multiSelectContainer"]')
     || /select one|select a value/i.test(c.querySelector('button')?.textContent || '');
 
-  async function setEntryField(spec, value) {
+  async function setEntryField(spec, value, alts = []) {
     const container = lastOf(spec.ids);
     if (!container) return 'absent';
     if (spec.year) {
       const y = container.querySelector('[data-automation-id="dateSectionYear-input"], input');
-      return y ? setSpinner(y, String(value)) : false;
+      return y ? await setSpinner(y, String(value)) : false;
     }
     if (isPromptContainer(container)) {
       const ctl = container.querySelector('input, button');
       const kind = container.querySelector('[data-automation-id="multiSelectContainer"]') ? 'multi' : 'single';
-      return ctl ? await pickFromPrompt(ctl, String(value), kind) : false;
+      // The menu's own spelling of the same answer is accepted too: HP's
+      // "Bachelors (±16 years of education)" for "Bachelor of Science".
+      return ctl ? await pickFromPrompt(ctl, String(value), kind, kind === 'single' ? alts.map(String) : []) : false;
     }
     const ctl = container.querySelector('textarea, input:not([type=checkbox]):not([type=radio]):not([type=hidden])');
     if (!ctl) return false;
@@ -1627,7 +2383,7 @@
         for (const spec of specs) {
           const value = e[spec.key];
           if (value == null || value === '') continue;
-          const ok = await setEntryField(spec, value);
+          const ok = await setEntryField(spec, value, Array.isArray(e[`${spec.key}Alts`]) ? e[`${spec.key}Alts`] : []);
           if (ok === 'absent') continue;
           if (ok) landed(`entry:${kind}:${i}:${spec.key}`); else unanswered.push(`${tag} — ${spec.key}: could not set "${String(value).slice(0, 40)}"`);
         }
@@ -1636,8 +2392,8 @@
             const ok = setCurrentlyWorkHere();
             if (ok === true) { checked += 1; keys.push(`entry:work:${i}:current`); } else if (ok === false) unanswered.push(`${tag} — I currently work here: tick it`);
           }
-          if (e.start) { if (setEntryDate(lastOf(['formField-startDate']), e.start)) landed(`entry:work:${i}:start`); else if (lastOf(['formField-startDate'])) unanswered.push(`${tag} — From: type ${String(e.start.month || '').padStart(2, '0')}/${e.start.year}`); }
-          if (e.end) { if (setEntryDate(lastOf(['formField-endDate']), e.end)) landed(`entry:work:${i}:end`); else if (lastOf(['formField-endDate'])) unanswered.push(`${tag} — To: type ${String(e.end.month || '').padStart(2, '0')}/${e.end.year}`); }
+          if (e.start) { if (await setEntryDate(lastOf(['formField-startDate']), e.start)) landed(`entry:work:${i}:start`); else if (lastOf(['formField-startDate'])) unanswered.push(`${tag} — From: type ${String(e.start.month || '').padStart(2, '0')}/${e.start.year}`); }
+          if (e.end) { if (await setEntryDate(lastOf(['formField-endDate']), e.end)) landed(`entry:work:${i}:end`); else if (lastOf(['formField-endDate'])) unanswered.push(`${tag} — To: type ${String(e.end.month || '').padStart(2, '0')}/${e.end.year}`); }
         }
         console.log(`[jarvis] ${tag}: entered`);
       }
@@ -1650,7 +2406,7 @@
   }
 
   /** A <select> option that is a placeholder rather than a choice. */
-  const PLACEHOLDER_OPTION_RE = /^\s*(select|choose|please select|please choose|--|—|none selected)?\s*(one|an option|a value)?\s*[.:…-]*\s*$/i;
+  const PLACEHOLDER_OPTION_RE = /^\s*(select|choose|please select|please choose|--|—|none selected|no selection)?\s*(one|an option|a value)?\s*[.:…-]*\s*$/i;
 
   /**
    * Does this control already carry an answer? Only asked on a follow-along
@@ -1665,7 +2421,7 @@
         return !!opt && el.selectedIndex >= 0 && String(el.value ?? '') !== ''
           && !PLACEHOLDER_OPTION_RE.test(opt.textContent || '');
       }
-      return els.some((e) => e.checked === true);
+      return els.some((e) => isOn(e));
     }
     // `check` only ever ticks what is unticked, and his standing answer to a
     // consent is yes; `upload` is refused by the planner when a file is
@@ -1773,7 +2529,13 @@
    * phone number the form rejected, presses Save and Continue himself, and the
    * step that follows must not begin by putting the rejected number back.
    */
-  async function fillCurrentStep(only = null, { keepExisting = false, entries: wantEntries = true } = {}) {
+  async function fillCurrentStep(only = null, { keepExisting = false, entries: wantEntries = true, readBack = !only } = {}) {
+    // Closed sections first: TSMC's SuccessFactors form keeps every question
+    // behind a collapsed section header (2026-09-24).
+    if (!only && expandSections) {
+      const opened = expandSections();
+      if (opened) { console.log(`[jarvis] opened ${opened} closed section(s)`); await settle(); }
+    }
     const fields = only || discover();
     // Workday's My Experience: sections to add entries to, beside the fields.
     const sections = (!only && experienceSections) ? experienceSections() : [];
@@ -1823,6 +2585,11 @@
       pageTitle: document.title || '',
       fields: fields.map(({ elements, ...rest }) => rest),
       sections,
+      // THE PAGE SAYS "COVER LETTER" ANYWHERE (his ask, 2026-10-03: "if page
+      // mentions cover letter start writing … the cover letter slot is there
+      // but there is no cover letter yet"). The dashboard starts the letter on
+      // this plan, steps before the slot is reached.
+      mentionsLetter: /cover[\s_-]?(letter|note)|letter\s+of\s+(interest|motivation)|motivation(al)?\s+letter/i.test(String(document.body?.innerText || '')),
     });
     if (!asked?.ok) return { filled: 0, checked: 0, uploaded: false, unanswered: [], error: asked?.error || 'no plan' };
 
@@ -1837,7 +2604,13 @@
     // Typing first costs nothing and shows him the run is alive.
     const planned = (plan.actions || []).filter((a) => !SUBMIT_RE.test(a.action || ''));
     const isFile = (a) => a.action === 'upload' || a.action === 'upload-letter';
-    const actions = [...planned.filter((a) => !isFile(a)), ...planned.filter(isFile)];
+    // …AND WRITTEN ANSWERS AFTER EVERYTHING TYPED, for the same reason
+    // (Sabanto's Breezy form, 2026-09-25): its "Cover Letter" box came first,
+    // the writer took over three minutes, and not one field was filled in
+    // that time. The server starts writing when it plans the step, so the
+    // text keeps coming while the rest of the form fills.
+    const isEssay = (a) => a.action === 'essay';
+    const actions = [...planned.filter((a) => !isFile(a) && !isEssay(a)), ...planned.filter(isEssay), ...planned.filter(isFile)];
 
     let filled = 0, checked = 0, uploaded = false;
     // WAS THERE ANYWHERE TO PUT A RESUME on this step? A Workday
@@ -1851,6 +2624,9 @@
     // DOM. A set of identities cannot double-count whatever the label does.
     const filledKeys = new Set();
     const unanswered = [];
+    // DROPDOWNS WORTH A SECOND TRY once the page settles (F-716): a list that
+    // never opened, or a row that was clicked and did not hold.
+    const secondChance = [];
     // What the follow-along rule left as he had it, when the profile would
     // have said something else. Reported, never silent: a value he typed and
     // a value the engine disagrees with are both worth a glance before Submit.
@@ -1878,11 +2654,33 @@
      * format for Phone Number". Identity first, position only as a last resort
      * and only when it agrees about what the field is.
      */
+    // TWO ROWS, ONE KEY (F-670). Workday gives the second language row's
+    // Reading the same formField- key as the first's; the key alone sent row
+    // 2's answer to row 1 and row 2 went out empty. The element id
+    // ("language-396--…", "language-397--…") tells the rows apart.
+    const oneOfKey = (same, a) => (same.length > 1 && a.fieldId && same.find((x) => x.id === a.fieldId)) || same[0] || null;
     const findField = (a, i) => {
       // `i` is the action's position AFTER uploads were moved last; it is
       // only a last resort, and only trusted when the label agrees.
-      if (a.key) { const f = fields.find((x) => x.key && x.key === a.key); if (f) return f; }
-      if (a.name) { const f = fields.find((x) => x.name && x.name === a.name); if (f) return f; }
+      // A SPLIT DATE'S THREE BOXES SHARE ONE KEY (F-581). Workday's month, day
+      // and year all sit in formField-dateSignedOn, so "the field with this
+      // key" was the MONTH box three times: 09, then 24, then 2026 typed over
+      // one another, the day and year left empty, and the form said the date
+      // was required. The part is part of the identity.
+      if (a.key && a.datePart) { const f = fields.find((x) => x.key === a.key && x.datePart === a.datePart); if (f) return f; }
+      if (a.key) { const f = oneOfKey(fields.filter((x) => x.key && x.key === a.key && (!a.datePart || !x.datePart)), a); if (f) return f; }
+      // ONE NAME, TWO BOXES (F-735). Oracle's month and year pickers of one
+      // date are both name="startDate": the name alone sent "Start Date Year"
+      // to the MONTH box, which offered "May | January | …" and the year was
+      // never set (Nokia, 2026-10-16). Several boxes with one name are told
+      // apart by their own id, then their label.
+      if (a.name) {
+        const same = fields.filter((x) => x.name && x.name === a.name);
+        const f = same.length > 1
+          ? (a.fieldId && same.find((x) => x.id === a.fieldId)) || same.find((x) => x.label === a.label) || null
+          : same[0];
+        if (f) return f;
+      }
       if (a.fieldId) { const f = fields.find((x) => x.id && x.id === a.fieldId); if (f) return f; }
       const at = fields[a.at ?? i];
       return at && at.label === a.label ? at : null;
@@ -1912,7 +2710,7 @@
         skipped += 1;
         answered.push(a.label);   // the page holds it; it is not his to do (F-399)
         const now = a.action === 'fill' ? String(el.value ?? '') : a.action === 'prompt' ? String(f.current || '')
-          : el.tagName === 'SELECT' ? (el.options[el.selectedIndex]?.textContent || '') : (els.find((e) => e.checked)?.value || '');
+          : el.tagName === 'SELECT' ? (el.options[el.selectedIndex]?.textContent || '') : (els.find((e) => isOn(e))?.value || f.options?.[els.findIndex((e) => isOn(e))] || '');
         const want = String(a.value ?? '');
         if (want && !kept_same(now, want)) keptList.push(`${a.label} (kept "${now.trim().slice(0, 40)}")`);
         continue;
@@ -1934,11 +2732,85 @@
           // the page has had a frame to put its own value back.
           // A date PART goes into Workday's spinner digit by digit, the way the
           // experience dates already do; insertText into one is ignored.
-          const typed = a.datePart && typeof setSpinner === 'function'
-            ? (() => { const ok = setSpinner(el, String(a.value)); return { kept: ok }; })()
+          const rowsBefore = openRows(el).length;
+          // A LOCATION BOX THAT ALREADY HOLDS HIS CITY IS DONE. The second press
+          // on Penumbra's Lever form (2026-09-25) retyped "Springfield, Washington"
+          // over the chosen "Springfield, WA, USA", the lookup missed, and the box
+          // ended empty — the one thing a second pass must never do.
+          if (!a.datePart && /location|\bcity\b|where\b.{0,30}\b(live|located|based)/i.test(a.label || '')
+            && el.tagName === 'INPUT' && String(el.value || '').trim()
+            && norm(el.value).startsWith(norm(String(a.value || '').split(',')[0]))) {
+            filled += 1; filledKeys.add(`${a.label}|${a.type}`); answered.push(a.label);
+            continue;
+          }
+          // A signature date is today's: the calendar's Today button first,
+          // once per date, then typing (F-581).
+          const dateWrap = a.datePart ? el.closest('[data-automation-id^="formField-"]') : null;
+          if (dateWrap && isTodayPart(a.datePart, a.value) && !todayTried.has(dateWrap)) {
+            todayTried.set(dateWrap, await pickToday(dateWrap).catch(() => false));
+          }
+          // The calendar set the whole date; its day may be tomorrow by his
+          // clock, and typing his day over it is what Workday refused (F-690).
+          // …AND WITH NO TODAY BUTTON, WORKDAY'S TODAY IS STILL UTC (F-706):
+          // Flowserve's calendar said 10/4 at 17:10 Pacific (19:10 in its own
+          // Texas), so "today" there is the UTC date. A today's part on a
+          // Workday host is typed from the UTC clock; everywhere else, his.
+          let typeValue = a.value;
+          if (dateWrap && todayTried.get(dateWrap) === false && /(^|\.)myworkday(jobs|site)?\.com$/i.test(location.hostname) && isTodayPart(a.datePart, a.value)) {
+            const u = new Date();
+            const utc = { month: u.getUTCMonth() + 1, day: u.getUTCDate(), year: u.getUTCFullYear() }[a.datePart];
+            if (utc) typeValue = a.datePart === 'year' ? String(utc) : String(utc).padStart(Math.min(2, String(a.value).trim().length) || 1, '0');
+          }
+          let typed = a.datePart && dateWrap && todayTried.get(dateWrap) && String(el.value || '').trim()
+            ? { kept: true }
+            : a.datePart && typeof setSpinner === 'function'
+            // A part that reads back WRONG is typed once more from a clean
+            // start: HP's year box held 2006 after 2027 was typed (F-618).
+            ? { kept: (await setSpinner(el, String(typeValue))) || (String(el.value || '').trim() !== '' && (await pause(300), await setSpinner(el, String(typeValue)))) }
             : enterText ? await enterText(el, a.value) : (setNativeValue(el, a.value), { kept: kept(el.value, a.value) });
-          if (typed.kept && kept(el.value, a.value)) { filled += 1; filledKeys.add(`${a.label}|${a.type}`); answered.push(a.label); }
-          else unanswered.push(`${a.label} (the page did not keep the value)`);
+          // A BOX THAT SUGGESTS AS YOU TYPE (2026-09-24). Rippling's and Lever's
+          // location boxes open a list under the text; the value only counts
+          // once a row is chosen, and a list left open was read by the NEXT
+          // dropdown as its own options (Rippling: race offered "Springfield, WA,
+          // USA"). So a list that opened because of this typing is answered —
+          // the matcher picks the row — or, when nothing fits, shut.
+          let pickedRow = false;
+          if (!a.datePart) {
+            pickedRow = await pickSuggestion(el, String(a.value), rowsBefore, a.label);
+            if (pickedRow) typed = { kept: true };
+          }
+          // A WEB ADDRESS BOX THAT REFUSES A BARE DOMAIN (BambooHR's "Website,
+          // Blog or Portfolio" at Seakeeper and Cornelis, 2026-09-24/25). His
+          // portfolio is kept as "alexrivera.example" on his word; a box that
+          // will not hold it gets the same address with https:// — the form he
+          // typed himself on Exowatt. Only a bare domain, only after a refusal.
+          if (!(typed.kept && (pickedRow || kept(el.value, a.value)))
+            && /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i.test(String(a.value || '')) && !a.datePart) {
+            const full = `https://${a.value}`;
+            const again = enterText ? await enterText(el, full) : (setNativeValue(el, full), { kept: kept(el.value, full) });
+            if (again.kept && kept(el.value, full)) typed = { kept: true, value: full };
+          }
+          // A SECOND LOOK BEFORE "NOT KEPT" (2026-10-16). ADP's phone box takes
+          // its country from the menu beside it and rewrites the number a beat
+          // later: read at once it was blank, read a second later it held
+          // "+1 555 010 0000". One more look, on a box that is not a date part.
+          if (!(typed.kept && (pickedRow || kept(el.value, a.value) || (typed.value && kept(el.value, typed.value)))) && !a.datePart) {
+            await pause(900);
+            if (kept(el.value, a.value)) typed = { kept: true };
+          }
+          // A chosen suggestion is the answer, in the list's own spelling.
+          if (typed.kept && (pickedRow || kept(el.value, a.value) || (typed.value && kept(el.value, typed.value)))) { filled += 1; filledKeys.add(`${a.label}|${a.type}`); answered.push(a.label); }
+          // A month and a year refused by a box that wants a whole date
+          // (Base Power's Ashby "Graduation Date", 2026-09-25): say that.
+          else if (/^(\d{1,2}\/\d{4}|[A-Za-z]{3,9}\.?\s+\d{4})$/.test(String(a.value || '').trim())) unanswered.push(`${a.label} (this box wants a full date — ${a.value} is all your files say; add the day)`);
+          // A DATE PART THE PAGE CHANGED is named with both values: "did not
+          // keep the value" hid a start date of 2006 in plain sight (F-618).
+          else if (a.datePart && String(el.value || '').trim()) unanswered.push(`${a.label} (the ${a.datePart} box reads "${String(el.value).trim()}" — it should be ${a.value}; fix it before you submit)`);
+          else {
+            unanswered.push(`${a.label} (the page did not keep the value)`);
+            // Oracle's Address Line 1 kept "9" of a street (2026-10-02, F-655).
+            captureAround(el, `typed value not kept (page holds ${String(el.value || '').length} characters)`, a.label);
+          }
         }
         else if (a.action === 'essay') {
           // A box that already holds words is his — the same rule every other
@@ -1973,23 +2845,32 @@
           // A SINGLE prompt's `values` are ALTERNATIVES, not items (F-551): the
           // first one the list accepts is the answer, and every one is worth a
           // try, because the list is short and the answer is one of them.
-          const single = f.promptKind !== 'multi';
+          const single = f.promptKind !== 'multi' || !!a.oneOf;
           const required = !single && !!f.required && wanted.length > 1;
           const skills = !single && !!a.skills;
-          const until = Date.now() + (required ? MULTI_BUDGET_REQUIRED_MS : skills ? SKILLS_BUDGET_MS : MULTI_BUDGET_MS);
+          // A SINGLE choice's values are spellings of one answer, and every one
+          // is worth its try: on a hidden tab the first attempt alone took over
+          // six seconds and "Bachelor of Science" — the spelling that matches
+          // Western Digital's "Bachelors of Science" — was never tried
+          // (2026-09-24). The short budget is for optional multi lists.
+          const until = Date.now() + (required || single ? MULTI_BUDGET_REQUIRED_MS : skills ? SKILLS_BUDGET_MS : MULTI_BUDGET_MS);
           let inARow = 0;
           const promptBegan = Date.now();
           LAST_PROMPT_ROWS = [];
+          LAST_PROMPT_PICKED = false;
           for (const w of wanted) {
             if (single && added) break;
-            if ((required || skills) && added >= MULTI_ENOUGH) break;
+            if (skills ? added >= SKILLS_ENOUGH : required && added >= MULTI_ENOUGH) break;
             // Budget checked BEFORE the attempt as well as after: three tries at
             // GlobalFoundries' skills box cost 24.7 seconds and added nothing,
             // because the check only ran once an attempt had already been paid
             // for. One optional field must never cost the application.
             if (wanted.length > 1 && Date.now() > until) break;
             // eslint-disable-next-line no-await-in-loop
-            if (await pickFromPrompt(el, w, f.promptKind)) { added += 1; inARow = 0; } else { missed.push(w); inARow += 1; }
+            if (await pickFromPrompt(el, w, f.promptKind, single ? wanted.filter((x) => x !== w) : [], { remote: skills })) { added += 1; inARow = 0; } else { missed.push(w); inARow += 1; }
+            // A button menu was asked every spelling in that one opening
+            // (F-618); opening it again per spelling only spends his time.
+            if (!added && f.promptKind === 'single') break;
             // A curated taxonomy that does not contain "SolidWorks" will not
             // contain "MATLAB" either. Two misses in a row is the whole answer —
             // except in a skills box, which gets five (F-552), and a single
@@ -2004,9 +2885,9 @@
             for (const w of [...missed]) {
               const alt = a.searchAlts[w];
               if (!alt) continue;
-              if (added >= MULTI_ENOUGH || Date.now() > until) break;
+              if (added >= (skills ? SKILLS_ENOUGH : MULTI_ENOUGH) || Date.now() > until) break;
               // eslint-disable-next-line no-await-in-loop
-              if (await pickFromPrompt(el, alt, f.promptKind)) { added += 1; missed.splice(missed.indexOf(w), 1); }
+              if (await pickFromPrompt(el, alt, f.promptKind, [], { remote: skills })) { added += 1; missed.splice(missed.indexOf(w), 1); }
             }
           }
           if (added) { filled += 1; filledKeys.add(`${a.label}|${a.type}`); answered.push(a.label); }
@@ -2019,8 +2900,21 @@
           // thing — the page held "Yes" and the plan wanted something else.
           SPENT.prompts += Date.now() - promptBegan;
           const held = String(f.current || '').trim();
-          if (!added && held) unanswered.push(`${a.label} (left as "${held}" — it already had an answer, and nothing here types over one)`);
-          else if (!added) unanswered.push(`${a.label} (nothing matched "${wanted.slice(0, 3).join(', ')}"${LAST_PROMPT_ROWS.length ? ` — the list offered: ${LAST_PROMPT_ROWS.slice(0, 8).join(' | ')}` : ''})`);
+          // …unless what it holds IS the answer (Pronto's second press,
+          // 2026-09-26: "left as No" where the plan wanted No) — answered.
+          if (!added && held && wanted.some((w) => kept_same(held, w))) { skipped += 1; answered.push(a.label); }
+          else if (!added && held) unanswered.push(`${a.label} (left as "${held}" — it already had an answer, and nothing here types over one)`);
+          else if (!added) {
+            const said = `${a.label} (nothing matched "${wanted.slice(0, 3).join(', ')}"${LAST_PROMPT_ROWS.length ? ` — the list offered: ${LAST_PROMPT_ROWS.slice(0, 8).join(' | ')}` : ''})`;
+            // NOT A MISMATCH, A PAGE IN MOTION (F-716): Lam's signed-in form
+            // redrew under the fill — its list never opened (0 rows), or the
+            // right row was clicked and the redraw dropped it. Tried again
+            // once the page has settled; only then is it his.
+            if (readBack && f.promptKind === 'combo' && (!LAST_PROMPT_ROWS.length || LAST_PROMPT_PICKED)) secondChance.push({ a, f, said });
+            else unanswered.push(said);
+            // Oracle's education Country, 2026-10-02: no rows, no reason (F-655).
+            if (f?.elements?.[0]) captureAround(f.elements[0], `typeahead: nothing matched (${LAST_PROMPT_ROWS.length} rows read)`, a.label);
+          }
           else if (missed.length && wanted.length === 1) unanswered.push(`${a.label} (no "${missed[0]}")`);
         } else if (a.action === 'select') {
           // THE LIST WAS EMPTY WHEN THE PAGE WAS READ, AND IS NOT NOW (F-485).
@@ -2071,7 +2965,13 @@
               // it. Only click what is not already the way we want it.
               if (!isOn(pick)) { pick.click(); await settleAria(pick); }
               if (isOn(pick)) { filled += 1; filledKeys.add(`${a.label}|${a.type}`); answered.push(a.label); }
-              else unanswered.push(`${a.label} (the page did not keep the choice)`);
+              else {
+                unanswered.push(`${a.label} (the page did not keep the choice)`);
+                // Oracle's Title pill showed "Mr." chosen while this said it was
+                // not, and its SMS consent flipped to "I do not agree" (Denso,
+                // F-695): the pill's markup is what says how it shows a choice.
+                captureAround(pick, 'choice not kept (or not readable as chosen)', a.label);
+              }
             } else unanswered.push(`${a.label} (no option ${a.optionIndex})`);
           }
         } else if (a.action === 'check') {
@@ -2117,7 +3017,12 @@
             }
           }
         } else if (a.action === 'unknown') {
-          unanswered.push(a.label);
+          // A BOX ALREADY TICKED IS NOT LEFT FOR HIM (Applied Intuition,
+          // 2026-09-25): the first pass ticked "Still Student?"; the second
+          // planned only part of the form, could not tell it was education,
+          // and listed the ticked box as a question he still had.
+          if (/^(checkbox|radio)$/.test(String(f?.type || a.type || '')) && els.some((e) => isOn(e))) { skipped += 1; answered.push(a.label); }
+          else unanswered.push(a.label);
         } else if (a.action === 'skip') {
           // DELIBERATELY LEFT ALONE IS NOT THE SAME AS UNANSWERED.
           //
@@ -2173,6 +3078,83 @@
       for (const s of stale.still) unanswered.push(`${s} — Workday still flags this though it holds your text; check it, or delete one letter and retype it`);
     } catch { /* a repair, never a reason to fail the step */ }
 
+    // THE SECOND TRY (F-716). Lam's signed-in form loads his saved profile
+    // into itself after the page appears and redraws as it does: a list that
+    // was opening shuts, a picked row is dropped. Every test of Lam's form
+    // without that redraw filled all of it — focus off, CPU four times slower,
+    // both. So a dropdown that failed that way gets one more go after a
+    // pause, on the field as the page now draws it.
+    if (secondChance.length) {
+      try {
+        await pause(1500);
+        const now = discover();
+        const retry = [];
+        for (const s of secondChance) {
+          const f = (s.a.fieldId && now.find((x) => x.id === s.a.fieldId))
+            || now.find((x) => x.label === s.a.label && x.type === s.a.type);
+          if (f) retry.push({ ...s, f });
+          else unanswered.push(s.said);
+        }
+        if (retry.length) {
+          console.log(`[jarvis] second try for ${retry.length} dropdown(s) after the page settled — ${retry.map((x) => x.a.label).join(' | ').slice(0, 160)}`);
+          await fillCurrentStep(retry.map((x) => x.f), { entries: false });
+          const after = discover();
+          for (const { a, said } of retry) {
+            const f = (a.fieldId && after.find((x) => x.id === a.fieldId))
+              || after.find((x) => x.label === a.label && x.type === a.type);
+            const el = f?.elements?.[0];
+            if (f && el && holdsAnswer(a, f, el, f.elements)) { filled += 1; filledKeys.add(`${a.label}|${a.type}`); answered.push(a.label); }
+            else unanswered.push(said);
+          }
+        }
+      } catch { for (const s of secondChance) unanswered.push(s.said); }
+    }
+
+    // READ BACK, ONCE THE PAGE HAS SETTLED (2026-09-24). An answer counted as
+    // filled is looked at again after the whole step: a later field's list, a
+    // re-render or a model that never took the value can empty it (the split
+    // dates, the resume that "attached" and was gone). What was lost is filled
+    // once more; what still will not hold is named for him and not counted.
+    // …and after the pass over REVEALED fields too, which is the last thing
+    // to touch the page before the report: Samsung's Reading was emptied there
+    // and went out blank under "nothing left" (F-618). Never inside the
+    // read-back's own refill, which would recurse.
+    if (readBack) {
+      try {
+        await pause(250);
+        const now = discover();
+        const lost = [];
+        for (const a of actions) {
+          if (!['fill', 'select', 'prompt'].includes(a.action) || a.promptKind === 'multi' || !answered.includes(a.label)) continue;
+          const f = (a.key ? oneOfKey(now.filter((x) => x.key === a.key && (x.datePart || '') === (a.datePart || '')), a)
+            : a.name ? now.find((x) => x.name === a.name) : null)
+            || now.find((x) => x.label === a.label && x.type === a.type && (x.datePart || '') === (a.datePart || ''));
+          const el = f?.elements?.[0];
+          if (!f || !el || holdsAnswer(a, f, el, f.elements)) continue;
+          lost.push({ a, f });
+        }
+        if (lost.length) {
+          console.log(`[jarvis] read back: ${lost.length} answer(s) the page did not keep — ${lost.map((x) => x.a.label).join(' | ').slice(0, 200)}`);
+          const again = await fillCurrentStep(lost.map((x) => x.f), { entries: false });
+          // Workday redraws a ticked box a beat later; reading at once called
+          // GlobalFoundries' disability box lost while the press sent it
+          // ticked (F-732).
+          await pause(400);
+          const after = discover();
+          for (const { a } of lost) {
+            const f = (a.fieldId && after.find((x) => x.id === a.fieldId))
+              || after.find((x) => x.label === a.label && x.type === a.type && (x.datePart || '') === (a.datePart || ''));
+            const el = f?.elements?.[0];
+            if (f && el && holdsAnswer(a, f, el, f.elements)) continue;
+            filled = Math.max(0, filled - 1);
+            answered.splice(answered.indexOf(a.label), 1);
+            unanswered.push(`${a.label} (filled, but the page did not keep it — fill it in)`);
+          }
+          void again;
+        }
+      } catch { /* a read-back, never a reason to fail the step */ }
+    }
+
     // fieldKeys is what the step loop compares against to notice a field that
     // only appeared once an earlier answer was given.
     return { filled, checked, skipped, uploaded, sawUpload, unanswered, answered, written, kept: keptList,
@@ -2181,6 +3163,9 @@
       // on this, and nothing else can stand in for it (F-443).
       readForm: fields.length > 0,
       filledKeys: [...filledKeys], fieldKeys: fields.map((f) => `${f.label}|${f.type}`),
+      // A list with nothing in it yet: Honda's State is "Please Select" and a
+      // blank until a Country is chosen (2026-10-02).
+      starvedKeys: fields.filter((f) => f.type === 'select' && (f.options || []).filter((o) => String(o?.text ?? o).trim()).length <= 1).map((f) => `${f.label}|${f.type}`),
       resumeNote: plan.resumeNote, staleExtension: plan.staleExtension };
   }
 
@@ -2482,7 +3467,11 @@
   function failedRequests() {
     try {
       const raw = document.documentElement.dataset.jarvisNet;
-      return raw ? JSON.parse(raw).slice(-4) : [];
+      // Analytics an ad blocker refused is not why a step stalled: every JPL
+      // stall named "POST uxi-ingestion.us.mlde.workday.com -> network error"
+      // (Opera GX, 2026-10-02), beside the real reason.
+      const noise = /uxi-ingestion|\/analytics|telemetry|google-analytics|doubleclick|segment\.io|hotjar|newrelic|nr-data/i;
+      return raw ? JSON.parse(raw).filter((x) => !noise.test(JSON.stringify(x))).slice(-4) : [];
     } catch { return []; }
   }
 
@@ -2495,12 +3484,18 @@
         .replace(/^Error-\s*/i, '')
         .replace(/Error-Page Error-?/i, '')
         .trim();
+      // A role=alert that reports SUCCESS is not why the step stalled: Onto
+      // Innovation's "Alex Rivera - … .pdf successfully uploaded" was given as the
+      // reason the form "would not move on" (2026-10-01, F-633).
+      if (/\bsuccessfully\b|\bsuccess\b|\buploaded\b|\bsaved\b/i.test(t) && !/\b(error|required|invalid|fail(ed|ure)?|must|cannot|can't|not\s+(be\s+)?(allowed|supported|accepted))\b/i.test(t)) continue;
       if (t.length > 8 && t.length < 300) seen.add(t);
     }
     return [...seen].slice(0, 4);
   }
 
   async function run({ auto = RUN.auto } = {}) {
+    // A form drawn after load (a single-page app) is a form once a run reaches it.
+    if (reachable()) watchErrors();
     // THE APPLICATION IS SENT. He pressed Submit, the ATS is saying thank you,
     // and an armed tab must stand down here — otherwise the next posting he
     // opens in this tab an hour from now is filled with this employer's resume
@@ -2519,7 +3514,7 @@
     // on it is a click that did nothing. The most private choice, every time.
     if (dismissCookieBanner) {
       const declined = dismissCookieBanner();
-      if (declined) { console.log(`[jarvis] declined the cookie banner ("${declined}")`); await settle(); }
+      if (declined) { console.log(`[jarvis] answered the cookie banner ("${declined}")`); await settle(); }
     }
 
     // HE HAS ALREADY APPLIED HERE. Applied Materials says so on the posting
@@ -2548,7 +3543,7 @@
       });
       return {
         frame: location.href, filled: 0, checked: 0, uploaded: false, atsMoved: true,
-        stoppedBecause: `this employer has moved to a different system${moved.link ? ` — ${moved.link}` : ''}`,
+        stoppedBecause: `this employer has moved to a different system — the page says "${moved.why}"${moved.link ? ` — ${moved.link}` : ''}`,
       };
     }
 
@@ -2588,6 +3583,31 @@
           frame: location.href, filled: 0, checked: 0, uploaded: false, signInRequired: true, pressedSso: true,
           stoppedBecause: 'pressed Sign in with Google — the form fills by itself once you are back',
         };
+      }
+      // AN EMAIL-ONLY FIRST SCREEN IS FILLED, NOT JUST NAMED (2026-09-24).
+      // iCIMS (Werfen, Joby, AMD, Marvell): "Enter Your Information" — his
+      // email, a California-resident box, a privacy "I accept", and an
+      // hCaptcha. "icims sucks too": the run filled nothing and said "give
+      // your email". There is no password and nothing to sign into, so the
+      // boxes are answered like any other; the human check and the Next press
+      // stay his, and nothing here touches either.
+      if ((signInWallKind && signInWallKind()) === 'email' && !state.filledEmailGate) {
+        state.filledEmailGate = true;
+        let r = null;
+        try {
+          r = await fillCurrentStep();
+          // A box that appears once another is ticked — Werfen's privacy
+          // "I accept" shows only after the California box — gets its own pass.
+          if (settle) await settle();
+          const again = await fillCurrentStep(null, { keepExisting: true, entries: false });
+          if (again) r = { ...r, filled: (r?.filled || 0) + (again.filled || 0), checked: (r?.checked || 0) + (again.checked || 0), unanswered: again.unanswered || r?.unanswered || [] };
+        } catch (e) { console.log('[jarvis] email screen:', e?.message || e); }
+        const got = (r?.filled || 0) + (r?.checked || 0);
+        const why = got
+          ? `your email${r?.checked ? ' and the consent' : ''} are filled — do the human check if there is one and press Next yourself; ${RUN.armed ? 'the form fills by itself from there' : 'then click Jarvis again'}`
+          : wallWords(RUN.armed).short;
+        showPanel({ filled: r?.filled || 0, checked: r?.checked || 0, uploaded: false, unanswered: r?.unanswered || [], steps: 1, waiting: true, stoppedBecause: why });
+        return { frame: location.href, filled: r?.filled || 0, checked: r?.checked || 0, uploaded: false, unanswered: r?.unanswered || [], signInRequired: true, stoppedBecause: why };
       }
       console.log('[jarvis] this tenant wants you signed in before it shows the application.');
       showPanel({
@@ -2643,7 +3663,7 @@
     // begun, not the beginning of one.
     const gate = startGate && startGate();
     if (gate) {
-      console.log('[jarvis] choosing "Apply Manually" to start the application');
+      console.log(`[jarvis] pressing "${String(gate.textContent || gate.getAttribute?.('aria-label') || 'Apply Manually').replace(/\s+/g, ' ').trim().slice(0, 40)}" to start the application`);
       gate.click();
       await settle();
       if (waitForSomething) await waitForSomething();
@@ -2665,6 +3685,18 @@
     // Apply cannot become a loop. A posting he merely navigated the armed tab
     // to is READ (its title goes to the server above) and never applied to:
     // the panel says so and the next press is his.
+    // WORKABLE'S FEED LINKS TO A TEXT PAGE WITH NO APPLY ON IT. The scanner
+    // stores apply.workable.com/<slug>/jobs/view/<id> — Workable's plain-text
+    // rendering, which has no button and no form (Verustruct, driven
+    // 2026-09-24: "no form here yet"). The application lives at
+    // /<slug>/j/<id>/apply/. Only on his press, like following Apply.
+    const workableView = location.href.match(/^https:\/\/apply\.workable\.com\/([^/]+)\/jobs\/view\/([A-Z0-9]+)(?:\.md)?\/?(?:[?#].*)?$/i);
+    if (workableView && !auto) {
+      console.log('[jarvis] Workable text page — going to its application form');
+      await send({ type: 'following', pageUrl: location.href }).catch(() => null);
+      location.assign(`https://apply.workable.com/${workableView[1]}/j/${workableView[2]}/apply/`);
+      return { frame: location.href, filled: 0, checked: 0, uploaded: false, isPosting: true, stoppedBecause: 'opening the application form' };
+    }
     const applyBtn = applyControl && applyControl();
     const mayFollow = !auto || (RUN.started && !state.followedApply);
     if (applyBtn && !mayFollow) {
@@ -2695,9 +3727,28 @@
       // Tell the worker BEFORE the click: an Apply that opens a new tab is
       // recognised as ours only if this arrived just before the tab did.
       await send({ type: 'following', pageUrl: location.href }).catch(() => null);
+      // WHAT WAS HERE BEFORE THE CLICK (Swisslog, 2026-09-26, F-623): "APPLY
+      // HERE" opened KUKA's board in a NEW TAB, the posting kept its search box
+      // and a Resume/CV box, and the run took those for the form painted in
+      // place — the resume went into the posting page. Apply that opened a new
+      // tab, or changed nothing on this one, leaves this page alone.
+      const fieldsSig = () => discover().map((f) => `${f.type}|${f.label}`).join('\n');
+      const beforeSig = fieldsSig();
+      const beforeUrl = location.href;
+      const newTab = /^_blank$/i.test(String(applyBtn.getAttribute?.('target') || '').trim());
       clickNoSubmit(applyBtn);
       await settle();
       if (waitForSomething) await waitForSomething();
+      // ONLY A NEW TAB (2026-09-30): "changed nothing on this page" also
+      // matched Ashby's own application page, which keeps its "Apply for
+      // this Job" button above the form — every Ashby fill ended "followed
+      // Apply" with 0 filled from 2026-09-27 until this. A form still here
+      // after an in-place Apply is the form.
+      if (beforeSig && newTab && location.href === beforeUrl && !(startGate && startGate()) && !(signInWall && signInWall())) {
+        const msg = 'followed Apply — the application opened in another tab';
+        console.log(`[jarvis] ${msg}`);
+        return { frame: location.href, filled: 0, checked: 0, uploaded: false, unanswered: [], steps: 0, followedApply: true, stoppedBecause: msg };
+      }
 
       // THE GATE CAN COME AFTER APPLY. Measured live on KLA: Apply opens
       // Workday's "Start Your Application" modal IN PLACE — no navigation, no
@@ -2706,7 +3757,7 @@
       // The Playwright driver learned the same lesson as F-239.
       const lateGate = startGate && startGate();
       if (lateGate) {
-        console.log('[jarvis] Apply opened the start gate — choosing "Apply Manually"');
+        console.log(`[jarvis] Apply opened a gate — pressing "${String(lateGate.textContent || lateGate.getAttribute?.('aria-label') || 'Apply Manually').replace(/\s+/g, ' ').trim().slice(0, 40)}"`);
         lateGate.click();
         await settle();
         // The step behind the gate takes seconds to paint and changes nothing
@@ -2757,6 +3808,20 @@
       // and creating accounts are his, always; this is the earliest place that
       // can be said on this path.
       if (signInWall && signInWall()) {
+        // HIS STANDING ANSWER HERE TOO: press "Sign in with Google" (2026-10-16).
+        // Only the wall met BEFORE Apply pressed it; ADP's talent-community
+        // sign-up appears AFTER Apply and its Consent gate, and was filled and
+        // left at the verification code instead.
+        const sso = ssoControl && ssoControl();
+        if (sso && RUN.armed && !state.pressedSso) {
+          state.pressedSso = true;
+          console.log('[jarvis] Apply opened a sign-in with "Sign in with Google" — pressing it');
+          chip('Jarvis: signing in with Google…');
+          clickNoSubmit(sso);
+          await settle();
+          return { frame: location.href, filled: 0, checked: 0, uploaded: false, signInRequired: true, pressedSso: true, followedApply: true,
+            stoppedBecause: 'pressed Sign in with Google — the form fills by itself once you are back' };
+        }
         const said = wallWords(RUN.armed);
         console.log(`[jarvis] Apply opened a wall — ${said.short}`);
         showPanel({ filled: 0, checked: 0, uploaded: false, unanswered: [], steps: 0, waiting: true, stoppedBecause: said.panel });
@@ -2841,6 +3906,8 @@
     let staleExtension = null;
     // Whether the store already has this application (F-414).
     let appliedBefore = null;
+    // One retry of a refused signature date per run (F-732).
+    let dateRetried = false;
 
     for (let step = 1; step <= MAX_STEPS; step += 1) {
       // THE WALLS, AGAIN, ON EVERY STEP. Apply Manually while signed out lands
@@ -2872,7 +3939,35 @@
           return { frame: location.href, filled, checked, skipped, uploaded, unanswered, steps: steps.length, blocked: blocked.kind, stoppedBecause: blocked.why, auto };
         }
       }
+      // EVERY CONSENT, ON EVERY STEP (his rule, 2026-10-03: "can we just
+      // press consent on everything … even the eightfold sites just consent").
+      // A notice raised mid-walk is pressed before the step is read; at most
+      // three in a row, so a notice that will not close cannot hold the walk.
+      for (let n = 0; n < 3 && consentGate; n += 1) {
+        const go = consentGate();
+        if (!go) break;
+        console.log(`[jarvis] consented: "${String(go.textContent || go.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 40)}"`);
+        clickNoSubmit(go);
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+      }
       const before = stepSignature();
+      // A STEP ALREADY FILLED IN THIS TAB IS HIS TO REVIEW. A run nobody
+      // pressed for — the watcher, or the re-injection that follows every page
+      // load — stops here instead of filling it again and pressing Next
+      // (Western Digital, 2026-09-24: Back to step one was filled and advanced
+      // twice, by the re-injection, not the watcher). His press always runs.
+      if (auto && step === 1 && handledCoarse.has(coarse(before))) {
+        stoppedBecause = 'a step Jarvis already filled — it is yours to review; press Jarvis to fill it again';
+        console.log(`[jarvis] ${stoppedBecause}`);
+        break;
+      }
+      // EVERY STEP THIS WALK FILLS IS HANDLED, not only the one it ends on
+      // (Western Digital, 2026-09-24: "when i try to review my info it keeps
+      // refilling … when i go back a page"). Going Back to step one looked
+      // new to the watcher, which filled it again and pressed Next, taking him
+      // off the page he meant to read.
+      state.handled.add(before); handledCoarse.add(coarse(before));
       const r = await fillCurrentStep(null, { keepExisting: auto });
       for (const k of r.kept || []) if (!keptAll.includes(k)) keptAll.push(k);
       for (const w of r.written || []) if (!writtenAll.some((x) => x.label === w.label)) writtenAll.push(w);
@@ -2930,14 +4025,32 @@
       //
       // One extra pass, and only when genuinely NEW fields appeared, so a form
       // that re-renders on every keystroke cannot spin here.
-      const seen = new Set((r.fieldKeys || []).map(String));
-      const revealed = discover().filter((f) => !seen.has(`${f.label}|${f.type}`));
+      // COUNTED, NOT A SET (F-611). An entry row the pass added carries the
+      // same labels as the row before it: HP's second language row has its
+      // own "Overall", and a set of labels called it seen, so it was never
+      // answered and Workday refused the step ("The field Overall is required",
+      // twice, 2026-09-26). A label present more times than before is new;
+      // page order puts the added rows' fields after the old ones.
+      const seenCount = new Map();
+      for (const k of (r.fieldKeys || []).map(String)) seenCount.set(k, (seenCount.get(k) || 0) + 1);
+      const metNow = new Map();
+      const starved = new Set((r.starvedKeys || []).map(String));
+      const revealed = discover().filter((f) => {
+        const k = `${f.label}|${f.type}`;
+        const n = (metNow.get(k) || 0) + 1;
+        metNow.set(k, n);
+        if (n > (seenCount.get(k) || 0)) return true;
+        // …or a list that was empty on the first pass and has its options now,
+        // still unanswered: the State that loads once Country is chosen.
+        const el = f.elements?.[0];
+        return starved.has(k) && el?.tagName === 'SELECT' && el.options.length > 2 && !el.value;
+      });
       if (revealed.length) {
         console.log(`[jarvis] answering revealed ${revealed.length} more field(s) — filling those too`);
         // The revealed fields only — never the entries again (F-355): the
         // sub-form of an entry still open counts as revealed fields, and
         // adding the entries twice is what happened.
-        const extra = await fillCurrentStep(revealed, { keepExisting: auto, entries: false });
+        const extra = await fillCurrentStep(revealed, { keepExisting: auto, entries: false, readBack: true });
         // COUNT THE REVEALED FIELDS ONLY. The second pass re-fills everything
         // it can see, including what the first pass already did, so adding its
         // total reported 37 filled against a 36-field form. Nobody was misled
@@ -2976,6 +4089,28 @@
         if (!unansweredSeen.has(u)) { unansweredSeen.add(u); unanswered.push(line); }
       }
       for (const a of r.answered || []) if (a && !answeredAll.includes(a)) answeredAll.push(a);
+      // WHAT THE PAGE HAS THAT THE PLAN NEVER SAW (2026-10-03). A question
+      // discover() drops is otherwise reported nowhere — AMAT's ten radio
+      // questions went unseen on every application for weeks. Each one is
+      // shown to him, written to the page log as "unseen", and its markup
+      // captured (three per page) so the reader can be fixed by platform.
+      try {
+        const unseen = unseenControls ? unseenControls() : [];
+        if (unseen.length) {
+          console.log(`[jarvis] ${unseen.length} question(s) on the page Jarvis did not see — ${unseen.map((u) => u.label).join(' | ').slice(0, 200)}`);
+          for (const u of unseen) {
+            const said = `${u.label || u.kind} (on the page, but Jarvis never saw it — answer it yourself)`;
+            if (!unansweredSeen.has(said)) { unansweredSeen.add(said); unanswered.push(`step ${step}: ${said}`); }
+          }
+          const fresh = unseen.filter((u) => !ERRORS_SENT.has(`${location.pathname}|unseen|${u.label}`));
+          for (const u of fresh) ERRORS_SENT.add(`${location.pathname}|unseen|${u.label}`);
+          if (fresh.length) {
+            send({ type: 'page-errors', trigger: `step ${step}: on the page, not in the plan`, pageUrl: location.href, heading: pageHeading(), pageTitle: document.title,
+              errors: fresh.map((u) => ({ text: u.label || u.kind, how: 'unseen', field: `${u.kind}${u.required ? ' · required' : ''}`, color: '' })) });
+            for (const u of fresh.slice(0, 3)) captureAround(u.el, 'on the page, not in the plan (unseen)', u.label);
+          }
+        }
+      } catch { /* a check, never the fill */ }
       steps.push({ step, ...r });
       console.log(`[jarvis] step ${step}: filled ${r.filled}, ticked ${r.checked}${r.uploaded ? ', resume attached' : ''}${r.error ? ` — ${r.error}` : ''}`);
       // NO PLAN IS THE WHOLE RESULT. When the worker could not reach the
@@ -3037,11 +4172,24 @@
       // Dickinson the walk counted eight steps on one page, re-adding the
       // same refused entry each time.
       const beforeClick = stepSignature();
+      state.handled.add(beforeClick); handledCoarse.add(coarse(beforeClick));   // the step as he will find it on Back
       next.scrollIntoView({ block: 'center' });
       next.click();
       await settle();
 
-      if (stepSignature() === beforeClick || stepSignature() === before) {
+      let stuck = stepSignature() === beforeClick || stepSignature() === before;
+      // A REFUSED SIGNATURE DATE IS RETRIED ONCE with the other today (F-732),
+      // then the same button pressed again — the press he already made.
+      if (stuck && !dateRetried && /\bdate\b[^·]{0,80}\b(required|today)/i.test(pageErrors().join(' · '))) {
+        dateRetried = true;
+        if (await retrySignatureDate()) {
+          (nextControl() || next).click();
+          await settle();
+          stuck = stepSignature() === beforeClick || stepSignature() === before;
+        }
+      }
+
+      if (stuck) {
         // Workday keeps you on a step when something required is missing, and it
         // says exactly what. Its own words beat any guess of ours: the first
         // time this fired, the answer was "The field Upload a file (5MB max) is
@@ -3103,6 +4251,43 @@
     running: null, pending: false, watching: false, lastSig: '', lastRunAt: 0, autoRuns: 0,
     followedApply: false, pressedSso: false, handled: new Set(), lastUserInputAt: 0,
   };
+  // A step by its address and heading, without the count of controls: a
+  // SmartRecruiters step draws its saved entries again when he comes Back to
+  // it (12 description boxes for 4 jobs, 2026-09-24), so the full signature
+  // no longer matches and the step read as new. Markers (gate, wall) stay.
+  //
+  // …BUT TWO STEPS UNDER ONE HEADING ARE STILL TWO STEPS (F-573). Wayve's
+  // firststage flow shows "Upload CV" and then its questions on the same path
+  // under the same heading; without the count they were one step, and the
+  // questions read as "already filled" after only the CV had gone in. What is
+  // ASKED tells them apart — the distinct kinds of question, not how many
+  // copies of each — so a step redrawn with more boxes still matches itself.
+  const shapeOf = () => {
+    try {
+      const kinds = [...new Set(discover().map((f) => `${f.type}:${String(f.label || '').toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim()}`))].sort().join('|');
+      let h = 0;
+      for (let i = 0; i < kinds.length; i += 1) h = (h * 31 + kinds.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(36);
+    } catch { return '*'; }
+  };
+  // The exact fingerprint (::f…) goes too: it changes with every extra box
+  // and with names a site randomises per load (Rippling).
+  const coarse = (sig) => `${location.pathname}##${String(sig || '').replace(/::f[0-9a-z]+(?=(::|$))/, '').replace(/::\d+(?=(::|$))/, `::${shapeOf()}`)}`;
+  // KEPT ACROSS PAGE LOADS IN THIS TAB. SmartRecruiters loads a new document
+  // for each step, so a memory held in this script died with the step: Back
+  // arrived in a fresh document that had "handled" nothing, and the watcher
+  // filled step one again and pressed Next (Western Digital, live 2026-09-24).
+  // sessionStorage is this tab and this site only, and ends with the tab.
+  const HANDLED_KEY = '__jarvis_handled_steps';
+  const handledCoarse = (() => {
+    const set = new Set();
+    try { for (const k of JSON.parse(sessionStorage.getItem(HANDLED_KEY) || '[]')) set.add(k); } catch { /* storage refused: this document only */ }
+    const add = set.add.bind(set);
+    set.add = (k) => { add(k); try { sessionStorage.setItem(HANDLED_KEY, JSON.stringify([...set].slice(-60))); } catch { /* full or refused */ } return set; };
+    const clear = set.clear.bind(set);
+    set.clear = () => { clear(); try { sessionStorage.removeItem(HANDLED_KEY); } catch { /* ignore */ } };
+    return set;
+  })();
   const MIN_GAP_MS = 3000;
   const MAX_AUTO_RUNS = 25;
   /** How long after he last typed or clicked before a follow-along run may start. */
@@ -3135,6 +4320,9 @@
       try { result = await run(opts); } finally {
         state.lastSig = stepSignature();
         state.handled.add(state.lastSig);
+        // Only the EXACT page it ended on: the step a run merely arrived at
+        // (Wayve's questions, painted after the CV went in) is not a step it
+        // filled. Every step the walk did fill was recorded as it went (F-573).
         state.lastRunAt = Date.now();
         state.running = null;
         chip('');   // whatever the run said while it worked, it is done saying it
@@ -3178,14 +4366,14 @@
     const sig = stepSignature();
     // Only a step this document has not seen. A→B→A — a dropdown opening and
     // closing, a validation banner appearing and going — fires nothing.
-    if (sig === state.lastSig || state.handled.has(sig)) return;
+    if (sig === state.lastSig || state.handled.has(sig) || handledCoarse.has(coarse(sig))) return;
     // Let the step finish painting before reading it — a half-rendered step
     // has half its fields, and the other half would be "revealed" later.
     settle().then(() => {
       if (!state.watching || state.running) return;
       if (Date.now() - state.lastUserInputAt < USER_QUIET_MS) return;
       const now = stepSignature();
-      if (now === state.lastSig || state.handled.has(now)) return;
+      if (now === state.lastSig || state.handled.has(now) || handledCoarse.has(coarse(now))) return;
       // A submitted application ends the following, whatever else the page
       // shows; the worker learns it from the run's result.
       autoRun('the page moved to a new step');
@@ -3216,7 +4404,7 @@
   function again(ctx) {
     Object.assign(RUN, ctx || {});
     if (!RUN.armed) { stopWatching(); }
-    if (ctx && ctx.reset) { state.autoRuns = 0; state.handled.clear(); }
+    if (ctx && ctx.reset) { state.autoRuns = 0; state.handled.clear(); handledCoarse.clear(); }
     // A RE-INJECTION NOBODY CLICKED FOR, ON A PAGE THAT HAS NOT CHANGED, IS
     // NOISE. The worker follows every frame load in the tab — a chat widget
     // or an analytics iframe reloading arrives here as "run again". If the

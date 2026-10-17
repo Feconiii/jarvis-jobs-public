@@ -5,7 +5,7 @@
  * design constraints 4, 5 and 6 are all rules about STATE, and without a record
  * they are just good intentions:
  *
- *   · one person per company per role, by default
+ *   · at most two people per company per role, by default (one until 2026-10-05)
  *   · never the same person twice without a reply
  *   · one follow-up, 5-7 business days later, adding something new — then stop
  *   · honour "don't contact me" instantly and permanently
@@ -14,19 +14,19 @@
  * where Applied Materials, KLA, Lam and ASML people rotate between the four,
  * pushy is expensive for years. So the ledger's job is mostly to say NO.
  *
- * It lives in the same SQLite file as the jobs, because a contact that outlives
- * its job row, or a job whose outreach history is in some other file, is how
- * both end up wrong.
+ * It lived in the same SQLite file as the jobs until 2026-09-25, when that
+ * file's write lock — held for minutes by every scan — made his presses fail
+ * with "database is locked" (F-597). It is in `outreach.db` beside it now; see
+ * outreach-db.mjs. Rows still name their job by id and are read with it.
  *
  * NOTHING HERE SENDS. `sentAt` is set by him telling the dashboard he sent it,
  * the same way `status: applied` used to work — except that outreach genuinely
  * leaves from his own client, so there is no confirmation page to read.
  */
-import { openDb } from './db.mjs';
-import { dbPath as storeDbPath } from './store.mjs';
+import { outreachDb, outreachDbPath } from './outreach-db.mjs';
 
 /**
- * THE SAME FILE THE JOBS ARE IN, resolved the same way.
+ * THE STORE'S FOLDER, resolved the same way the store resolves it.
  *
  * The first version of this computed its own path from `import.meta.url`,
  * which looks harmless and is not: `JARVIS_DATA_DIR` is how every test in this
@@ -39,7 +39,7 @@ import { dbPath as storeDbPath } from './store.mjs';
  * Resolved per call, never at import: an import is hoisted above any
  * assignment to process.env, so a constant here would be read too early.
  */
-const dbFile = () => storeDbPath();
+const dbFile = () => outreachDbPath();
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS contacts (
@@ -70,16 +70,9 @@ CREATE INDEX IF NOT EXISTS contacts_company ON contacts(company);
 CREATE INDEX IF NOT EXISTS contacts_status  ON contacts(status, sent_at);
 `;
 
-// KEYED ON THE PATH, NOT THE HANDLE. `openDb` returns a fresh connection every
-// call, so a WeakSet of handles would re-run four DDL statements on every
-// single read — and DDL on a store the scanner is writing to is how F-430 lost
-// four minutes of fetching. The schema is a fact about the FILE.
-const SCHEMA_DONE = new Set();
-function db(dbPath = dbFile()) {
-  const handle = openDb(dbPath);
-  if (!SCHEMA_DONE.has(dbPath)) { handle.exec(DDL); SCHEMA_DONE.add(dbPath); }
-  return handle;
-}
+// One connection per file, schema applied once (outreach-db.mjs). The rows
+// already in jobs.db are carried across on the first open.
+const db = (dbPath = dbFile()) => outreachDb(dbPath, { ddl: DDL, legacy: ['contacts'] });
 
 /** Stable id so the same person at the same company is one row, not many. */
 export function contactId(company, name) {
@@ -109,7 +102,11 @@ export const FOLLOWUP_BUSINESS_DAYS = 6;
  * @param {object[]} atCompany    every contact already recorded at this company
  * @param {{jobId?:string, now?:Date, perCompanyPerRole?:number}} [opts]
  */
-export function canContact(existing, atCompany = [], { jobId = '', now = new Date(), perCompanyPerRole = 1 } = {}) {
+// Two, not one (his call, 2026-10-05: "be flexible, no hard rules except for
+// date and other obvious stuff"): Riley and Devin each invited contact for
+// the same Tech Deployment team; a second good lead is worth a message. A cap
+// still stands so one posting never becomes a mass mailing.
+export function canContact(existing, atCompany = [], { jobId = '', now = new Date(), perCompanyPerRole = 2 } = {}) {
   if (existing?.do_not_contact) {
     return { ok: false, why: 'he asked not to be contacted — permanently, and that is the end of it' };
   }
@@ -130,7 +127,7 @@ export function canContact(existing, atCompany = [], { jobId = '', now = new Dat
   // A NEW person at a company he has already written to about this same role.
   const sameRole = atCompany.filter((c) => c.job_id === jobId && !c.do_not_contact);
   if (jobId && sameRole.length >= perCompanyPerRole) {
-    return { ok: false, why: `already reaching out to ${sameRole[0].name || 'someone'} about this role — one person per company per role` };
+    return { ok: false, why: `already reaching out to ${sameRole.map((c) => c.name || 'someone').join(' and ')} about this role — ${perCompanyPerRole} people per company per role at most` };
   }
   return { ok: true, why: '' };
 }
@@ -198,6 +195,20 @@ export function saveContact(row, { dbPath = dbFile() } = {}) {
   return merged;
 }
 
+/**
+ * Take off a person he has NOT written to, so someone better can take the
+ * role's one slot (2026-09-27: the re-ranked research put 7 of 11 saved people
+ * below a better lead). Anyone sent to, replied, or marked do-not-contact
+ * stays: that row is history, and the do-not-contact promise must survive.
+ * Returns the removed row, or null with nothing changed.
+ */
+export function removeUnsent(id, { dbPath = dbFile() } = {}) {
+  const prev = getContact(id, { dbPath });
+  if (!prev || prev.sent_at || prev.replied_at || prev.do_not_contact) return null;
+  db(dbPath).prepare('DELETE FROM contacts WHERE id = ?').run(String(id));
+  return prev;
+}
+
 /** He sent it. The one event this system cannot observe for itself. */
 export function markSent(id, { dbPath = dbFile(), at = new Date().toISOString() } = {}) {
   const prev = getContact(id, { dbPath });
@@ -220,12 +231,19 @@ export function markDoNotContact(id, { dbPath = dbFile(), why = '' } = {}) {
  * Whose single follow-up is due today. Sorted oldest first, because the value
  * of a follow-up decays and the oldest one is the closest to being pointless.
  */
-export function dueFollowUps({ dbPath = dbFile(), now = new Date() } = {}) {
+// …and NOT about an application that is already over (2026-10-16): four of six
+// "due" were Amazon contacts tied to roles Amazon had rejected or closed. A
+// nudge about a decided application asks for nothing he can get.
+export function dueFollowUps({ dbPath = dbFile(), now = new Date(), jobStatus = null } = {}) {
   const rows = db(dbPath).prepare(
     "SELECT * FROM contacts WHERE status = 'sent' AND sent_at IS NOT NULL AND do_not_contact = 0 AND replied_at IS NULL").all();
+  const over = (c) => {
+    if (!jobStatus || !c.job_id) return false;
+    try { const s = jobStatus(c.job_id); return s === 'rejected' || s === 'gone'; } catch { return false; }
+  };
   return rows
     .map((c) => ({ ...c, dueAt: addBusinessDays(new Date(c.sent_at), FOLLOWUP_BUSINESS_DAYS).toISOString() }))
-    .filter((c) => new Date(c.dueAt) <= now)
+    .filter((c) => new Date(c.dueAt) <= now && !over(c))
     .sort((a, b) => (a.sent_at < b.sent_at ? -1 : 1));
 }
 

@@ -30,12 +30,17 @@
 // title from cv.md's approved list that matches the lane; it never invents, and
 // never contradicts another family.
 
+import { person, DEFAULT_PRESET } from './targeting.mjs';
+
 /**
  * Families in priority order — the first whose pattern matches wins, so put the
  * more specific ones first. `variant` is the output folder; the file inside is
- * always "Alex Rivera Resume.pdf".
+ * always "<his name> Resume.pdf" ("Alex Rivera Resume.pdf").
+ *
+ * These are the hardware-engineering preset's lanes; `FAMILIES` below is what
+ * the current person's preset actually routes through.
  */
-export const FAMILIES = [
+export const HARDWARE_FAMILIES = [
   {
     key: 'automation',
     variant: 'automation',
@@ -69,6 +74,29 @@ export const DEFAULT_FAMILY = {
   re: null,
 };
 
+/**
+ * THE LANES BELONG TO A PRESET, NOT TO EVERYONE.
+ *
+ * The three lanes above are his: hardware titles routed to bases built from
+ * his bullet pool. Another person's pool has none of those bullets, so a
+ * finance or data posting matching /test|validation|quality/ and being sent to
+ * a "manufacturing" base would be nonsense. Any preset other than
+ * hardware-engineering gets ONE family — total-experience — built from that
+ * person's whole pool, and every posting is tailored from it by the per-posting
+ * pass (resume-for-job.mjs), which is where the job-specific shape comes from.
+ */
+export function familiesForPreset(presetKey) {
+  return presetKey === DEFAULT_PRESET ? HARDWARE_FAMILIES : [];
+}
+
+/** The lanes this person's postings are routed through (empty: everything is total-experience). */
+export const FAMILIES = familiesForPreset(person.preset);
+
+/** "<Full Name> Resume.pdf" — the plain name every family base carries. */
+export function resumeFileName(name = person.fullName) {
+  return `${String(name || '').replace(/\s+/g, ' ').trim() || 'Resume'} Resume.pdf`;
+}
+
 /** All four, fallback last — the order the builder renders and reports them in. */
 export const ALL_FAMILIES = [DEFAULT_FAMILY, ...FAMILIES];
 
@@ -94,7 +122,7 @@ export function familyFor(job) {
 }
 
 /** Where that family's resume lives. One file per family, generic filename. */
-export function resumePathFor(job, personName = 'Alex Rivera') {
+export function resumePathFor(job, personName = person.fullName) {
   const fam = familyFor(job);
   return {
     family: fam,

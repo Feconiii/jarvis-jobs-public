@@ -22,6 +22,17 @@ export function leverBody(j) {
   return parts.filter(Boolean).join('\n');
 }
 
+/**
+ * A board's own outline numbering is not part of the title. Phoenix Tailings
+ * files every posting under a section number ("4.6. Manufacturing Engineer I"),
+ * and the same job everywhere else — LinkedIn, his notes, the email — is
+ * "Manufacturing Engineer I". Only a number-dot run at the very start is taken:
+ * "2027 New Grad" and "3D Printing Engineer" have no dot and keep theirs.
+ */
+export function leverTitle(text) {
+  return String(text || '').replace(/^\s*\d+(?:\.\d+)*\.\s+/, '').trim();
+}
+
 function resolveApiUrl(entry) {
   const url = entry.careers_url || '';
   const match = url.match(/jobs\.lever\.co\/([^/?#]+)/);
@@ -44,7 +55,7 @@ export default {
     const json = await ctx.fetchJson(apiUrl, { redirect: 'error' });
     if (!Array.isArray(json)) return [];
     return json.map(j => ({
-      title: j.text || '',
+      title: leverTitle(j.text),
       url: j.hostedUrl || '',
       company: entry.name,
       team: [j.categories?.department, j.categories?.team].filter(Boolean).join(' / '),

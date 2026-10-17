@@ -49,5 +49,18 @@ console.log('\n🧪 disable-board: it refuses to guess');
   check('a quote in the reason cannot break the YAML', /notes: "it's 'wrong' —/.test(disableEntry(bare, 'Bare', 'it\'s "wrong"').text), true);
 }
 
+console.log('\n🧪 disable-board: a "$" in the reason is text, not a capture group (F-638)');
+{
+  // 2026-10-01: "hourly plant labor ($12/hr)" was written as
+  // `notes: "hourly plant labor (    notes: "2/hr) …` and portals.yml stopped parsing.
+  const src = `tracked_companies:\n${entry('Western Extrusions', '\n')}`;
+  const r = disableEntry(src, 'Western Extrusions', 'hourly plant labor ($12/hr) and $& and $1');
+  check('the reason is written exactly as given', r.text.includes('notes: "hourly plant labor ($12/hr) and $& and $1 — disabled'), true);
+  check('the original notes follow it once', (r.text.match(/notes: /g) || []).length, 1);
+  const bareSrc = `tracked_companies:\n  - name: "NoNotes"\n    careers_url: https://x/nonotes\n    enabled: true\n`;
+  check('…also on an entry that had no notes line',
+    disableEntry(bareSrc, 'NoNotes', 'costs $12/hr').text.includes('notes: "costs $12/hr — disabled'), true);
+}
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

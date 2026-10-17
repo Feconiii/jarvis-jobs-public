@@ -39,6 +39,7 @@ import yaml from 'js-yaml';
 
 import { guardArgs } from './cli.mjs';
 import { newCompanies, HARDWARE_TITLE_RE, worthTracking } from './discover-linkedin.mjs';
+import { discovery } from './targeting.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -62,12 +63,11 @@ const USAGE = `
 
 export const ALL_SOURCES = ['builtin', 'hn', 'ycjobs', 'muse', 'climatebase', 'adzuna'];
 
-/** Role searches, never company names — same rule as discover-linkedin. */
-export const SOURCE_QUERIES = [
-  'mechanical engineer', 'robotics engineer', 'manufacturing engineer', 'hardware engineer',
-  'mechanical design engineer', 'mechatronics', 'test engineer hardware', 'process engineer',
-  'automation engineer', 'electromechanical',
-];
+/** Role searches, never company names — same rule as discover-linkedin. From the preset. */
+export const SOURCE_QUERIES = [...discovery.sourceQueries];
+/** The Muse's job categories, and the terms each HN thread is searched for. From the preset. */
+export const MUSE_CATEGORIES = [...discovery.museCategories];
+export const HN_TERMS = [...discovery.hnTerms];
 
 const decode = s => String(s || '')
   .replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"')
@@ -155,10 +155,11 @@ export function parseMuse(json) {
  * is the whole parser — a story that does not match it is not read, because a
  * company name guessed out of a free headline is how a sentence fragment gets
  * resolved to somebody's board. Most of YC is software, so the headline has to
- * say something physical before the company is worth a resolver's time.
+ * name the person's field (the preset's ycRoleHintRe — for hardware, something
+ * physical) before the company is worth a resolver's time.
  */
 const YC_STORY_RE = /^(.{2,48}?)\s*\((YC [A-Z]{1,2}\d{2})\)\s+(?:is|are)\s+hiring\b\s*(.*)$/i;
-export const PHYSICAL_HINT_RE = /\b(?:hardware|robot|mechanical|mechatronic|manufactur|electrical|embedded|firmware|asic|fpga|chips?|silicon|semiconductor|battery|batteries|drone|aerospace|satellite|space|rocket|propulsion|nuclear|fusion|energy|factory|factories|industrial|automation|sensor|optic|photonic|laser|biotech|lab automation|medical device|3d print|additive|materials?|machining|machinist|machine shop|cnc|eVTOL|aircraft|vehicle|automotive|physical)/i;
+export const PHYSICAL_HINT_RE = discovery.ycRoleHintRe;
 export function parseYcStory(hit) {
   const m = decode(hit?.title || '').match(YC_STORY_RE);
   if (!m) return null;
@@ -242,7 +243,8 @@ export async function harvestSources({
   }
   if (sources.includes('muse')) {
     await pageThrough(
-      (p) => `https://www.themuse.com/api/public/jobs?${new URLSearchParams({ category: 'Science and Engineering', location: 'United States', page: String(p) })}`,
+      // The API takes `category` more than once; one category reads exactly as before.
+      (p) => `https://www.themuse.com/api/public/jobs?${new URLSearchParams([...MUSE_CATEGORIES.map(c => ['category', c]), ['location', 'United States'], ['page', String(p)]])}`,
       parseMuse, { ...opts, pages: Math.min(pages, 15), label: 'muse' });
   }
   if (sources.includes('adzuna')) {
@@ -274,7 +276,7 @@ export async function harvestSources({
       report.requests++;
       const threads = (JSON.parse(idx.text || '{}').hits || []).filter(h => /who is hiring/i.test(h.title || '')).slice(0, months);
       for (const t of threads) {
-        for (const term of ['mechanical', 'hardware', 'robotics', 'manufacturing', 'mechatronics']) {
+        for (const term of HN_TERMS) {
           const r = await get(`https://hn.algolia.com/api/v1/search?tags=comment,story_${t.objectID}&query=${term}&hitsPerPage=100`, fetchImpl);
           report.requests++;
           if (!r.ok) { report.errors++; report.refused.push(`hn ${t.title} (${r.status})`); continue; }
@@ -327,7 +329,35 @@ async function main(argv) {
     if (fresh.length > 80) console.log(`    … +${fresh.length - 80} more (use --json for all)`);
   }
 
-  if (!has('write') || !fresh.length) return 0;
+  // EVERY COMPANY THESE INDEXES NAME GOES IN THE COVERAGE LEDGER (F-701),
+  // tracked or not, so the next run knows what was already looked for.
+  let ledger = null;
+  try {
+    const u = await import('./universe.mjs');
+    ledger = { u, db: u.openUniverse() };
+    const byCompany = new Map();
+    for (const p of res.postings) {
+      if (!p.company || !worthTracking(p.title)) continue;
+      if (!byCompany.has(p.company)) byCompany.set(p.company, { name: p.company, titles: [], count: 0 });
+      const e = byCompany.get(p.company);
+      e.count++;
+      if (e.titles.length < 8) e.titles.push(p.title);
+    }
+    const r = u.ingest(ledger.db, [...byCompany.values()], 'sources');
+    u.sync(ledger.db);
+    if (!asJson) console.log(`\n  ledger: ${r.added} new employer(s), ${r.seen} seen again`);
+  } catch (e) { if (!asJson) console.log(`  ⚠ coverage ledger not updated: ${e.message}`); }
+
+  if (!has('write') || !fresh.length) { ledger?.db.close(); return 0; }
+  if (ledger) {
+    console.log(`\n  Handing ${fresh.length} names to discover-ats for verification…\n`);
+    const counts = await ledger.u.resolveNames(ledger.db, fresh.map(c => ({ name: c.name.replace(/,/g, ' ') })), { write: true });
+    ledger.u.sync(ledger.db);
+    console.log(`\n  settled: ${JSON.stringify(counts)}`);
+    console.log(`  ${ledger.u.coverageLine(ledger.u.coverage(ledger.db))}`);
+    ledger.db.close();
+    return 0;
+  }
   const { spawnSync } = await import('node:child_process');
   console.log(`\n  Handing ${fresh.length} names to discover-ats for verification…\n`);
   const r = spawnSync(process.execPath, [

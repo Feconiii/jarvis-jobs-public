@@ -19,6 +19,11 @@
 // better-matched one.
 //
 // Matching is literal, word-boundary keywords. No model, no tokens, no network.
+//
+// The field lists moved to the preset so a second user can run Jarvis
+// (presets/<preset>/screen.mjs); the notes below are about the hardware ones.
+
+import { screen } from './targeting.mjs';
 
 /**
  * Fields he is actively hunting — these score full marks.
@@ -31,130 +36,14 @@
  * space vocabulary outright; the classifier keeps the label so a space posting
  * is still recognisable when he goes looking under "All incl. blocked".
  */
-export const PRIORITY_FIELDS = ['robotics', 'ai-hardware'];
+export const PRIORITY_FIELDS = screen.priorityFields;
 
 /**
  * Field definitions, most specific first. `weight` breaks ties when a posting
  * mentions several: a robot company that also says "semiconductor" once is
  * still a robotics job.
  */
-const FIELDS = [
-  {
-    key: 'robotics',
-    label: 'Robotics & autonomy',
-    weight: 5,
-    terms: [
-      'robotics', 'robotic', 'humanoid', 'cobot', 'collaborative robot',
-      'autonomous mobile robot', 'amr', 'agv', 'autonomous vehicle', 'self-driving',
-      'motion planning', 'manipulation', 'end effector', 'end-effector',
-      'actuator', 'kinematics', 'ros2', 'moveit', 'teleoperation',
-      'drone', 'uav', 'quadruped', 'exoskeleton', 'mechatronics',
-    ],
-  },
-  {
-    key: 'ai-hardware',
-    label: 'AI hardware & datacenter',
-    weight: 4,
-    terms: [
-      'data center', 'datacenter', 'liquid cooling', 'immersion cooling',
-      'cold plate', 'thermal management', 'rack integration', 'server rack',
-      'gpu cluster', 'accelerator hardware', 'ai infrastructure',
-      'hyperscale', 'power distribution unit', 'busway', 'cdu',
-      'compute hardware', 'ai datacenter', 'ai data center',
-    ],
-  },
-  {
-    key: 'space',
-    label: 'Space & launch',
-    weight: 5,
-    // Every term here must be unambiguous ON ITS OWN, because a single match
-    // is enough to claim the posting. The first draft used bare "satellite",
-    // "propulsion" and "orbital", which classified CVS Health and Cardinal
-    // Health pharmacy roles as space work (satellite *pharmacy*), General
-    // Motors as space work (automotive *propulsion*), and a stack of Applied
-    // Materials reqs along with them. A field filter that surfaces a pharmacy
-    // job under 🚀 is worse than no filter at all.
-    terms: [
-      'spacecraft', 'launch vehicle', 'cubesat', 'smallsat',
-      'space systems', 'rocket engine', 'rocket propulsion', 'space propulsion',
-      'electric propulsion', 'cryogenic propellant', 'payload fairing',
-      'orbital mechanics', 'low earth orbit', 'in-orbit', 'on-orbit', 'in-space',
-      'satellite constellation', 'satellite bus', 'satellite payload',
-      'reaction control', 'star tracker', 'deorbit',
-      // Rocket-engine vocabulary. Unambiguous on its own and nothing else
-      // uses it — tightening the list to kill the "satellite pharmacy" false
-      // positives had also dropped Relativity's "Propulsion Manufacturing
-      // Engineer II, Combustion Devices" on the floor.
-      'combustion device', 'thrust chamber', 'turbopump', 'engine test stand',
-      // NOT 'launch site': Amazon's relocation boilerplate says "must be
-      // located outside of 50 miles from the launch site", meaning a new
-      // warehouse launch. It filed Dock Clerk and Hazmat Waste Coordinator
-      // under space.
-    ],
-  },
-  {
-    key: 'semiconductor',
-    label: 'Semiconductor',
-    weight: 3,
-    terms: [
-      'semiconductor', 'wafer', 'fab ', 'foundry', 'lithography', 'etch',
-      'deposition', 'cmp', 'metrology', 'cleanroom', 'clean room',
-      'ion implant', 'photoresist', 'euv', 'die attach', 'wafer fab',
-      'front end of line', 'back end of line', 'yield engineering',
-    ],
-  },
-  {
-    key: 'medical',
-    label: 'Medical devices',
-    weight: 3,
-    terms: [
-      'medical device', 'iso 13485', 'fda', '510(k)', 'catheter', 'implant',
-      'surgical', 'diagnostic instrument', 'biomedical', 'drug delivery',
-      'gmp', 'sterilization',
-    ],
-  },
-  {
-    key: 'energy',
-    label: 'Energy & climate hardware',
-    weight: 3,
-    // "grid" alone matched gridlock, grid patterns and part grids; "fusion"
-    // alone matched Fusion 360, which is CAD software he uses daily.
-    terms: [
-      'battery pack', 'battery cell', 'cell manufacturing', 'gigafactory',
-      'photovoltaic', 'solar module', 'wind turbine', 'power grid', 'electrical grid',
-      'electrolyzer', 'hydrogen fuel', 'nuclear reactor', 'fusion energy',
-      'energy storage', 'power electronics', 'grid interconnection',
-    ],
-  },
-  {
-    key: 'industrial',
-    label: 'Industrial & automation',
-    weight: 2,
-    // The catch-all is the only field allowed to be vague, so it is the only
-    // one that can win by sheer volume of weak matches — a Relativity
-    // "Propulsion Manufacturing Engineer, Combustion Devices" lost to
-    // `industrial` because the body said production, tooling, machining and
-    // work instruction four times over. Its evidence saturates at two, so it
-    // can still claim a posting nothing else wants and can no longer outvote a
-    // field that actually recognised the work.
-    maxEvidence: 2,
-    // The lowest-weight field on purpose: it is the catch-all for "makes
-    // physical things, no hotter label applies". Without the general
-    // manufacturing vocabulary here, 64% of the deck fell through to `other`
-    // — including plain "Manufacturing Engineer", which is his primary target
-    // role. That did not just look untidy: `spreadRows` interleaves on the
-    // field, so a deck that is two-thirds one value has nothing to interleave.
-    terms: [
-      'automation', 'plc', 'scada', 'conveyor', 'material handling',
-      'production line', 'assembly line', 'cnc', 'injection molding',
-      'stamping', 'weldment', 'lean manufacturing', 'six sigma',
-      'manufacturing engineer', 'process engineer', 'manufacturing process',
-      'production engineer', 'industrial engineer', 'tooling', 'fixture',
-      'new product introduction', 'npi', 'shop floor', 'work instruction',
-      'sheet metal', 'machining', 'quality engineer', 'test engineer',
-    ],
-  },
-];
+const FIELDS = screen.fields;
 
 const reCache = new Map();
 /** Word-boundary match, so "fab" does not fire on "fabricate". */

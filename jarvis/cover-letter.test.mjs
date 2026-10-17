@@ -3,11 +3,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCoverLetterPrompt, checkCoverLetter, writeCoverLetter, BANNED } from './cover-letter.mjs';
+import { buildCoverLetterPrompt, checkCoverLetter, writeCoverLetter, BANNED, letterWordsFrom, letterWordsRequest, withLetterWords, hisLetters, registerProblems } from './cover-letter.mjs';
 
 const CV = `# Alex Rivera
 ## Education
-**State University** — Springfield, Washington
+**Lakeside University** — Springfield, Washington
 Bachelor of Science: Mechanical Engineering | May 2027
 - GPA: 3.85 | an engineering honor society
 ## Experience
@@ -29,7 +29,7 @@ const JOB = { company: 'Becton Dickinson', title: 'Manufacturing Engineer I' };
  * the posting, and a close. No contractions, no figures, no sign-off — the
  * page adds "Sincerely, Alex Rivera" under the body.
  */
-const GOOD = `I am writing to apply for the Manufacturing Engineer I position at Becton Dickinson. I am currently pursuing a Bachelor of Science in Mechanical Engineering at State University and will graduate in May 2027, and I am seeking a role where I can design the tooling and fixtures that a production line depends on. What interests me about this posting is that it puts new product introduction and design of experiments work on catheter lines together, so a fixture there is judged by whether the line stays repeatable once it is running.
+const GOOD = `I am writing to apply for the Manufacturing Engineer I position at Becton Dickinson. I am currently pursuing a Bachelor of Science in Mechanical Engineering at Lakeside University and will graduate in May 2027, and I am seeking a role where I can design the tooling and fixtures that a production line depends on. What interests me about this posting is that it puts new product introduction and design of experiments work on catheter lines together, so a fixture there is judged by whether the line stays repeatable once it is running.
 
 During my internship at Applied Materials I designed, prototyped and validated a machine vision inspection fixture for Metal Deposition chamber variants in Autodesk Inventor. I carried the tolerance analysis through the design and took it from the first model to validated hardware on the floor. That work taught me how much of a reliable fixture is settled in its tolerances and its interfaces, which is the same question a catheter line asks of the tooling around it.
 
@@ -162,4 +162,65 @@ test('SWITCHED OFF, IT SAYS SO', async () => {
   } finally {
     if (before === undefined) delete process.env.JARVIS_TAILOR; else process.env.JARVIS_TAILOR = before;
   }
+});
+
+test('a word the form asks to see in the letter is read, asked for, and guaranteed (PsiQuantum, 2026-09-25)', () => {
+  const words = letterWordsFrom(['First Name', 'Please include the word "purple" in the cover letter submitted.', 'Cover Letter']);
+  assert.deepEqual(words, ['purple']);
+  assert.deepEqual(letterWordsFrom(['Why do you want this role?', 'Upload your cover letter']), [], 'no instruction, no words');
+  assert.match(letterWordsRequest(words, 'keep it short'), /keep it short[\s\S]*"purple"/);
+  assert.equal(withLetterWords('A purple anodised bracket.', words), 'A purple anodised bracket.', 'already there: untouched');
+  assert.match(withLetterWords('Dear team,\nPurpleness is not it.', words), /asks for: purple\.$/, 'a longer word does not count');
+});
+
+test('DETAIL AND FILLER, measured against his eleven letters (2026-09-26)', () => {
+  // His words on the drafts: "it read well initially but then dives into
+  // unnecessary details, or add fluffy bullshit deviating from my examples".
+  // A rule that fails his own writing is the wrong rule (F-408): all eleven
+  // must pass, paragraphs recovered from the PDF text.
+  const his = hisLetters();
+  assert.ok(his.length >= 10, `his letters are read (${his.length})`);
+  for (const l of his) {
+    assert.ok(l.split(/\n\n/).length >= 3, `paragraphs recovered: ${l.slice(0, 60)}`);
+    assert.deepEqual(registerProblems(l), [], l.slice(0, 80));
+  }
+  // The drafts that prompted this, each caught.
+  const lines = [
+    'The experience taught me that the visible failure is not always the root cause, and it is the habit I would bring to resolving nonconformances.',
+    'That project taught me to carry a design from a constraint to a documented, released part, which is the discipline that enclosures, structures, and supplier relationships depend on.',
+    'That pairing of intelligent software and carefully engineered hardware is the work I want to build my career on.',
+    'A fixture is finished only when someone else can build it, run it, and trust what it reports.',
+    "Redwood's work of recovering and reusing batteries is work I would be proud to contribute to.",
+    "Path Robotics' work on AI driven robots is exactly the kind of engineering I want to contribute to.",
+  ];
+  for (const line of lines) {
+    assert.ok(registerProblems(line).length, `caught: ${line}`);
+  }
+  // A role paragraph that walks through the mechanism runs long, and says so.
+  const walk = 'At Applied Materials I designed a fixture. The printer was too small. So I split it into parts. I joined them with dovetails. I ran a tolerance analysis. I released it through Teamcenter.';
+  assert.ok(registerProblems(walk).some((p) => /runs 6 sentences/.test(p)), JSON.stringify(registerProblems(walk)));
+  // His own way of saying what work taught him is not filler.
+  assert.deepEqual(registerProblems('These experiences taught me how to move from analysis to execution. This role has strengthened my understanding of how design decisions affect assembly.'), []);
+});
+
+test('THE PROMPT SHOWS ALL HIS LETTERS AND NOT HIS POST VOICE (2026-09-26)', async () => {
+  const p = buildCoverLetterPrompt({ job: JOB, jd: JD, cvText: CV, letters: ['FIRST LETTER BODY', 'SECOND LETTER BODY'], exemplar: 'THE OLD SINGLE EXEMPLAR' });
+  assert.match(p, /his letter 1 ---\nFIRST LETTER BODY/);
+  assert.match(p, /his letter 2 ---\nSECOND LETTER BODY/);
+  assert.ok(!/THE OLD SINGLE EXEMPLAR/.test(p), 'the letters replace the single sample');
+  assert.match(p, /LEVEL OF DETAIL/);
+  assert.match(p, /NO MECHANISM/);
+  assert.match(p, /ONE ROLE PER PARAGRAPH/);
+  assert.ok(!/ONLY TWO ROLES/.test(p), "no cap on how many companies he names (his call, 2026-09-26)");
+  assert.ok(p.indexOf('--- end of cv.md ---') < p.indexOf('his letter 1 ---'), 'his letters come after the facts, so they are read last');
+  // What writeCoverLetter hands the writer: cv.md alone, and no voice-dna rules.
+  let seen = '';
+  await writeCoverLetter(JOB, {
+    jd: JD,
+    ask: async (prompt) => { seen = prompt; return GOOD; },
+    sources: { cv: CV, cvText: `${CV}\n--- his stories: interview-prep/stories.md ---\nI FED THE MAGAZINE BY HAND`, narrative: {}, voiceRules: 'Use contractions naturally. Be specific. Numbers, names, concrete details.', framing: '', letters: ['HIS LETTER'] },
+  });
+  assert.ok(!/FED THE MAGAZINE BY HAND/.test(seen), 'interview stories stay out of the letter');
+  assert.ok(!/Use contractions naturally/.test(seen), "voice-dna's post rules stay out of the letter");
+  assert.match(seen, /These words: delve/, 'the banned vocabulary is still named');
 });

@@ -31,19 +31,15 @@
 //
 // Only a closed list that names disciplines and excludes all of his counts.
 
+import { underPreferredHeading } from './requirements.mjs';
+import { person, screen } from './targeting.mjs';
+
+// The three discipline lists moved to the preset so a second user can run
+// Jarvis (presets/<preset>/screen.mjs). The reasoning below is about the
+// default, mechanical, lists.
+
 /** Disciplines that read as "he qualifies", from a BSME's perspective. */
-const HIS_DISCIPLINES = [
-  'mechanical', 'mechanical engineering', 'me',
-  'manufacturing', 'manufacturing engineering',
-  'industrial', 'industrial engineering', 'ie',
-  'mechatronics', 'robotics', 'automation',
-  'aerospace', 'aeronautical', 'astronautical',
-  'materials', 'materials science', 'metallurgy', 'metallurgical',
-  'engineering technology', 'mechanical engineering technology',
-  'manufacturing technology', 'industrial technology',
-  'systems engineering', 'engineering management',
-  'physics', 'applied physics', 'engineering physics',
-];
+const HIS_DISCIPLINES = screen.hisDisciplines;
 
 /**
  * Disciplines that are decidedly NOT his, split by how far away they are —
@@ -58,15 +54,7 @@ const HIS_DISCIPLINES = [
  * FAR — the escape hatch cannot reach him. A list of only these is a mismatch
  * even when it says "or related field".
  */
-const FAR_DISCIPLINES = [
-  'electrical', 'electrical engineering', 'ee',
-  'electronics', 'electronic engineering', 'microelectronics',
-  'computer science', 'cs', 'computer engineering', 'ce',
-  'software engineering', 'information technology', 'information systems',
-  'nursing', 'pharmacy', 'accounting', 'finance', 'marketing',
-  'human resources', 'business administration', 'economics',
-  'law', 'journalism', 'graphic design',
-];
+const FAR_DISCIPLINES = screen.farDisciplines;
 
 /**
  * ADJACENT — not his, but close enough that "or a related field" plausibly
@@ -74,13 +62,7 @@ const FAR_DISCIPLINES = [
  * related field" really does hire mechanical engineers; an ASIC role asking
  * for EE "or related" really does not.
  */
-const ADJACENT_DISCIPLINES = [
-  'chemical', 'chemical engineering', 'cheme',
-  'civil', 'civil engineering', 'structural engineering',
-  'biomedical', 'bioengineering', 'biology', 'biochemistry', 'chemistry',
-  'petroleum', 'mining', 'nuclear engineering', 'agricultural',
-  'environmental engineering', 'geology', 'engineering science',
-];
+const ADJACENT_DISCIPLINES = screen.adjacentDisciplines;
 
 const OTHER_DISCIPLINES = [...FAR_DISCIPLINES, ...ADJACENT_DISCIPLINES];
 
@@ -124,6 +106,31 @@ const BACHELOR_OK_RE = /(?:\b(?:bachelor'?s?|BS|BA|BSc|undergraduate|four[- ]yea
 // A requirement that names ONLY a graduate degree.
 const GRADUATE_ONLY_RE = /(?:\b(?:master'?s?|MS|MSc|PhD|doctorate|doctoral|graduate degree|advanced degree)\b|\bM\.\s?(?:S|Sc|Eng)\.(?!\w)|\bPh\.\s?D\.?(?!\w))/i;
 
+// WHAT LEVEL IS OUT OF REACH depends on the degree the user will hold
+// (person.degreeLevel). He is a BS, so a Master's-or-PhD-only requirement is
+// out; for someone with a Master's only a doctorate-only one is, and for a PhD
+// nothing is. `aboveLevel` is the one question every level check asks.
+const LEVEL = /^(phd|doctor)/i.test(person.degreeLevel) ? 'phd'
+  : /^master/i.test(person.degreeLevel) ? 'master' : 'bachelor';
+const MASTER_OK_RE = /(?:\b(?:bachelor'?s?|BS|BA|BSc|undergraduate|four[- ]year degree|master'?s?|MS|MSc|MA|MBA|MEng)\b|\bB\.\s?(?:Sc|S|A|Eng)(?![a-z])|\bM\.\s?(?:S|Sc|A|Eng|B\.?A)\.?(?![a-z]))/i;
+const DOCTORATE_ONLY_RE = /(?:\b(?:PhD|doctorate|doctoral)\b|\bPh\.\s?D\.?(?!\w))/i;
+/** A route at or below his level, somewhere in `s`. */
+const LEVEL_OK_RE = LEVEL === 'master' ? MASTER_OK_RE : BACHELOR_OK_RE;
+// Words that look like a degree token and are not one — "MS Office", "MS Excel"
+// — blanked before the level is read. The preset's (`notADegree`); the finance
+// one sets it because nearly every finance posting asks for MS Excel. The
+// hardware preset leaves it null so his screening is unchanged (measured
+// 2026-10-16: it would clear 7 of 20,000 stored rows for him, every one a
+// false level block — turning it on there is his call).
+const NOT_A_DEGREE = screen.notADegree ? new RegExp(screen.notADegree.source, screen.notADegree.flags.replace('g', '') + 'g') : null;
+/** Does `s` ask only for a degree above the one he will hold? */
+function aboveLevel(s) {
+  if (LEVEL === 'phd') return false;
+  const t = NOT_A_DEGREE ? String(s).replace(NOT_A_DEGREE, ' ') : s;
+  return (LEVEL === 'master' ? DOCTORATE_ONLY_RE : GRADUATE_ONLY_RE).test(t) && !LEVEL_OK_RE.test(t);
+}
+const ABOVE_LABEL = LEVEL === 'master' ? 'a doctorate' : 'a graduate degree';
+
 // "Master" as a noun in a job title — Master Production Control Planner,
 // Master Scheduler, Master Data Analyst. Not a degree level.
 const MASTER_NOUN_RE = /\bmaster\s+(?:production|scheduler?|schedul|data|planner?|plan|black belt|electrician|technician|craftsman|builder)/i;
@@ -163,40 +170,10 @@ function splitDisciplines(phrase) {
 // Experience:". The preferred bullet was read as the requirement and the job
 // left his deck. A line that only states what would be nice can never make a
 // posting unwinnable, whatever level or discipline it names.
-const PREFERRED_HEAD_RE = /\b(?:preferred|preferences|desired|desirable|bonus|nice[- ]to[- ]haves?|good[- ]to[- ]haves?|plus(?:es)?|extra credit|stand out|sets? you apart|even better|ideal(?:ly)?)\b/i;
-const REQUIRED_HEAD_RE = /\b(?:required|requirements?|minimum|basic|must[- ]haves?|qualifications|essential|what you(?:'|’)ll need|who you are|about you|what you bring|you have)\b/i;
+// Which heading a line sits under is read by requirements.mjs (sectionAt),
+// the same reader triage and prescreen use (F-724).
 const INLINE_PREF_RE = /\b(?:preferred|a (?:strong |big |definite )?plus|nice[- ]to[- ]have|bonus|desired|desirable|ideally|advantageous|an asset|not required|but not necessary)\b/i;
 const INLINE_REQ_RE = /\b(?:required|requirement|minimum|must)\b/i;
-const BULLET_LEAD_RE = /^\s*(?:[•*·|>–—-]|o\s)\s*/;
-
-/** Does the nearest heading above `index` open a preferred / nice-to-have section? */
-function underPreferredHeading(text, index) {
-  const before = text.slice(Math.max(0, index - 2500), index);
-  const lines = before.split(/\r?\n/);
-  lines.pop(); // the line the requirement itself is on
-  if (lines.length) {
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const raw = lines[i];
-      if (!raw.trim()) continue;
-      const bulleted = BULLET_LEAD_RE.test(raw);
-      const line = raw.replace(BULLET_LEAD_RE, '').trim();
-      if (!line || line.length > 70) continue;
-      const colon = /[:：]$/.test(line);
-      const words = line.split(/\s+/).length;
-      const heading = colon || (!bulleted && words <= 5 && !/[.,;]$/.test(line));
-      if (!heading) continue;
-      if (PREFERRED_HEAD_RE.test(line)) return true;
-      // Any other heading closes whatever section came before it.
-      if (REQUIRED_HEAD_RE.test(line) || colon) return false;
-    }
-    return false;
-  }
-  // Flattened body, no line breaks to read: the last "Label:" before it.
-  const LABEL_RE = /([A-Za-z][A-Za-z'’ /&-]{2,60})[:：]/g;
-  let last = null, m;
-  while ((m = LABEL_RE.exec(before)) !== null) last = m[1];
-  return !!last && PREFERRED_HEAD_RE.test(last);
-}
 
 function isPreference(text, index, sentence) {
   const s = String(sentence || '');
@@ -222,9 +199,9 @@ export function checkDegree(description, title = '') {
   // however well the discipline lines up, and Applied Materials publishes the
   // level right in the title: "Mechanical Engineer New College Grad Doctorate
   // Degree", "Mechanical Engineer Phd Early In Career".
-  if (head && GRADUATE_ONLY_RE.test(head) && !BACHELOR_OK_RE.test(head) && !MASTER_NOUN_RE.test(head)) {
+  if (head && aboveLevel(head) && !MASTER_NOUN_RE.test(head)) {
     return {
-      mismatch: true, reason: 'level', wanted: ["a graduate degree"],
+      mismatch: true, reason: 'level', wanted: [ABOVE_LABEL],
       quote: head.trim().slice(0, 240),
     };
   }
@@ -245,14 +222,14 @@ export function checkDegree(description, title = '') {
 
     // Graduate-only requirement, read from the sentence rather than the
     // captured phrase: "Master's degree in X" puts the level before "in".
-    if (GRADUATE_ONLY_RE.test(sentence) && !BACHELOR_OK_RE.test(sentence)) {
-      if (!levelHit) levelHit = { wanted: ['a graduate degree'], quote: sentence };
+    if (aboveLevel(sentence)) {
+      if (!levelHit) levelHit = { wanted: [ABOVE_LABEL], quote: sentence };
     }
 
     // The level check has to survive a discipline match. A "PhD in Robotics"
     // names a discipline that IS his, and returning "fine" on that basis
     // handed him a doctorate-only req — right subject, unreachable level.
-    const gradOnlyHere = GRADUATE_ONLY_RE.test(sentence) && !BACHELOR_OK_RE.test(sentence);
+    const gradOnlyHere = aboveLevel(sentence);
 
     if (GENERIC_RE.test(phrase.trim()) || GENERIC_CONTAINER_RE.test(phrase.trim())) {
       if (gradOnlyHere) continue;
@@ -294,7 +271,7 @@ export function checkDegree(description, title = '') {
   // Micron: "M.S. or Ph.D. in … * B.S. with 3+ years … will also be considered";
   // KLA: "Master's Level Degree and 0 years; Bachelor's Level Degree and 2 years".
   // Those routes are rarely phrased as "degree in X", so the whole body is read.
-  if (levelHit && !BACHELOR_OK_RE.test(text)) {
+  if (levelHit && !LEVEL_OK_RE.test(text)) {
     return { mismatch: true, reason: 'level', wanted: levelHit.wanted, quote: levelHit.quote };
   }
   return { mismatch: false, reason: null, wanted: [], quote: null };

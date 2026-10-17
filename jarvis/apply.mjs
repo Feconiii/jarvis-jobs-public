@@ -64,6 +64,8 @@ import { APPLY_PATH_RE, APPLY_TEXT_RE, bouncedToRoot, pageBlocker } from './appl
 import { resumePathFor, familyFor } from './resume-family.mjs';
 // The recruiter-facing filename: his name, the employer, the role (F-409).
 import { personFile } from './resume-for-job.mjs';
+import { person as candidate } from './targeting.mjs';
+import { syncToOneDrive } from './onedrive-resumes.mjs';
 // Reads a posting's title from its ATS API when the store has never seen it,
 // so a --url application still gets the resume family the role deserves.
 import { fetchPostingMeta } from '../liveness-api.mjs';
@@ -353,7 +355,7 @@ function syncWorkTitles(profile, titles) {
 function stageResumeForUpload(resumePath, job, profile, familyKey) {
   try {
     if (!existsSync(resumePath)) return resumePath;
-    const person = profile.identity?.preferred_full_name || 'Alex Rivera';
+    const person = profile.identity?.preferred_full_name || candidate.fullName;
     const safe = (s) => String(s || '').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
     const label = [safe(familyKey), safe(job.company), safe(job.title)].filter(Boolean).join(' - ');
 
@@ -363,6 +365,8 @@ function stageResumeForUpload(resumePath, job, profile, familyKey) {
     const auditPath = path.join(sentDir, `${person} Resume${label ? ' - ' + label : ''}.pdf`);
     copyFileSync(resumePath, auditPath);
     if (job.id) job.resume_sent = path.relative(ROOT, auditPath).replace(/\\/g, '/');
+    // …and to his phone, in its own OneDrive folder (never throws).
+    syncToOneDrive({ from: sentDir });
 
     // 2. Upload copy — named for the posting, so the ATS records "Alex Rivera -
     //    <Company> - <Role>.pdf" and he can see from the form's own chip which
@@ -394,7 +398,7 @@ function prepareResume(job, profile) {
   let resumePath = job.resume_path;
   let resumeNote = resumePath ? 'per-job' : '';
   if (!resumePath) {
-    const pick = resumePathFor(job, profile.identity?.preferred_full_name || 'Alex Rivera');
+    const pick = resumePathFor(job, profile.identity?.preferred_full_name || candidate.fullName);
     if (existsSync(pick.path)) { resumePath = pick.path; resumeNote = `${pick.family.key} — ${pick.family.label}`; }
   }
   // The family PDF has not been built yet (`node jarvis/build-resumes.mjs`)

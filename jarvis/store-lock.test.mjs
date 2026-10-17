@@ -134,6 +134,72 @@ console.log('\n🧪 the store reports its own version so caches cannot go stale'
   ok('a write changes the version token', S.storeVersion() !== before);
 }
 
+// WAITING FOR ANOTHER WRITER NEVER FREEZES THIS PROCESS (2026-09-26). The
+// dashboard froze for 10 s while one background write queued behind an
+// enrichment child: `BEGIN IMMEDIATE` waited out busy_timeout synchronously.
+// A second connection holds the lock for 1.2 s; meanwhile a 100 ms timer in
+// THIS process must keep ticking, and the write must still land after.
+console.log('\n🧪 a write queued behind another writer does not block the event loop');
+{
+  const { DatabaseSync } = await import('node:sqlite');
+  const other = new DatabaseSync(process.env.JARVIS_DB_PATH);
+  other.exec('BEGIN IMMEDIATE');
+  // The longest silence between ticks, not their count: a loop frozen for the
+  // whole busy_timeout still ticks plenty before and after the freeze.
+  let last = Date.now(), gap = 0;
+  const timer = setInterval(() => { const now = Date.now(); gap = Math.max(gap, now - last); last = now; }, 100);
+  setTimeout(() => { try { other.exec('COMMIT'); } catch { /* already done */ } }, 1200);
+  const began = Date.now();
+  await S.withStoreLock(() => S.upsertJobs([{ url: 'https://x/queued', title: 'Queued', company: 'Race' }]));
+  clearInterval(timer);
+  other.close();
+  const took = Date.now() - began;
+  ok('the write waited for the other writer, and no longer than it had to', took >= 1000 && took < 5000, `${took} ms`);
+  ok('…and the event loop kept running meanwhile', gap < 600, `longest silence ${gap} ms`);
+  ok('…and the write landed', !!S.findByUrl('https://x/queued'));
+}
+
+// TWO TRANSACTIONS AT ONCE IN ONE PROCESS (F-607). The server serves requests
+// concurrently over one connection; the second BEGIN used to land inside the
+// first's open transaction and die with "cannot start a transaction within a
+// transaction".
+console.log('\n🧪 two transactions at once in one process both land');
+{
+  const order = [];
+  const one = S.withStoreLock(async () => { order.push('one in'); await nap(150); S.upsertJobs([{ url: 'https://x/one', title: 'One', company: 'Race' }]); order.push('one out'); });
+  const two = S.withStoreLock(async () => { order.push('two in'); S.upsertJobs([{ url: 'https://x/two', title: 'Two', company: 'Race' }]); order.push('two out'); });
+  const res = await Promise.allSettled([one, two]);
+  ok('neither failed', res.every(r => r.status === 'fulfilled'), res.map(r => r.reason?.message).filter(Boolean).join(' | '));
+  ok('…they ran one after the other', order.join(',') === 'one in,one out,two in,two out', order.join(','));
+  ok('…and both wrote', !!S.findByUrl('https://x/one') && !!S.findByUrl('https://x/two'));
+  const nested = await S.withStoreLock(() => S.withStoreLock(() => 'inner'));
+  ok('a locked helper called inside a locked span joins it instead of waiting on itself', nested === 'inner');
+}
+
+// A PLAIN WRITE MADE WHILE A TRANSACTION IS BACKING OFF KEEPS ITS PATIENCE.
+// The zero timeout is for the BEGIN attempt only; left on the shared
+// connection, a status change pressed meanwhile failed at once as "locked".
+console.log('\n🧪 a plain write during another write\'s back-off waits, it does not fail');
+{
+  const holder = path.join(path.dirname(process.env.JARVIS_DB_PATH), 'holder.mjs');
+  writeFileSync(holder, [
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const d = new DatabaseSync(process.argv[2]);',
+    "d.exec('BEGIN IMMEDIATE');",
+    "console.log('held');",
+    "setTimeout(() => { d.exec('COMMIT'); d.close(); }, 1500);",
+  ].join('\n'));
+  const child = execFile(process.execPath, [holder, process.env.JARVIS_DB_PATH]);
+  await new Promise((r) => child.stdout.once('data', r));
+  const locked = S.withStoreLock(() => S.upsertJobs([{ url: 'https://x/backoff', title: 'Backoff', company: 'Race' }]));
+  await nap(200);   // the transaction above is now between attempts
+  let plain = 'ok';
+  try { S.upsertJobs([{ url: 'https://x/plain', title: 'Plain', company: 'Race' }]); } catch (err) { plain = err.message; }
+  await locked;
+  ok('the plain write waited for the other process and landed', plain === 'ok' && !!S.findByUrl('https://x/plain'), plain);
+  ok('…and the transaction landed too', !!S.findByUrl('https://x/backoff'));
+}
+
 const dir = path.dirname(process.env.JARVIS_DB_PATH);
 S.closeDb();
 rmSync(dir, { recursive: true, force: true });

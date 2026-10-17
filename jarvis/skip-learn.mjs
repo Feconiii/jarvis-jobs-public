@@ -29,12 +29,19 @@
 // the deck has to be passed in — without a baseline this would propose
 // blocking "manufacturing".
 
-/** Words that carry no signal about whether he wants a job. */
-const STOP = new Set([
+import { person, screen } from './targeting.mjs';
+
+/** Words that carry no signal about whether he wants a job (plus the preset's own, e.g. "analyst"). */
+const STOP = new Set([...(screen.skipStopWords || []),
   'the', 'and', 'or', 'of', 'for', 'to', 'in', 'at', 'on', 'with', 'a', 'an',
   'engineer', 'engineering', 'senior', 'sr', 'jr', 'junior', 'staff', 'lead',
   'i', 'ii', 'iii', 'iv', 'v', '1', '2', '3', 'new', 'grad', 'graduate',
   'college', 'entry', 'level', 'united', 'states', 'america', 'usa', 'us',
+  // THE NEW-GRAD SIGNAL WORDS (2026-10-16). "Block 'early' in the title" was
+  // proposed on the home page — four of his skips were Early Career FIELD
+  // roles — and would have removed "Early Career Mechanical Engineer". The
+  // words that say a posting is at his level never decide against it.
+  'early', 'career', 'associate', 'recent', 'graduates', 'trainee', 'rotational', 'program', 'university', 'campus', 'ncg', 'grads',
   'inc', 'llc', 'corp', 'ltd', 'co', 'group', 'team', 'department',
 ]);
 
@@ -156,12 +163,11 @@ export function learnFromSkips(skips = [], deck = [], opts = {}) {
   // enough to propose. Frequency is a proxy for a reason; here he gave the
   // reason. It still only ever proposes — same contract as everything else in
   // this panel.
-  const EMPLOYER_LEVEL = [
-    { re: /\b(defen[cs]e|itar|clearance|military|classified)\b/i,
-      why: 'you wrote that this is a defense employer' },
-    { re: /\b(no|not|does\s?n'?t|do\s?n'?t|wo\s?n'?t|cannot|can\s?n?'?t)\b[^.]{0,20}\bsponsor/i,
-      why: 'you wrote that they do not sponsor' },
-  ];
+  // The rules are the preset's (moved so a second user can run Jarvis). A
+  // sponsorship rule means nothing to someone who needs none, and a defense
+  // employer is only out by itself for someone who is not a U.S. person.
+  const EMPLOYER_LEVEL = (screen.employerLevel || []).filter((r) =>
+    (!r.sponsorshipOnly || person.needsSponsorship) && (!r.nonUsPersonOnly || !person.usPerson));
   const alreadyProposed = new Set(proposals.map(p => String(p.target).toLowerCase()));
   for (const s of S) {
     const note = String(s.note || '').trim();
@@ -206,12 +212,8 @@ export function learnFromSkips(skips = [], deck = [], opts = {}) {
   // launch or spaceflight has postings in his deck. Deliberately a short list
   // of primary-business launch/space firms: a large manufacturer with a space
   // division is NOT on it, because that would take real jobs with it.
-  const LAUNCH_EMPLOYERS = [
-    'spacex', 'rocket lab', 'blue origin', 'firefly aerospace', 'astra space',
-    'sierra space', 'stoke space', 'abl space systems', 'relativity space',
-    'astro mechanica', 'ursa major', 'varda space', 'impulse space',
-    'axiom space', 'vast space', 'phantom space', 'launcher',
-  ];
+  // The list is the preset's; the finance preset has none.
+  const LAUNCH_EMPLOYERS = screen.launchEmployers || [];
   const seenSpace = new Set(proposals.map(p => String(p.target).toLowerCase()));
   const deckByCo = new Map();
   for (const j of D) {
@@ -302,7 +304,7 @@ export function learnFromSkips(skips = [], deck = [], opts = {}) {
   // will stop feeding.
   const THEMES = [
     { key: 'degree-level', label: 'Wanted a Master\'s or PhD', re: /\b(phd|ph\.d|doctora(te|l)|master'?s?|grad(uate)? degree|degree level)\b/i, handledBy: 'Masters- and PhD-only postings are blocked now, read from the title or the body' },
-    { key: 'degree-field', label: 'Wanted a different degree', re: /\b(electrical|ee\b|computer science|chemical|wrong degree)\b/i, handledBy: 'postings that require a degree you do not have are blocked, with the sentence quoted' },
+    { key: 'degree-field', label: 'Wanted a different degree', re: screen.degreeFieldTheme, handledBy: 'postings that require a degree you do not have are blocked, with the sentence quoted' },
     { key: 'location', label: 'Not in the US', re: /\b(not in (the )?us|outside the us|abroad|overseas|wrong country|foreign)\b/i, handledBy: 'foreign postings are filtered out, including ones whose location does not parse' },
     { key: 'defense', label: 'Defense or clearance', re: /\b(defen[cs]e|itar|clearance|military|classified)\b/i, handledBy: 'defense titles are blocked outright' },
     { key: 'pay', label: 'Pay too low', re: /\b(pay|salary|comp|underpaid|low\b)/i, handledBy: 'a new-grad posting is judged on the bottom of its pay band, not the top' },

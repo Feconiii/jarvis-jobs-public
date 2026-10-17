@@ -243,6 +243,10 @@ CREATE TABLE IF NOT EXISTS scans (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT,
 -- the primary key. An index on a 106-character column cost 14 MB at 107k jobs
 -- to serve queries nothing makes.
 CREATE INDEX IF NOT EXISTS jobs_status     ON jobs(status);
+-- Prefix lookups by URL (LIKE 'https://…%') — what "is this page a posting?"
+-- asks on every tab. SQLite's LIKE ignores ASCII case, so only a NOCASE index
+-- serves it (2026-09-25: 250 ms per lookup → 1 ms).
+CREATE INDEX IF NOT EXISTS jobs_url_nocase ON jobs(url COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS jobs_company    ON jobs(company);
 CREATE INDEX IF NOT EXISTS jobs_band_score ON jobs(fit_band, fit_score DESC);
 CREATE INDEX IF NOT EXISTS jobs_score      ON jobs(fit_score DESC);
@@ -332,6 +336,13 @@ function addMissingColumns(db) {
     ['pick_note', 'TEXT'],
     // One posting, two URL spellings — see supersededBy above.
     ['superseded_by', 'TEXT'],
+    // HIS OWN NOTE on an application, typed into the tracker sheet
+    // (2026-09-24). Separate from pick_note, which is why it was curated.
+    ['user_note', 'TEXT'],
+    // How a LinkedIn posting takes an application: 'easy-apply' (LinkedIn's
+    // own form, no tailored resume — he does not apply that way, 2026-10-02)
+    // or 'offsite' (the employer's site). NULL: never asked. linkedin-route.mjs.
+    ['apply_route', 'TEXT'],
   ];
   for (const [name, decl] of ADDED) {
     if (have.has(name)) continue;
@@ -759,6 +770,8 @@ export function rowToListItem(row) {
   // reasoning is just a shorter list — the argument is the product.
   job.pickNote = row.pick_note || null;
   job.supersededBy = row.superseded_by || null;
+  job.userNote = row.user_note || null;
+  job.appliedAt = row.applied_at || null;
   job.salary = (row.salary_min != null || row.salary_max != null)
     ? { min: row.salary_min, max: row.salary_max, currency: row.salary_currency || 'USD', interval: row.salary_interval || 'year' }
     : null;
@@ -1080,7 +1093,10 @@ export function buildWhere(rawFilters = {}) {
   // permanently broken postings forever.
   if (f.needsRead === true) {
     where.push(`(${c('enrich_fails')} < 3 AND ${c('body_pruned')} = 0
-      AND (${c('has_desc')} = 0 OR (${c('source')} = 'greenhouse' AND ${c('team')} = '')))`);
+      AND (${c('has_desc')} = 0 OR (${c('source')} = 'greenhouse' AND ${c('team')} = '')
+        OR (${c('source')} = 'phenom' AND ${c('desc_len')} < 400 AND ${c('url')} LIKE '%myworkday%')))`);
+    // ↑ A Phenom teaser is not a description (F-673): the full posting is on
+    // the employer's Workday tenant, which enrich reads through `phenom`.
   }
   flag('body_pruned', f.pruned);
   cmp('fit_score', '>=', f.minScore);
@@ -1102,15 +1118,18 @@ export function buildWhere(rawFilters = {}) {
   // 'new', and the deck kept handing it back to him at the top.
   if (f.unseen === true) where.push(`${c('seen_at')} IS NULL`);
   if (f.unseen === false) where.push(`${c('seen_at')} IS NOT NULL`);
-  // Postings he has already been shown once. "Show me things I have not seen"
-  // is a different question from "show me things I have not decided": a card
-  // he read and moved past is still status 'new'.
-  if (f.unseen === true) where.push();
-  if (f.unseen === false) where.push();
+  // POSTINGS THE CURATOR ALREADY READ AND TURNED DOWN (2026-10-16): "theres so
+  // many high fit score in the library" — 919 of the 1,495 at fit 85+ carried
+  // a "Not curated — <why>" verdict and still sat at the top of the list.
+  if (f.hideTurnedDown === true) where.push(`(${c('pick_note')} IS NULL OR ${c('pick_note')} NOT LIKE 'Not curated%')`);
   flag('f_senior', f.senior);
   flag('f_hands_on', f.handsOn);
   flag('sponsors_h1b', f.sponsors);
-  if (f.prepared === true) where.push(`${c('applied_at')} IS NOT NULL`);
+  // Through the applied_at index by rowid (2026-09-25): written as a plain
+  // `IS NOT NULL`, the planner walked all 400,000 rows in fit order to find
+  // 183 — 1.1 s per call, on the server's thread, twice per mail sync. The
+  // statistics cannot fix it (ANALYZE still chose the score index).
+  if (f.prepared === true) where.push(`${c('rowid')} IN (SELECT rowid FROM jobs INDEXED BY jobs_applied_at WHERE applied_at IS NOT NULL)`);
   if (f.hasResume === true) where.push(`${c('resume_path')} IS NOT NULL AND ${c('resume_path')} != ''`);
   flag('deck', f.browsable);
   cmp('first_seen', '>=', f.since);
@@ -1142,6 +1161,9 @@ const SORTS = {
   new: 'first_seen DESC',
   posted: 'posted_at DESC',
   relevance: 'relevance DESC, fit_score DESC',
+  // What an unread backlog is read in: a posting written for new grads first,
+  // then by title relevance (F-672). Micron's 2027 titles score relevance 0.
+  unread: 'f_newgrad DESC, relevance DESC, fit_score DESC',
   company: 'company ASC, title ASC',
   salary: 'salary_max DESC',
   applied: 'applied_at DESC',

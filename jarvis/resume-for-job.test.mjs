@@ -189,7 +189,7 @@ test('THE MODEL MAY RESHAPE THE PAGE for one posting — inside the pool, under 
     plan: {
       roleType: 'automation',
       // Applied Materials is the employer here, so this title must be overruled.
-      titles: { amat: 'Robotics Engineer Intern', acme: 'Robotics Engineer Intern' },
+      titles: { amat: 'Robotics Automation Engineer Intern', acme: 'Process Improvement Intern' },
       experience: { amat: ['robodk', 'cobot-rack', 'amr', 'neuro-t', 'vision-fixture'], acme: ['robotic-line', 'docs'], makerspace: ['fabrication'], sae: ['coach'] },
       projects: ['robotic-arm'],
       coursework: ['System Dynamics and Control', 'Circuit Analysis', 'Python Programming', 'Machine Design', 'Mechanical Design'],
@@ -203,7 +203,7 @@ test('THE MODEL MAY RESHAPE THE PAGE for one posting — inside the pool, under 
   const amat = r.spec.experience.find((e) => e.orgKey === 'amat');
   assert.equal(amat.title, 'Manufacturing Engineer Intern', 'at Applied Materials itself only the official title, whatever was proposed');
   assert.equal(amat.group, 'Automation Technology Group');
-  assert.equal(r.spec.experience.find((e) => e.orgKey === 'acme').title, 'Robotics Engineer Intern', 'Acme Steel may match the job');
+  assert.equal(r.spec.experience.find((e) => e.orgKey === 'acme').title, 'Process Improvement Intern', 'Acme Steel may match the job');
   assert.deepEqual(amat.bullets.map((b) => b.provenanceKey), ['amat.robodk', 'amat.cobot-rack', 'amat.amr', 'amat.neuro-t', 'amat.vision-fixture']);
   assert.equal(r.spec.projects.length, 1);
   assert.equal(r.spec.skills[0].text, 'RoboDK, Universal Robots, Node-RED');
@@ -331,4 +331,21 @@ test('an over-full plan is CUT TO ONE PAGE at render time, never shrunk', async 
   const sidecar = JSON.parse(readFileSync(`${r.auditPath}.json`, 'utf-8'));
   assert.ok(sidecar.fit && typeof sidecar.fit.topGap === 'number', 'the audit record carries the measured fit');
   assert.ok(Array.isArray(sidecar.planNotes));
+});
+
+// ── his name for the file, per posting (2026-09-27) ─────────────────────
+// "company name is humanoid but the pdf resume says Thehumanoid that might rub
+// them wrong" — the panel's Rename saves a name the dashboard then serves.
+test('a renamed resume keeps his name, cleaned, for that posting only', async () => {
+  const { cleanResumeName, getResumeName, setResumeName } = await import('./resume-names.mjs');
+  const file = path.join(dir(), 'resume-names.json');
+  assert.equal(cleanResumeName('Alex Rivera - Humanoid - Mechanical Engineer'), 'Alex Rivera - Humanoid - Mechanical Engineer.pdf', 'one .pdf added');
+  assert.equal(cleanResumeName('Alex Rivera.pdf.pdf'), 'Alex Rivera.pdf', 'and never two');
+  assert.equal(cleanResumeName('a/b:c?.pdf'), 'a b c.pdf', 'no path characters reach the file name');
+  assert.equal(cleanResumeName('   '), '', 'empty means the default');
+  assert.equal(setResumeName('job1', 'Alex Rivera - Humanoid', { file }), 'Alex Rivera - Humanoid.pdf');
+  assert.equal(getResumeName('job1', { file }), 'Alex Rivera - Humanoid.pdf');
+  assert.equal(getResumeName('job2', { file }), '', 'another posting keeps its own name');
+  setResumeName('job1', '', { file });
+  assert.equal(getResumeName('job1', { file }), '', 'emptied: back to the default');
 });

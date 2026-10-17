@@ -19,11 +19,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   targetSpec, linkedinSearch, emailPattern, domainFrom, candidateEmail,
-  checkOutreach, writeOutreach, CHANNELS, PERSONAS,
+  checkOutreach, writeOutreach, buildOutreachPrompt, CHANNELS, PERSONAS, stripSelfTalk, experienceGap, portfolioUrl, displayTitle, postingLink,
 } from './outreach.mjs';
 import {
   contactId, addBusinessDays, canContact, saveContact, getContact, markSent,
-  markReplied, markDoNotContact, dueFollowUps, outreachStats, forJob,
+  markReplied, markDoNotContact, dueFollowUps, outreachStats, forJob, removeUnsent,
 } from './contacts.mjs';
 
 let pass = 0, fail = 0;
@@ -66,7 +66,7 @@ check('a person\'s name is not accepted as a reporting title', spec4.managerTitl
 
 console.log('🧪 outreach: the search is a link he clicks, not a robot');
 const url = linkedinSearch('Applied Materials', 'alumni');
-ok('the alumni search names his school', url.includes(encodeURIComponent('State University')));
+ok('the alumni search names his school', url.includes(encodeURIComponent('Lakeside University')));
 ok('…and it is an ordinary search URL', url.startsWith('https://www.linkedin.com/search/results/people/?keywords='));
 
 // ── 2. email, at the scale of one ───────────────────────────────────
@@ -78,8 +78,8 @@ check('role accounts teach nothing about the pattern',
   emailPattern(['accommodations_program@amat.com', 'talent.acquisition@kla.com', 'hrsupport_na@micron.com', 'jobs.accommodations@sandisk.com']),
   null);
 check('a person-shaped address does',
-  emailPattern(['careers@sunrun.com', 'danielle.levitan@sunrun.com']),
-  { pattern: 'first.last', domain: 'sunrun.com', from: 'danielle.levitan@sunrun.com' });
+  emailPattern(['careers@sunrun.com', 'robin.hale@sunrun.com']),
+  { pattern: 'first.last', domain: 'sunrun.com', from: 'robin.hale@sunrun.com' });
 check('a role account still proves the domain', domainFrom(['accommodations_program@amat.com']), 'amat.com');
 
 const inferred = candidateEmail('Dana Lee', { domain: 'sunrun.com', pattern: 'first.last' });
@@ -94,41 +94,185 @@ check('no domain, no address', candidateEmail('Dana Lee', {}), null);
 // ── 3. the message rules ────────────────────────────────────────────
 console.log('🧪 outreach: the three failures that cost the contact');
 
-const CV = 'Alex Rivera. State University, BS Mechanical Engineering May 2027. Applied Materials internship. CNC, SolidWorks, GD&T. Universal Robots UR10e cobot.';
+const CV = 'Alex Rivera. Lakeside University, BS Mechanical Engineering May 2027. Applied Materials internship. CNC, SolidWorks, GD&T. Universal Robots UR10e cobot.';
 const JD = 'Manufacturing Engineer I at Applied Materials, Austin TX. Equipment Engineering team. Process tooling and fixture design.';
-const opts = { channel: 'email', cvText: CV, jd: JD, job: JOB, contact: { name: 'Dana Lee', title: 'Equipment Engineer' } };
+const POSTING_URL = 'https://jobs.example.com/amat/12345';
+const PORTFOLIO = 'https://alexrivera.example';
+const APPLIED_JOB = { ...JOB, status: 'applied', url: POSTING_URL };
+const opts = { channel: 'email', cvText: CV, jd: JD, job: APPLIED_JOB, contact: { name: 'Dana Lee', title: 'Equipment Engineer' }, portfolio: PORTFOLIO };
 const problems = (t, o = opts) => checkOutreach(t, o).problems;
 const has = (t, re = /./, o = opts) => problems(t, o).some((p) => re.test(p));
 
-const GOOD = `Hi Dana, I am a mechanical engineering student at State University finishing in May 2027, and I spent last summer at Applied Materials working on process tooling. I saw the Manufacturing Engineer I opening on the Equipment Engineering team in Austin and wanted to ask someone who actually does the work rather than guess from the posting. How is the team split between sustaining work and new tool bring-up, and what do you look for in someone starting out? Happy to be pointed at anything public instead if that is easier. No worries if you are heads-down. Thanks, Alex`;
+// HIS FORMULA (2026-09-27): PERSON → ROLE → JOB LINK → MINI PITCH → WHY I CARE
+// → ASK (their opinion on his fit) → Portfolio / Resume: Attached.
+const BODY = `Hi Dana, I applied for the Manufacturing Engineer I role on the Equipment Engineering team in Austin, and I'm very interested in it.
+${POSTING_URL}
+I'm a senior mechanical engineering student at Lakeside graduating in May 2027. At Applied Materials I worked on process tooling and set up a Universal Robots UR10e cobot cell, which is close to the fixture design in the posting.
+That mix of tooling and automation is the direction I want to build toward. Do you think my background could be relevant to the team?`;
+const SIGN = `\n\nAlex\nPortfolio: ${PORTFOLIO}\nResume: Attached`;
+const mk = (body) => body + SIGN;
+const GOOD = mk(BODY);
 check('a good message passes clean', problems(GOOD), []);
 
+console.log('🧪 outreach: direct, as he asked — one ask, their opinion on his fit (2026-09-27)');
+ok('"how is the team split" is a filler question and fails', has(mk(BODY.replace('Do you think', 'How is the team split between sustaining and bring-up? Do you think')), /filler question/));
+ok('"curious how" fails', has(mk(BODY.replace('That mix', 'Curious how the group is set up. That mix')), /filler question/));
+ok('"what do you look for" fails', has(mk(BODY.replace('Do you think', 'What do you look for in someone starting out? Do you think')), /filler question/));
+ok('two questions fail: one ask', has(mk(`${BODY} Is the role still open?`), /questions; one ask/));
+ok('a message without the fit ask fails', has(mk(BODY.replace(/Do you think[^?]*\?/, 'Hope to hear from you.')), /does not ask/));
+ok('his ask as a statement passes: "letting me know if you think my background could be relevant"', !has(mk(BODY.replace(/Do you think[^?]*\?/, "If you have a chance, I'd really appreciate you taking a quick look at my resume and portfolio and letting me know if you think my background could be relevant to the team.")), /does not ask/));
+
+// HIS TEMPLATE, LOCKED (2026-10-04). Sent to Chris Bell at Tesla; he replied
+// the same evening and passed it to the MADE team's hiring manager. Every check
+// in this file must keep passing it, word for word.
+{
+  const TESLA_URL = 'https://www.tesla.com/careers/search/job/mechanical-design-engineer-automation-261105';
+  const CHRIS = `Hi Chris,
+
+I saw your post about the team at Gigafactory Nevada looking for engineers with mechanical design and automation equipment experience, and since you mentioned candidates could reach out directly, I wanted to introduce myself.
+
+I recently applied for the Mechanical Design Engineer, Automation role in your most recent posting:
+${TESLA_URL}
+
+I'm a senior Mechanical Engineering student at Lakeside graduating in May 2027. This past summer I worked with Applied Materials' Automation Technology Group on mechanical design, robotic automation, machine vision hardware, equipment testing, fabrication, and bringing designs from CAD into physical systems.
+
+The role stood out because the mix of custom automation equipment, mechanisms, robotics, fabrication, commissioning, and production troubleshooting is really close to the work I've enjoyed most. If you have a chance, I'd really appreciate you taking a quick look at my resume and portfolio and letting me know if you think my background could be relevant to the team.
+
+Portfolio: https://alexrivera.example
+Resume: Attached
+
+Thank you!
+Alex`;
+  const chrisOpts = {
+    channel: 'message',
+    cvText: 'Alex Rivera. Lakeside University, BS Mechanical Engineering, May 2027. Applied Materials, Automation Technology Group: mechanical design, robotic automation, machine vision hardware, equipment testing, fabrication, CAD.',
+    jd: 'Mechanical Design Engineer, Automation. Design custom automation equipment and mechanisms; robotics; fabrication; commissioning; production troubleshooting.',
+    job: { company: 'Tesla', title: 'Mechanical Design Engineer, Automation', status: 'applied', url: TESLA_URL },
+    contact: { name: 'Chris Bell' },
+    lead: { signal: { kind: 'invited', standing: 'fresh', ageDays: 5, quote: 'The team at Gigafactory Nevada is looking for engineers with mechanical design and automation equipment experience. Candidates can reach out directly.', url: 'https://x.test/chris', author: 'Chris Bell' } },
+    portfolio: PORTFOLIO,
+  };
+  check('his Tesla message, the one Chris answered, passes every check', checkOutreach(CHRIS, chrisOpts).problems, []);
+  // The role's title opens on a word `entitiesIn` drops (first position), and
+  // the posting body never repeats it: "innovation" failed (2026-10-04, Shreyash).
+  const titled = CHRIS.replace(/applied for the [^\n]+ role:/, 'applied for the Innovation and Design Engineer role:');
+  const titledOpts = { ...chrisOpts, job: { ...chrisOpts.job, title: 'Innovation and Design Engineer, Worldwide Design Engineering' } };
+  check('a word from the role\'s own title is not an invented name', checkOutreach(titled, titledOpts).problems.filter((p) => /innovation/i.test(p)), []);
+}
+
+// HIS REWRITE, LOCKED (2026-10-05). He rewrote the Devin draft because it
+// "read pretty bad": one piece of work told start to finish, the "why" as what
+// he enjoys, the ask about his application, "Resume attached." as a sentence.
+{
+  const AMZ_URL = 'https://www.amazon.jobs/en/jobs/10503216/robotics-systems-engineer-i-tech-deployment';
+  const DEVIN = `Hi Devin,
+
+I saw your post that you're hiring Systems Engineers for Technology Deployment within Amazon Robotics, and since you mentioned you'd love to connect, I wanted to introduce myself.
+
+I recently applied for the Robotics Systems Engineer I, Tech Deployment role:
+${AMZ_URL}
+
+I'm a senior Mechanical Engineering student at Lakeside graduating in May 2027. This past summer I worked with Applied Materials' Automation Technology Group, where I supported the deployment and validation of Autonomous Mobile Robots for cleanroom material handling, and developed and validated UR cobot motion in RoboDK while helping lay out and install the cell.
+
+The role stood out because seeing automation come to life at scale on a live floor is really close to the work I've enjoyed most. I'd really appreciate it if you could take a look at my application and see if I might be a good fit for the team.
+
+Portfolio: https://alexrivera.example
+Resume attached.
+
+Thank you!
+Alex`;
+  const devinOpts = {
+    channel: 'message',
+    cvText: 'Alex Rivera. Lakeside University, BS Mechanical Engineering, May 2027. Applied Materials, Automation Technology Group: supported deployment and validation of Autonomous Mobile Robots for cleanroom material handling; programmed and validated a UR collaborative robot in RoboDK and helped lay out and install it in the cell.',
+    jd: 'Robotics Systems Engineer I, Tech Deployment. Amazon Robotics Technology Deployment: deploy robotic systems at scale on live fulfillment floors.',
+    job: { company: 'Amazon', title: 'Robotics Systems Engineer I, Tech Deployment', status: 'applied', url: AMZ_URL },
+    contact: { name: 'Devin Shah' },
+    lead: { signal: { kind: 'invited', standing: 'fresh', ageDays: 10, quote: "We're hiring Systems Engineers for Technology Deployment within Amazon Robotics. I'd love to connect!", url: 'https://x.test/devin', author: 'Devin Shah' } },
+    portfolio: PORTFOLIO,
+  };
+  check('his rewrite to Devin passes every check', checkOutreach(DEVIN, devinOpts).problems, []);
+  const prompt = buildOutreachPrompt({ job: devinOpts.job, contact: { name: 'Dana Lee' }, channel: 'message', portfolio: PORTFOLIO });
+  ok('the prompt carries his rewrites as the style', /Hi Devin,/.test(prompt) && /Hi Priya,/.test(prompt) && /Resume attached\./.test(prompt) && !/taking a quick look at my resume and portfolio/.test(prompt));
+}
+ok('"pick your brain" is a phrase he bans', has(mk(BODY.replace('Do you think', 'I would love to pick your brain. Do you think')), /networking phrase/));
+ok('"15 minutes to chat" too', has(mk(BODY.replace('Do you think', 'Would you have 15 minutes to chat, and do you think')), /networking phrase/));
+ok('"stuck with me" is a reaction he never had, and fails', has(mk(BODY.replace('I applied', 'Your post on fixture design stuck with me. I applied')), /reaction he never had/, { ...opts, lead: { personal: { text: 'Wrote a post on fixture design', source_url: 'https://x.test/p' } } }));
+ok('"your LinkedIn shows" reads their profile back to them, and fails', has(mk(BODY.replace('I applied', 'Your LinkedIn shows you recruit engineers. I applied')), /profile back/));
+ok('flattery fails', has(mk(BODY.replace('I applied', 'Your team is impressive. I applied')), /flatter/));
+ok('"I applied" is refused when he has not', has(GOOD, /has not applied/, { ...opts, job: { ...APPLIED_JOB, status: 'queued' } }));
+ok('…and allowed when he has', !has(GOOD, /has not applied/));
+
+console.log('🧪 outreach: the tells the 2026-09-27 drafts leaned on');
+ok('"genuinely interested" fails', has(mk(BODY.replace("I'm very interested", "I'm genuinely interested")), /machine/));
+ok('"the kind of work I want to learn from" opener fails', has(mk(BODY.replace('I applied', 'Your move from HGST to manufacturing leadership is the kind of depth I want to learn from. I applied')), /machine/));
+ok('"I saw your recruiting focus" reads their profile back', has(mk(BODY.replace('I applied', 'I saw your recruiting focus is manufacturing talent. I applied')), /profile back/));
+ok('a title copied from a web address fails', has(mk(BODY.replace('Manufacturing Engineer I role', 'Mechanical Systems Engineer Ncg role')), /web address/));
+ok('calling a contract role an internship fails', has(mk(BODY.replace('Manufacturing Engineer I role', 'Manufacturing Engineer I internship')), /internship/));
+ok('…but his own Applied Materials internship is his to mention', !has(mk(BODY.replace('At Applied Materials I', 'During my internship at Applied Materials I')), /internship/));
+check('tracking parameters come off the posting link', [postingLink('https://jobs.ashbyhq.com/sunday/9ce1/application?utm_source=Simplify'), postingLink('https://boards.greenhouse.io/x/jobs/1?gh_jid=1&gh_src=abc'), postingLink('')],
+  ['https://jobs.ashbyhq.com/sunday/9ce1/application', 'https://boards.greenhouse.io/x/jobs/1?gh_jid=1', '']);
+check('a Workday link stored at the apply step goes out as the posting (Hyve, 2026-10-05)',
+  postingLink('https://synnex.wd5.myworkdayjobs.com/en-US/hyvecareers/job/Reno%2C-NV/Process-Engineer--New-College-Grad-_R56671/apply/autofillWithResume?source=LinkedIn'),
+  'https://synnex.wd5.myworkdayjobs.com/en-US/hyvecareers/job/Reno%2C-NV/Process-Engineer--New-College-Grad-_R56671');
+check('titles rebuilt from a web address read as the company writes them',
+  ['Mechanical Systems Engineer Ncg', 'Gas Systems Engineer O M Boise Idaho United States Of America', 'New College Grad Rda Engineer Aptd Boise Idaho United States Of America', 'Robotics Systems Engineer I, Tech Deployment'].map(displayTitle),
+  ['Mechanical Systems Engineer NCG', 'Gas Systems Engineer O&M', 'New College Grad RDA Engineer APTD', 'Robotics Systems Engineer I, Tech Deployment']);
+
+console.log('🧪 outreach: no friction — the job, the portfolio, the resume');
+ok('no posting link fails', has(GOOD.replace(`${POSTING_URL}\n`, ''), /direct link/));
+ok('no portfolio fails', has(GOOD.replace(`\nPortfolio: ${PORTFOLIO}`, ''), /portfolio/));
+ok('no "Resume attached." fails', has(GOOD.replace('\nResume: Attached', ''), /Resume attached/));
+ok('"Resume attached." as a sentence passes (his rewrites, 2026-10-05)', !has(GOOD.replace('Resume: Attached', 'Resume attached.'), /Resume attached/));
+ok('a connection note is exempt: it has no room', !has('Hi Dana, I applied for the Manufacturing Engineer I role. Do you think my Applied Materials background could be a fit for the team?', /direct link|portfolio|Resume attached/, { ...opts, channel: 'note' }));
+ok('the link\'s own digits are not a fabricated figure', !has(GOOD, /figure "12345"/));
+check('the experience gap is read from the posting', [experienceGap('Requires 2-6 years of relevant engineering experience.'), experienceGap('3+ years experience with SolidWorks'), experienceGap('0-2 years of experience'), experienceGap('')], ['2-6 years', '3+ years', '', '']);
+check('the portfolio comes from profile.yml', portfolioUrl('  portfolio_url: "alexrivera.example"'), 'https://alexrivera.example');
+
+console.log('🧪 outreach: something about them, only when it is theirs and current');
+const LEAD_FRESH = { signal: { kind: 'invited', standing: 'fresh', ageDays: 9, quote: 'My team is hiring manufacturing engineers in Austin, send me your resume', url: 'https://x.test/p', author: 'Dana Lee' }, personal: null };
+const WITH_POST = mk(BODY.replace('I applied', 'I saw your post about hiring manufacturing engineers in Austin, so I wanted to reach out. I applied'));
+ok('"I saw your post" passes when the research found their post', !has(WITH_POST, /post|shared history|reaction/, { ...opts, lead: LEAD_FRESH }));
+ok('…the same line with no research behind it fails', has(WITH_POST, /shared history|verify/));
+// A six-month-old post is HISTORY (2026-10-05): it may be named ("your post
+// about hiring…") but never as current — "is hiring" or "recent" fails.
+const STALE = { ...opts, lead: { signal: { ...LEAD_FRESH.signal, standing: 'stale', ageDays: 180 } } };
+ok('…a six-month-old post may be named as history', !has(WITH_POST, /post|shared history/, STALE));
+ok('…but never as the team hiring now', has(mk(BODY.replace('I applied', 'I saw your post that your team is hiring in Austin. I applied')), /hiring now; their post is 180 days old/, STALE));
+ok('…nor someone else\'s post they reposted', has(WITH_POST, /repost of Priya Nair/, { ...opts, lead: { signal: { ...LEAD_FRESH.signal, standing: 'reposted', author: 'Priya Nair' } } }));
+ok('a ten-week-old post may be named but never called recent', has(mk(BODY.replace('I applied', 'I saw your recent post about hiring in Austin. I applied')), /calls their post recent/, { ...opts, lead: { signal: { ...LEAD_FRESH.signal, standing: 'weak', ageDays: 70 } } }));
+const ALUM = mk(BODY.replace('I applied', "I noticed you're also a Lakeside alum, so I figured it was worth reaching out directly. I applied"));
+ok('"you\'re also a Lakeside alum" fails when nothing found says so', has(ALUM, /Lakeside, but nothing found/, { ...opts, lead: { personal: { text: 'Leads fixture design for the etch group', source_url: 'https://x.test/p' } } }));
+ok('…and passes when it is theirs', !has(ALUM, /Lakeside|shared history/, { ...opts, lead: { personal: { text: 'BS Mechanical Engineering, Lakeside University, 2016', source_url: 'https://x.test/p' } } }));
+const LEAD_TALK = { personal: { text: 'Presented a talk on wafer handler calibration at SEMICON West 2026', source_url: 'https://x.test/talk' } };
+ok('a sourced detail about them may be named', !has(mk(BODY.replace('I applied', 'I came across your talk on wafer handler calibration at SEMICON West and wanted to reach out. I applied')), /SEMICON|shared history/, { ...opts, lead: LEAD_TALK }));
+ok('asking a stranger to refer him fails', has(mk(BODY.replace('Do you think', 'Could you refer me, and do you think')), /referral/));
+ok('…but not someone whose own post offered referrals', !has(mk(BODY.replace('Do you think', 'If it looks like a fit, could you refer me, and do you think')), /referral/, { ...opts, lead: { signal: { ...LEAD_FRESH.signal, quote: 'DM me, happy to refer strong candidates' } } }));
+
 // THE BACKDOOR APPLICATION.
-ok('asking for a referral fails', has('Hi Dana, could you refer me for the Manufacturing Engineer role? ' + GOOD, /referral|backdoor/i));
-ok('"pass my resume along" is the same ask in other words', has(GOOD + ' Could you pass my resume along to the hiring manager?', /referral|backdoor/i));
-ok('…but asking how the team works does not', !has(GOOD, /referral|backdoor/i));
+ok('"pass my resume along" is a referral ask in other words', has(mk(BODY.replace('Do you think', 'Could you pass my resume along to the hiring manager, and do you think')), /referral|backdoor/i));
+ok('…but asking their opinion on his fit is not', !has(GOOD, /referral|backdoor/i));
 
 // THE VISA.
-ok('naming sponsorship fails', has(GOOD + ' I will need visa sponsorship after graduation.', /visa|sponsorship/i));
-ok('naming OPT fails', has(GOOD + ' I am on OPT.', /visa|sponsorship/i));
+ok('naming sponsorship fails', has(mk(BODY.replace('That mix', 'I will need visa sponsorship after graduation. That mix')), /visa|sponsorship/i));
+ok('naming OPT fails', has(mk(BODY.replace('That mix', 'I am on OPT. That mix')), /visa|sponsorship/i));
 ok('…and a clean message says nothing about it', !has(GOOD, /visa|sponsorship/i));
 
 // INVENTED RAPPORT — the one that cannot be walked back.
-ok('claiming to have read their article fails', has('Hi Dana, I really loved your post on tool automation. ' + GOOD, /shared history|verify/i));
-ok('claiming to have met them fails', has('Hi Dana, we met at SEMICON last year. ' + GOOD, /shared history|verify/i));
+ok('claiming to have read their article fails', has(mk(BODY.replace('I applied', 'I really loved your post on tool automation. I applied')), /shared history|verify|reaction/i));
+ok('claiming to have met them fails', has(mk(BODY.replace('I applied', 'We met at SEMICON last year. I applied')), /shared history|verify/i));
 
 console.log('🧪 outreach: only what is in cv.md or the posting');
 ok('a company he never worked at is caught', has(GOOD.replace('Applied Materials', 'Intel'), /intel/i));
-ok('an invented figure is caught', has(GOOD + ' I cut cycle time by 43 percent.', /43/));
+ok('an invented figure is caught', has(mk(BODY.replace('That mix', 'I cut cycle time by 43 percent. That mix')), /43/));
 ok('…but the posting\'s own words are fine', !has(GOOD, /Equipment Engineering/));
 
 console.log('🧪 outreach: length is the channel\'s, not a preference');
-const NOTE = 'Hi Dana, mechanical engineering student at State University, graduating May 2027, interned at Applied Materials on process tooling. Saw the Manufacturing Engineer opening on your team and would love to ask how the group is set up. No worries either way.';
+const NOTE = 'Hi Dana, I applied for the Manufacturing Engineer I role. Do you think my Applied Materials background could be a fit for the team?';
 check('a note that fits passes', checkOutreach(NOTE, { ...opts, channel: 'note' }).problems, []);
 ok('a note over the character cap fails', checkOutreach(GOOD + GOOD, { ...opts, channel: 'note' }).problems.some((p) => /capped at/.test(p)));
-ok('an email under the reply band fails', has('Hi Dana, saw the role, would love to chat. Thanks, Alex'));
-ok('a bullet list fails', has(GOOD + '\n- one\n- two'));
-ok('an em dash fails', has(GOOD.replace('and wanted', '— wanted'), /em dash/));
+ok('an email under the reply band fails', has(mk(`Hi Dana, I applied.\n${POSTING_URL}\nDo you think I could fit?`), /too short/));
+ok('a bullet list fails', has(mk(`${BODY}\n- one\n- two`)));
+ok('an em dash fails', has(GOOD.replace(', which is close', ' — which is close'), /em dash/));
 
 console.log('🧪 outreach: the draft never leaves, even when writing is off');
 const off = process.env.JARVIS_TAILOR;
@@ -168,10 +312,13 @@ const c1 = saveContact({ job_id: 'j1', company: 'Applied Materials', name: 'Dana
 check('a draft is recorded as drafted', c1.status, 'drafted');
 check('…and is found for its job', forJob('j1', D).length, 1);
 
-// ONE PERSON PER COMPANY PER ROLE.
-const second = canContact(null, forJob('j1', D), { jobId: 'j1' });
-check('a second person for the same role is refused', second.ok, false);
-ok('…and the refusal names who is already in flight', /Dana Lee/.test(second.why), second.why);
+// TWO PEOPLE PER COMPANY PER ROLE (was one; his call 2026-10-05 — Riley and
+// Devin each invited contact for the same team). The cap still stands.
+check('a second person for the same role is allowed', canContact(null, forJob('j1', D), { jobId: 'j1' }).ok, true);
+saveContact({ job_id: 'j1', company: 'Applied Materials', name: 'Sam Roe', persona: 'team', channel: 'email', draft: GOOD }, D);
+const third = canContact(null, forJob('j1', D), { jobId: 'j1' });
+check('a third person for the same role is refused', third.ok, false);
+ok('…and the refusal names who is already in flight', /Dana Lee/.test(third.why), third.why);
 
 // A DIFFERENT role at the same company is fine — it is a different conversation.
 check('a different role at the same company is allowed', canContact(null, forJob('j1', D), { jobId: 'j2' }).ok, true);
@@ -211,15 +358,32 @@ check('do-not-contact is set', dnc.do_not_contact, 1);
 check('…and it refuses before every other rule', canContact(dnc, []).ok, false);
 saveContact({ id: 'zeta:samrivers', status: 'drafted', do_not_contact: 0 }, D);
 check('…AND A LATER WRITE CANNOT CLEAR IT', getContact('zeta:samrivers', D).do_not_contact, 1);
+check('…nor can a switch take them off the ledger', removeUnsent('zeta:samrivers', D), null);
 
 const stats = outreachStats(D);
 check('the reply rate is a fraction, not a percentage', stats.rate, '1/1');
 check('…counted per persona for the learning loop', stats.byPersona.team, { sent: 1, replied: 1 });
 
+// A BETTER LEAD TAKES THE SLOT only from someone he has not written to (2026-09-27).
+saveContact({ job_id: 'j4', company: 'Eta', name: 'Old Pick' }, D);
+check('an unsent person can be switched out', removeUnsent('eta:oldpick', D)?.name, 'Old Pick');
+check('…and is gone from the role', forJob('j4', D).length, 0);
+saveContact({ job_id: 'j4', company: 'Eta', name: 'Wrote To' }, D);
+markSent('eta:wroteto', D);
+check('someone he has written to stays', removeUnsent('eta:wroteto', D), null);
+
 // Windows holds the SQLite file until the process exits, so the directory may
 // refuse to go. It is a temp directory; it can wait (store-db.test.mjs does the
 // same).
 try { rmSync(dir, { recursive: true, force: true }); } catch { /* tmp, it can wait */ }
+
+// THE WRITER'S BOOKKEEPING IS NOT HIS MESSAGE (2026-09-26): the retry answered
+// with its own counts and rule check before the note, and that was saved.
+check('a word/character count and a rule check before the note are dropped',
+  stripSelfTalk('40 words, 274 characters — within both bounds. Checked against the rules: no referral ask, no visa mention, one plain ask. Mechanical engineering student at Lakeside. How does the team split subassembly ownership?'),
+  'Mechanical engineering student at Lakeside. How does the team split subassembly ownership?');
+check('a count on its own trailing line is dropped', stripSelfTalk('Hi Sam, I built a cobot cell. How is the role split?\n(212 characters)'), 'Hi Sam, I built a cobot cell. How is the role split?');
+check('a clean note is left exactly as written', stripSelfTalk('Hi Morgan, I\'m Alex. I built a UR cobot cell. How is the role split?'), 'Hi Morgan, I\'m Alex. I built a UR cobot cell. How is the role split?');
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -27,8 +27,8 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { ALL_FAMILIES, familyByKey } from './resume-family.mjs';
-import { buildSpec, buildVariantSpec, VARIANTS, loadPool, verifyPoolAgainstCv, contactIsUnresolved, PLANS } from './resume-variants.mjs';
+import { ALL_FAMILIES, familyByKey, resumeFileName } from './resume-family.mjs';
+import { buildVariantSpec, VARIANTS, loadPool, verifyPoolAgainstCv, contactIsUnresolved, planFor } from './resume-variants.mjs';
 import { polish } from './resume-polish.mjs';
 import { qaReport } from './resume-qa.mjs';
 
@@ -109,7 +109,7 @@ export async function buildAll({ rasterDpi = 200, families = ALL_FAMILIES.map(f 
       // is filled with evidence rather than left with a 0.7in gap at the foot.
       // Breadth has already spent the reserve, so handing it the same list
       // again would print a bullet twice.
-      const reserve = variant.key === 'breadth' ? [] : [...(PLANS[family.key]?.reserve || [])];
+      const reserve = variant.key === 'breadth' ? [] : [...(planFor(family.key, pool)?.reserve || [])];
       const polished = await polish(spec, { pdfPath, pool, reserve, tailor: null, dpi: rasterDpi, tailored: null });
       fitted = polished.spec; fit = polished.fit; qa = polished;
       if (fitted !== spec) writeFileSync(specPath, `${JSON.stringify(fitted, null, 2)}\n`, 'utf-8');
@@ -171,7 +171,7 @@ async function main() {
       console.log(`    → ${path.relative(ROOT, r.specPath).replace(/\\/g, '/')} (spec only)`);
     }
   }
-  console.log(`\n  Every file is named "Alex Rivera Resume.pdf" on purpose — the FOLDER is the variant.`);
+  console.log(`\n  Every file is named "${resumeFileName(results[0]?.spec?.name || undefined)}" on purpose — the FOLDER is the variant.`);
   console.log(`  Apply-time routing: jarvis/resume-family.mjs · content plans: jarvis/resume-variants.mjs\n`);
 
   if (results.some(r => r.fit?.overflow || (r.qa && !r.qa.checklist.ok))) process.exit(1);

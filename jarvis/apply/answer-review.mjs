@@ -28,13 +28,14 @@
  * a result or a responsibility that sounds plausible and is not in cv.md.
  */
 import { CV_BUDGET } from '../cover-letter.mjs';
+import { person } from '../targeting.mjs';
 
 export const REVIEW_QUESTIONS = [
   [1, 'Could this answer have been written for fifty other applicants?', 'yes'],
   [2, 'Could it be sent to a different company with only the company name changed?', 'yes'],
   [3, 'Is it merely his resume bullets restated as sentences?', 'yes'],
   [4, 'Does it fail to explain why the evidence matters?', 'yes'],
-  [5, 'Would a reader finish it unsure what Alex personally did?', 'yes'],
+  [5, `Would a reader finish it unsure what ${person.firstName} personally did?`, 'yes'],
   [6, 'Is there no clear reason this evidence is relevant to this exact role?', 'yes'],
   [7, 'Does it use any detail cv.md does not support?', 'yes'],
 ];

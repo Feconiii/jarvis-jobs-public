@@ -482,7 +482,9 @@ test('a heart moves the row from the Inbox to Tracking on the Applications board
   // else was touching the database — a sweep on the live dashboard is enough.
   // A sleep that is usually long enough is a test that fails for reasons that
   // have nothing to do with the thing it is testing.
-  await page.evaluate(() => document.querySelector('#view button[data-view="applications"]').click());
+  // THE BOARD, asked for: the sheet is the default since 2026-09-24 (5d9798a),
+  // and this test is about the board's columns.
+  await page.evaluate(() => { try { localStorage.setItem('jarvis-apps-view', 'board'); } catch {} document.querySelector('#view button[data-view="applications"]').click(); });
   await page.waitForFunction(
     () => document.querySelectorAll('#board .col h3').length > 0 || document.getElementById('boardempty')?.style.display === '',
     null,
@@ -738,7 +740,8 @@ test('a prepared application says WHY it stopped', () => {
   // "the page refused to advance and you must finish it by hand".
   const src = readFileSync(path.join(HERE, 'serve.mjs'), 'utf-8');
   assert.match(src, /stoppedBecause: String\((?:goneNote \|\| )?body\.stoppedBecause/, 'the server records it');
-  assert.match(src, /stoppedBecause: j\.apply\.stoppedBecause/, 'and hands it to the page');
+  // (j.apply || {}) since 2026-10-16: one prepared record had no fill data and the whole endpoint threw.
+  assert.match(src, /stoppedBecause: (?:j\.apply|\(j\.apply \|\| \{\}\))\.stoppedBecause/, 'and hands it to the page');
 
   const ui = readFileSync(path.join(HERE, 'dashboard.html'), 'utf-8');
   assert.match(ui, /if \(r\.stoppedBecause\)\{/, 'the page renders it');
@@ -770,14 +773,17 @@ test('the header agrees with the list it opens, and with the board', async () =>
   }));
   assert.equal(inbox.counted, inbox.total, `the header says ${inbox.counted}, the inbox holds ${inbox.total}`);
 
-  await page.evaluate(() => document.querySelector('#view button[data-view="applications"]').click());
+  // The board, not the default sheet (5d9798a): this compares its column counts.
+  await page.evaluate(() => { try { localStorage.setItem('jarvis-apps-view', 'board'); } catch {} document.querySelector('#view button[data-view="applications"]').click(); });
   await page.waitForFunction(() => document.querySelectorAll('#board .col h3 b').length > 0, null, { timeout: 30000 });
   const board = await page.evaluate(() => ({
     tracking: Number((document.getElementById('counts').innerText.match(/([\d,]+)\s+tracking/) || [])[1]?.replace(/,/g, '') ?? -1),
     applied: Number((document.getElementById('counts').innerText.match(/([\d,]+)\s+applied/) || [])[1]?.replace(/,/g, '') ?? -1),
     cols: [...document.querySelectorAll('#board .col h3 b')].map((b) => Number(b.textContent)),
+    folded: S.closedTrackingFolded || 0,
   }));
-  assert.equal(board.cols[0], board.tracking, `the board draws ${board.cols[0]} tracked, the header says ${board.tracking}`);
+  // Closed postings he only hearted are folded behind a chip (F-743), still counted.
+  assert.equal(board.cols[0] + board.folded, board.tracking, `the board draws ${board.cols[0]} tracked + ${board.folded} folded, the header says ${board.tracking}`);
   assert.equal(board.cols[1], board.applied, `the board draws ${board.cols[1]} applied, the header says ${board.applied}`);
 });
 
@@ -863,4 +869,25 @@ test('a finished reading batch does not reload the list while a hide box is open
   });
   assert.equal(kept.withBox, 0, 'not while the hide box is open');
   if (!kept.onInbox) assert.equal(kept.after, 1, 'and it still refreshes other views when he is not in the middle of something');
+});
+
+/**
+ * THE TRACKER IS A SPREADSHEET (2026-09-24: "change application tracker to an
+ * excel sheet kinda format"). Sheet by default, the board one click away.
+ */
+test('the Applications page opens as a sheet with sortable columns and an Excel download', async () => {
+  await page.evaluate(() => { try { localStorage.setItem('jarvis-apps-view', 'sheet'); } catch {} });
+  await page.evaluate(() => document.querySelector('#view button[data-view="applications"]')?.click());
+  await page.waitForFunction(() => !!document.querySelector('table.sheet'), null, { timeout: 30000 });
+  const got = await page.evaluate(() => ({
+    head: [...document.querySelectorAll('table.sheet th')].map((t) => t.textContent.replace(/[▲▼]/g, '').trim()),
+    download: document.querySelector('#appsbar a')?.getAttribute('href'),
+    toggle: [...document.querySelectorAll('#appsbar button')].map((b) => b.textContent.trim()),
+  }));
+  assert.deepEqual(got.head.slice(0, 4), ['Company', 'Role', 'Location', 'Status']);
+  assert.ok(got.head.includes('Your notes'), 'his notes are a column');
+  assert.equal(got.download, '/api/applications.csv');
+  assert.ok(got.toggle.some((t) => /Board/.test(t)), 'the board is one click away');
+  const csv = await page.evaluate(async () => (await fetch('/api/applications.csv')).text());
+  assert.match(csv.split(/\r?\n/)[0], /Company,Role,Location,Status,Applied/);
 });

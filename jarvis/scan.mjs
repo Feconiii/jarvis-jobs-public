@@ -30,6 +30,7 @@ import yaml from 'js-yaml';
 
 import { makeHttpCtx } from '../providers/_http.mjs';
 import { upsertJobs, recordScan, withStoreLock, DB_PATH } from './store.mjs';
+import { markScanRunning } from './scan-pid.mjs';
 import { triage } from './triage.mjs';
 import { htmlToText } from './text.mjs';
 
@@ -317,6 +318,8 @@ async function main() {
   };
   const concurrency = numArg('--concurrency', DEFAULT_CONCURRENCY);
   const perHost = numArg('--per-host', DEFAULT_PER_HOST);
+  // So a restarted dashboard does not start a second scan beside this one (F-597).
+  if (!dryRun) markScanRunning();
 
   const providers = await loadProviders(PROVIDERS_DIR);
   if (providers.size === 0) { console.error('No providers loaded.'); process.exit(1); }
@@ -365,7 +368,14 @@ async function main() {
   // Overridable so the multi-chunk path can actually be exercised: at the real
   // threshold most providers flush exactly once, which tests nothing about the
   // buffer swap or the running totals.
-  const FLUSH_EVERY = Number(process.env.JARVIS_SCAN_FLUSH_EVERY) || 20_000;
+  //
+  // 5,000, NOT 20,000 (F-597). Every chunk holds the store's write lock, and a
+  // write from the dashboard waits 30 seconds (busy_timeout) before it fails.
+  // Measured 2026-09-25 on a live scan: one 20,000-posting chunk held the lock
+  // for 52 seconds, so a status change, a note or an Outreach press made in
+  // that window froze the page for 30 seconds and then said "database is
+  // locked". A quarter of the chunk is about 13 seconds.
+  const FLUSH_EVERY = Number(process.env.JARVIS_SCAN_FLUSH_EVERY) || 5_000;
   const withHost = makeHostLimiter(perHost);
 
   const perCompany = new Array(ordered.length);
@@ -462,6 +472,14 @@ async function main() {
       console.log(`    • ${c.company} — ${c.note}`);
     }
   }
+  // WHAT THIS SCAN COULD NOT SEE (2026-10-03). A scan reads every board it
+  // knows about, so it always looks complete; the ledger knows the employers
+  // it does not, and says how many.
+  try {
+    const u = await import('./universe.mjs');
+    const db = u.openUniverse();
+    try { u.sync(db); console.log(`\n  ${u.coverageLine(u.coverage(db))}`); } finally { db.close(); }
+  } catch { /* no ledger yet: nothing to say */ }
 }
 
 function STOREHINT() {

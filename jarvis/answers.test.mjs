@@ -54,7 +54,10 @@ const P = {
 let pass = 0, fail = 0;
 const is = (label, expected, note = '') => {
   const r = resolveLabel(label, P);
-  const got = r.kind === 'answer' ? r.value : r.kind;
+  // A rule may offer alternatives for a menu; its FIRST is what a free-text box
+  // gets, so that is what is compared here (2026-09-24: country, discipline,
+  // graduation date gained menu spellings after their first).
+  const got = r.kind === 'answer' ? (Array.isArray(r.value) && typeof expected === 'string' ? r.value[0] : r.value) : r.kind;
   if (got === expected) { pass++; return; }
   fail++;
   console.log(`✗ ${note || label.slice(0, 60)}\n    expected ${JSON.stringify(expected)} got ${JSON.stringify(got)}`);
@@ -96,8 +99,8 @@ is('What was your major?', 'Mechanical Engineering', 'a real "major" question st
 is('Field of Study', 'Mechanical Engineering');
 
 // ── wording variants seen across vendors ────────────────────────────
-is('Where did you hear about Hadrian?', 'Job Board', 'Ashby says "Where", not "How"');
-is('How did you find out about this opportunity?', 'Job Board');
+is('Where did you hear about Hadrian?', 'LinkedIn', 'Ashby says "Where", not "How"');
+is('How did you find out about this opportunity?', 'LinkedIn');
 is('Are you a former ASML employee or contractor?', 'No', 'company name sits between the words');
 is('How many years of relevant professional experience do you have related to this position?', '2 years');
 is('Please select your sex:', 'Male', 'Workday asks sex, not gender');
@@ -226,7 +229,11 @@ is("Are you able to work in the US without sponsorship now or in the future?", "
 is("Can you work without requiring sponsorship?", "No");  // F-335: derived — he requires sponsorship
 // ...while every unnegated form still answers.
 is("Are you legally authorized to work in the United States?", "Yes");
-is("Do you have the unrestricted right to work in the United States?", "Yes");
+// UNRESTRICTED is a condition he does not meet (2026-09-24): on F-1 his right
+// to work runs through OPT and then H-1B, and CLAUDE.md names "unrestricted
+// authorization demanded up front" as the one thing he lacks. Derived from his
+// sponsorship answer, like the "without sponsorship" forms above.
+is("Do you have the unrestricted right to work in the United States?", "No");
 is("Will you now or in the future require sponsorship for employment visa status?", "Yes");
 is("Will you require employer support to obtain or maintain authorization to work?", "Yes");
 
@@ -296,7 +303,7 @@ is('U.S. Export Control Requirements - Are you a citizen, national, or resident 
 is('Are you a U.S. person as defined by ITAR?', 'No', 'and a real US-person question still routes there');
 is('Are you a citizen of Cuba, Iran, North Korea or Syria?', 'No');
 is('How did you first hear about this job? Please list the site, event, or person that referred you.',
-  'Job Board', 'an adverb between "you" and "hear" must not break the match');
+  'LinkedIn', 'an adverb between "you" and "hear" must not break the match');
 
 
 // -- a question that asks him to EXPLAIN is not asking for a number --
@@ -398,9 +405,9 @@ is('Are you authorized to work in the United States?',
 //
 // Seven questions, four of them wrong or blank on a live Workday form he was
 // looking at. The worst was not a blank: "Are you in school?" — a Yes/No
-// dropdown — came back **"State University"**, because the school-NAME rule
+// dropdown — came back **"Lakeside University"**, because the school-NAME rule
 // matches any label with "school" in it and sits above the campus rules. Same
-// shape as the `opt` and bare `/major/` bugs already recorded in this file.
+// shape as the `\bopt\b` and bare `/major/` bugs already recorded in this file.
 is('Are you in school?', 'Yes', 'a question ABOUT school is not the name of his school');
 is('Are you currently a student?', 'Yes');
 is('Which best describes your status?', "I'm in my final year of school",
@@ -429,8 +436,15 @@ is('Personal Website', 'https://example-portfolio.test');
 is('Link to your portfolio', 'https://example-portfolio.test');
 // The TYPE dropdown asks what KIND of link it is, not for the address — and it
 // contains "profile link", so the rule above would have claimed it.
-is('Profile Link Type', 'Portfolio', 'the type dropdown gets a type, not a URL');
-is('Type of profile', 'Portfolio');
+// A type, never a URL — and "Other" ahead of "Portfolio", which is what he
+// picked on Tesla's [Portfolio, LinkedIn, Indeed, Other] (2026-09-24).
+is('Profile Link Type', 'Personal Website', 'the type dropdown gets a type, not a URL');
+is('Type of profile', 'Personal Website');
+{
+  const r = resolveLabel('Profile Link Type', P);
+  if (Array.isArray(r.value) && r.value.indexOf('Other') >= 0 && r.value.indexOf('Other') < r.value.indexOf('Portfolio')) pass++;
+  else { fail++; console.log('✗ Other must come before Portfolio: ' + JSON.stringify(r.value)); }
+}
 // LinkedIn keeps its own field: it is more specific and sits above.
 is('LinkedIn Profile', 'https://linkedin.com/in/test');
 is('LinkedIn Profile URL', 'https://linkedin.com/in/test');
@@ -518,9 +532,11 @@ is('Be notified about future openings', 'Yes');
 // HE HAS NO GITHUB, so the box that asks for one gets the portfolio: the question
 // is "where can we see your work". `github: ""` alone read as "your profile
 // leaves this blank" and sent an answerable field to the ledger.
-is('GitHub', 'https://example-portfolio.test');
-is('GitHub URL', 'https://example-portfolio.test');
-is('Link to your repository', 'https://example-portfolio.test');
+// …SUPERSEDED 2026-09-24: on Exowatt he cleared alexrivera.example out of
+// "GitHub URL" by hand. The box stays empty, as a deliberate blank.
+is('GitHub', 'blank');
+is('GitHub URL', 'blank');
+is('Link to your repository', 'blank');
 
 // A REQUEST FOR LINKS, PLURAL, GETS BOTH — and a single-link field still gets
 // exactly one. The first version of this rule failed the second half, matching
@@ -573,6 +589,93 @@ is('Previous Title', 'unknown');
   check('Zip Code', '12345');
 }
 
+// Read back from every answer he changed by hand, 2026-09-24.
+{
+  const Q = { ...P, identity: { ...P.identity, preferred_full_name: 'Ada Byron' },
+    education: { ...P.education, location: 'Springfield, Washington' },
+    answers: { ...P.answers, willing_onsite: 'Yes' } };
+  for (const [label, want] of [
+    ['Region', 'Washington'],                                                     // Viavi Workday address
+    ['School location', 'Springfield, Washington'],                                   // SmartRecruiters education
+    ['Can you work from our San Francisco office 5 days a week?', 'Yes'],         // Nudge
+    ['Do you have a portfolio showcasing relevant projects or work that you can provide as part of your application?', 'Yes'], // Lexington
+    ['Name', 'Ada Byron'],                                                        // Radiant: what he goes by
+    ['Legal Name', 'Augusta Ada Byron'],
+    ['Legal Name — I have a preferred name', 'Yes'],                              // KLA / Wolfspeed Workday
+    ['Where did you hear about us? (e.g., LinkedIn, job board, referral)', 'LinkedIn'], // Nudge: the how-heard answer, not his URL
+    ['This position requires the lawful ability to access technical data, information, and areas controlled by United States export control laws and regulations. In order for Wolfspeed, Inc. and its subsidiaries to comply with U.S. Department of Commerce Export Administration Regulations, you will need to provide documentation confirming your nationality if an offer of employment is extended', 'Yes'],
+    ['California Applicants only:I understand the Company may obtain, without using the services of a third party investigative consumer reporting agency, public records', 'Not applicable'],
+  ]) {
+    const r = resolveLabel(label, Q);
+    const got = r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind;
+    if (got === want) pass++;
+    else { fail++; console.log(`✗ ${label.slice(0, 70)}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); }
+  }
+  // From the ledger of questions left for him and the BambooHR drive, 2026-09-24.
+  const R = { ...Q, identity: { ...Q.identity, city: 'Springfield', state: 'Washington' },
+    answers: { ...Q.answers, citizenship_country: 'Vietnam', us_person: 'No', employer_agreement: 'No', employee_referral: 'No', skills: 'SolidWorks, CNC machining, GD&T' } };
+  for (const [label, want] of [
+    ['Do you currently reside in the Sacramento Area?', 'No'],
+    ['Do you live in Springfield?', 'Yes'],
+    ['Do you reside in the Pacific Northwest?', 'unknown'],
+    ['Are you a citizen of the country you’ll be employed in?', 'No'],
+    ['Are you a citizen of the U.S., a lawful permanent resident of the U.S., or a non-U.S. citizen who has been granted asylum', 'No'],
+    ['Are you currently party to any employment, consulting or personal services agreement that (i) restricts your ability', 'No'],
+    ['Address Line 2', 'blank'],
+    ['If you were referred by a Cornelis Network’s employee, input the employee’s name here. If not, put N/A.', 'N/A'],
+    ['This role is Hybrid, working out of our Wayne, PA office. Are you open to hybrid?', 'Yes'],
+    ['Do you have experience with SolidWorks?', 'Yes'],
+    ['Do you have experience with PCB Design?', 'unknown'],   // not in his files: his to answer, never a No
+  ]) {
+    const r = resolveLabel(label, R);
+    const got = r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind;
+    if (got === want) pass++;
+    else { fail++; console.log(`✗ ${label.slice(0, 70)}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); }
+  }
+  // SPONSORSHIP QUESTIONS THAT NAME CPT OR OPT ARE STILL SPONSORSHIP QUESTIONS
+  // (2026-09-24: the CPT rule answered both of these "No").
+  const S = { ...R, answers: { ...R.answers, require_sponsorship: 'Yes', requires_cpt: 'No', currently_on_opt: 'No', held_h1b: 'No' } };
+  for (const [label, want] of [
+    ['Will you now or in the future require support or sponsorship for an immigration-related employment benefit? Y/NFor purposes of the following question, “support or sponsorship for an immigration-related employment benefit” means an H-1B visa petition, an O-1 visa petition, an E-3 visa petition, a F-1 STEM OPT, F-1 OPT, F-1 CPT, TN status', 'Yes'],
+    ['Will you now or in the future require employer sponsorship to work in the United States (including OPT, CPT, H-1B, TN, or other visa types)?', 'Yes'],
+    ['Will you require CPT authorization from your school to work here?', 'No'],
+    ['Have you ever been sponsored for an H-1B?', 'No'],
+  ]) {
+    const r = resolveLabel(label, S);
+    const got = r.kind === 'answer' ? r.value : r.kind;
+    if (got === want) pass++;
+    else { fail++; console.log(`✗ ${label.slice(0, 70)}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); }
+  }
+  // A real U.S.-person question still gets his status, not the acknowledgement.
+  const status = resolveLabel('Are you a U.S. person as defined by the export control regulations?', { ...Q, answers: { ...Q.answers, us_person: 'No' } });
+  if (status.value === 'No') pass++; else { fail++; console.log('✗ the U.S.-person question got ' + JSON.stringify(status)); }
+  const cal = resolveLabel('California Applicants only: I understand…', { ...Q, identity: { ...Q.identity, state: 'California' } });
+  if (cal.kind !== 'answer') pass++; else { fail++; console.log('✗ a California resident got N/A: ' + JSON.stringify(cal)); }
+}
+
+// TSMC's SuccessFactors form, live 2026-09-24: other people's contact boxes
+// got HIS email, and the relatives follow-ups got "No".
+{
+  const blank = [
+    'Email of Referrer', 'Name of Referrer', "Referrer's Email", 'Referrer Phone',
+    'Name of Relatives', 'Relationship of Relatives', "Relative's Name",
+  ];
+  for (const label of blank) {
+    const r = resolveLabel(label, P);
+    if (r.kind === 'blank') pass++;
+    else { fail++; console.log(`✗ ${label} should be a deliberate blank, got ${JSON.stringify(r)}`); }
+  }
+  const referred = resolveLabel('Are you referred by a current or new employee of the company? If yes, please provide the name and email address of the employee who referred you', P);
+  if (referred.kind === 'answer' && referred.value === 'No') pass++;
+  else { fail++; console.log('✗ the referral question got ' + JSON.stringify(referred)); }
+  for (const [label, want] of [['Email', 'a@b.c'], ['Email Address', 'a@b.c'], ['Confirm Email', 'a@b.c'],
+    ['Do you have any relatives working in this company?', 'No']]) {
+    const r = resolveLabel(label, { ...P, answers: { ...P.answers, relatives_at_company: 'No' } });
+    if (r.kind === 'answer' && r.value === want) pass++;
+    else { fail++; console.log(`✗ ${label} expected ${want}, got ${JSON.stringify(r)}`); }
+  }
+}
+
 // F-553 (2026-09-24): "does not input portfolio link in additional website
 // section". A link box that never says "website" gets the portfolio too.
 {
@@ -586,5 +689,160 @@ is('Previous Title', 'unknown');
   if (tw.kind !== 'answer' || tw.value !== 'alexrivera.example') pass++; else { fail++; console.log('✗ Twitter got the portfolio'); }
 }
 
+// F-581 (2026-09-24): questions the replay of his own submissions found
+// empty or wrong.
+{
+  const W = { ...P, identity: { ...P.identity, portfolio: 'alexrivera.example' }, answers: { ...P.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes', notice_period: 'I will graduate in May 2027 and require no notice period.', current_company: 'Lakeside University — Manufacturing Lead (student)' } };
+  const cases = [
+    ['Are you legally eligible for employment in the country where the job is located?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'Yes'],
+    ['What is your required notice period with your current employer?', (r) => r.kind === 'answer' && /no notice period/.test(r.value)],
+    ['(Optional) Where can we find more information about you? (e.g., personal website, GitHub, x.com)', (r) => r.kind === 'answer' && r.value === 'alexrivera.example'],
+    ['GitHub URL', (r) => r.kind === 'blank'],
+    ['Understanding', (r) => r.kind === 'answer'],
+    ['How did you hear about us?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'LinkedIn'],
+  ];
+  for (const [label, ok] of cases) {
+    const r = resolveLabel(label, W);
+    if (ok(r)) pass++; else { fail++; console.log('✗ ' + label + ' got ' + JSON.stringify(r)); }
+  }
+}
+
+// ── Samsung, Standard Bots, ASML, KLA — left for him 2026-09-25, his answers ──
+{
+  const Q = { ...P, identity: { ...P.identity, initials: 'AAB', county: 'Springfield' }, answers: { ...P.answers, citizenship_with_year: 'Vietnam (2005)' } };
+  const at = (label) => { const r = resolveLabel(label, Q); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind; };
+  const eq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`  ✗ ${name}\n      want ${JSON.stringify(want)}\n      got  ${JSON.stringify(got)}`); } };
+  eq('patent question', at('Inventions: Are you currently seeking or plan to seek a patent related to the semiconductor industry?'), 'No');
+  eq('its "type NA" follow-up', at('If you answered Yes to the above inventions question, please explain. Type NA if you answered No to this question.'), 'NA');
+  eq('another subsidiary', at('Are you currently a full-time employee at another Samsung subsidiary?'), 'No');
+  eq('initial the statement', at('By submitting an application, you, the applicant, agree to not disclose to Samsung, or induce Samsung to use, any confidential or proprietary information (including trade secrets) belonging to any current or previous employer or other person or entity. Please initial that you acknowledge and understand this statement.'), 'AAB');
+  eq('commuting distance, labelled by its own Yes option', at('Yes, I currently live within daily commuting distance of Glen Cove, NY.'), 'I do not currently live within daily commuting distance');
+  // ASML's category list still gets "All others" — offered after his F-1
+  // wording, which a text box or Intel's list takes first (2026-09-26).
+  eq('current (immigration) status', [].concat(resolveLabel('Please indicate your current status.', Q).value || []).includes('All others'), true);
+  eq('…never an employment status', at('Please indicate your current employment status.') === 'All others', false);
+  eq('citizenship and the year granted', at('Please provide country of citizenship and/or permanent residency and the year granted.'), 'Vietnam (2005)');
+  eq('county', at('County'), 'Springfield');
+  eq('a patent OBLIGATION is still the employer-agreement rule', at('Do you have any non-compete or patent obligations to a current employer?'), 'No');
+  // Round two of the live stress drive, 2026-09-25.
+  eq('legal RIGHTS (plural) to work', at('Do you have legal rights to work in the USA?'), 'Yes');
+  eq('freshman or sophomore: a 2027 graduate is neither', resolveLabel('Are you currently a Freshman or Sophomore in an undergraduate program?', { ...Q, education: { ...Q.education, graduation: 'May 2027' } }).value, 'No');
+  eq('no referrer to name', resolveLabel('If you were referred to Base, please share the name of your referrer.', Q).kind, 'blank');
+  eq('earliest start, "realistically"', at('When could you realistically start full time?') === Q.answers.earliest_start, true);
+}
+
+// HP (2026-09-26): two questions left blank on his live form.
+{
+  const W = { ...P, work_experience: [{ company: 'Applied Materials' }, { company: 'Lakeside University - Makerspace Manufacturing Technology Center' }] };
+  const at = (label, p) => { const r = resolveLabel(label, p); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind; };
+  const eqq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); } };
+  const GOV = '1. Within the past 5 years, have you been employed by the federal or any state or local government or public institution within Australia, Bangladesh, Brazil, Canada, China, Ireland, Korea, Mexico, Pakistan, Philippines, Puerto Rico, Taiwan, United Kingdom, United States and/or Vietnam?';
+  eqq('government employment, "employed" first', at(GOV, W), 'No');
+  eqq('…silent when his history names a public employer', at(GOV, { ...W, work_experience: [{ company: 'Washington State Department of Transportation' }] }) === 'No', false);
+  const HP = 'To help us understand your preferences related to personal data and uses for future recruitment processes, are you an existing HP employee?';
+  eqq('an existing employee of the employer he applies to: No', at(HP, { ...W, applyingTo: 'HP Inc.' }), 'No');
+  eqq('Are you a current <company> employee?', at('Are you a current HP employee?', { ...W, applyingTo: 'HP Inc.' }), 'No');
+  eqq('…never No where his history names the employer', at('Are you a current Applied Materials employee?', { ...W, applyingTo: 'Applied Materials, Inc.' }) === 'No', false);
+}
+
+// Round 18 drives (2026-09-26): Humanoid, Re:Build.
+{
+  const at = (label, p = P) => { const r = resolveLabel(label, p); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind; };
+  const eqq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); } };
+  eqq('work authorization STATUS as statements: authorized now, sponsorship later',
+    at('What is your work authorization status for the country where this role is based?'), 'Authorized to work now, but will require employer sponsorship in the future');
+  eqq('…the plain question still says Yes', at('Are you legally authorized to work in the United States?'), 'Yes');
+  eqq('"Do you have a Bachelor\'s degree in engineering (…discipline)?" is asked, never answered with a major',
+    at("Do you have a Bachelor's degree in engineering (Mechanical, Electrical, Chemical, or a related discipline)?"), 'unknown');
+  const disc = resolveLabel('Field of study', { ...P, education: { ...P.education, discipline: 'Mechanical Engineering' } }).value;
+  eqq('field of study never offers a different degree', (Array.isArray(disc) ? disc : [disc]).some((d) => /technology|^engineering$/i.test(d)), false);
+  const home = { ...P, identity: { ...P.identity, address_line1: '1 Main St', city: 'Springfield', state: 'Washington', postal_code: '99201', country: 'United States of America' } };
+  eqq('the whole address in one box', at('We require the current physical/mailing address for all candidates. Please enter your address here (incomplete addresses may result in your disqualification).', home),
+    '1 Main St, Springfield, Washington 99201, United States of America');
+  eqq('…"Address" alone is still line 1', at('Address', home), '1 Main St');
+  eqq('…"Street Address 1 (optional)" is line 1', at('Street Address 1 (optional)', home), '1 Main St');
+  eqq('ADP\'s "Phone number country" is a country, never the number (2026-10-16)', at('Phone number country', home) === P.identity.phone, false);
+  eqq('…"Street Address 2 (optional)" is never the street again (Apple, 2026-10-16)', at('Street Address 2 (optional)', home) === '1 Main St', false);
+  eqq('…and an email address is still the email', at('Please provide your email address', home), 'a@b.c');
+  const pay = { ...P, answers: { ...P.answers, salary_expectation: '$90000/year' } };
+  eqq('"willing to accept this salary range?" is a yes/no, never his figure',
+    at('The job posting listed the applicable salary range for this position. Are you willing to accept this salary range?', pay) === '$90000/year', false);
+  eqq('"Current Salary" is never his target', at('Current Salary', pay) === '$90000/year', false);
+  eqq('…"Desired Salary" still is', at('Desired Salary', pay), '$90000/year');
+}
+
+// Stress round 19 and the logged-question audit (2026-09-26).
+{
+  const at = (label, p = P) => { const r = resolveLabel(label, p); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind; };
+  const eqq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}
+    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); } };
+  eqq('"Phonetic pronunciation of your name" never gets the phone number', at('Phonetic pronunciation of your name') === P.identity.phone, false);
+  eqq('…"Phone Number" still does', at('Phone Number'), P.identity.phone);
+  eqq('"Language of Application" is English', at('Language of Application'), 'English');
+  eqq('the full-legal-name confirmation is Yes, not the middle-name blank', at('Have you added your full legal name and surname (including any middle names)?'), 'Yes');
+  eqq('…the middle-name box itself stays blank', at('Middle Name'), 'blank');
+  const VET = 'U.S. – Protected Veteran Self-Identification This Employer is a Government contractor subject to the Vietnam Era Veterans’ Readjustment Assistance Act of 1974 … including those who served in the military, please indicate.';
+  eqq('a veteran notice that says "military" is never the U.S.-person (ITAR) rule', at(VET) === P.answers.us_person, false);
+  eqq('…an ITAR question still is', at('This position requires access to ITAR-controlled data. Are you a U.S. person?'), P.answers.us_person);
+  eqq('professional experience NOT counting internships: No for a new grad (HP)',
+    at('Do you have more than 12 months of professional experience related to the job requirements of this role? (not including internships, teaching assistance, research, or military experience).'), 'No');
+  eqq('a high school diploma: Yes for a bachelor’s student', at('Do you have a high school diploma or GED?'), 'Yes');
+  eqq('…completed high school, the same', at('Have you completed high school or GED?'), 'Yes');
+  const cit = { ...P, answers: { ...P.answers, citizenship_country: 'Vietnam', permanent_resident_elsewhere: 'No' } };
+  const CL = 'Do you hold Citizenship or Permanent Residency status from any of the following countries or administrative regions? Please select one.';
+  eqq('citizenship from a list of countries: his country', at(CL, cit), 'Vietnam');
+  const all = resolveLabel(CL, cit).value;
+  eqq('…and None of the above after it, only because he is a resident nowhere else', Array.isArray(all) && all.includes('None of the above'), true);
+  eqq('…never None where the profile does not say so', (resolveLabel(CL, { ...cit, answers: { ...cit.answers, permanent_resident_elsewhere: '' } }).value || []).includes('None of the above'), false);
+  eqq('"without restrictions" stays No (his decision, 2026-09-26)', at('Are you legally authorized to work in the country where the job is located without restrictions?'), 'No');
+  eqq('"eligible to work … for any employer" is the same question: No (Hyve, he changed Yes to No, 2026-09-27)', at('Are you eligible to work in the US for any employer?'), 'No');
+  eqq('…while plain authorization is still Yes', [].concat(at('Are you legally authorized to work in the United States?'))[0], 'Yes');
+  const MQ = 'Have you applied on any previous occasions for employment in any capacity with Micron?';
+  eqq('applied here before, on record in the store: Yes (Micron, sixteen applications; F-621)', at(MQ, { ...P, appliedHereBefore: true }), 'Yes');
+  eqq('…none on record: his standing answer', at(MQ, { ...P, appliedHereBefore: false, answers: { ...P.answers, previously_applied_here: 'No' } }), 'No');
+  eqq('…and an application is not an interview', at('Have you ever interviewed at Micron before?', { ...P, appliedHereBefore: true, answers: { ...P.answers, previously_applied_here: 'No' } }), 'No');
+  const visa = { ...P, answers: { ...P.answers, visa_status_note: 'F-1 student; OPT then H-1B' } };
+  eqq('"please detail your sponsorship needs" gets his visa note, never a bare Yes', at('If you answered yes above, please detail your current or future sponsorship needs.', visa), 'F-1 student; OPT then H-1B');
+  eqq('…the yes/no sponsorship question is still Yes', at('Will you now or in the future require sponsorship?', visa), 'Yes');
+  const STATES = 'Preference will be given to qualified candidates who do not reside, or plan to reside, in Alabama, Arkansas, Florida, or Tennessee. If you live in one of these states, would you consider relocation?';
+  eqq('a list of states he does not live in: N/A first', at(STATES, { ...P, identity: { ...P.identity, state: 'Washington' } }), 'N/A, I do not live in one of these states');
+  eqq('…a list that names his state: his relocation answer', at(STATES.replace('Tennessee', 'Washington'), { ...P, identity: { ...P.identity, state: 'Washington' } }), 'Yes');
+  eqq('…never when internships count', at('Do you have more than 12 months of professional experience (including internships)?') === 'No', false);
+}
+
+// F-633 — questions he answered by hand, from the replay of 2026-10-01.
+{
+  const at = (label, p = P) => { const r = resolveLabel(label, p); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind; };
+  const eqq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); } };
+  eqq('Onto: "legally permitted to work" is the authorization question', at('Are you legally permitted to work in the country where this job is located?'), 'Yes');
+  eqq('Onto: "can you provide proof of eligibility?" — the I-9 documents, Yes', at('If hired, can you provide proof of eligibility?'), 'Yes');
+  eqq('Luma: "How did you discover us?" is how he heard', at('How did you discover us?'), 'LinkedIn');
+  eqq('Luma: a box for "Portfolio/GitHub/Website" gets the portfolio', at('Portfolio/GitHub/Website'), 'https://example-portfolio.test');
+  eqq('…a box for GitHub alone is still left empty', at('GitHub URL'), 'blank');
+  eqq('Amazon: "What country/region are you currently located?"', at('What country/region are you currently located?'), 'United States of America');
+  eqq('Amazon: "Are you currently located outside of the United States?" — No', at('Are you currently located outside of the United States?'), 'No');
+  eqq('Amazon: "Are you currently working as an intern at Amazon?" — No', at('Are you currently working as an intern at Amazon?', { ...P, applyingTo: 'Amazon', work_experience: [{ company: 'Test Co' }] }), 'No');
+  eqq('…never No where he works now', at('Are you currently working as an intern at Test Co?', { ...P, applyingTo: 'Test Co', work_experience: [{ company: 'Test Co' }] }) === 'No', false);
+  const cad = { ...P, answers: { ...P.answers, skills: 'SolidWorks, Fusion 360, FEA, GD&T' } };
+  eqq('Amazon: "simulation and 3D modeling software" — his CAD and FEA tools are both', at('Do you have experience with simulation and 3D modeling software?', cad), 'Yes');
+  eqq('…a category none of his tools belong to stays his', at('Do you have experience with simulation and 3D modeling software?', { ...P, answers: { ...P.answers, skills: 'GD&T' } }), 'unknown');
+  const nxp = { ...P, applyingTo: 'NXP Semiconductors', work_experience: [{ company: 'Applied Materials' }] };
+  eqq('NXP: "Have you worked with us before?" is the previous-employment question — No', at('Have you worked with us before?', nxp), 'No');
+  eqq('…and Yes where his history names the employer', at('Have you worked with us before?', { ...nxp, applyingTo: 'Applied Materials' }), 'Yes');
+  eqq('…while "worked with PLCs" is still a skills question', at('Have you worked with PLCs before?', { ...P, answers: { ...P.answers, skills: 'PLCs, SolidWorks' } }), 'Yes');
+  eqq('NXP: "use your information for other job openings" is the talent-pool offer', at('Do you accept that we use your information for other job openings?'), 'Yes');
+}
+
+// F-642 — Enpro on PageUp, 2026-10-02.
+{
+  const at = (label, p = P) => { const r = resolveLabel(label, p); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind; };
+  const eqq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); } };
+  eqq('Enpro: "By continuing, you agree that you have read our Privacy Statement" is the consent box', at('By continuing, you agree that you have read our Privacy Statement'), 'Yes');
+  eqq('…a box agreeing to a fact about him is not', at('I agree that I am a U.S. citizen') === 'Yes', false);
+  // F-732: GlobalFoundries' Workday self-identify step, 2026-10-16.
+  eqq('GlobalFoundries: "you declare that you have read, understood, and accepted the terms in this policy" is the consent box',
+    at('By submitting, you declare that you have read, understood, and accepted the terms in this policy'), 'Yes');
+  eqq('…a declaration of a fact is not', at('By submitting, you declare that you have read this form and that you are a U.S. citizen') === 'Yes', false);
+}
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

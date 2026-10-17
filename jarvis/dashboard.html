@@ -15,7 +15,7 @@
   html,body { margin:0; height:100%; }
   body { background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
   a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
-  .wrap { max-width:1280px; margin:0 auto; padding:0 18px 120px; }
+  .wrap { max-width:min(1900px, 98vw); margin:0 auto; padding:0 18px 120px; }
 
   /* The fade used to start at 70%, which left the ".showing" line ("400
      undecided · sorted by fit") sitting in transparent header space — page
@@ -92,6 +92,9 @@
      (header z-index 20) and rows scrolled visibly through the gap. The offset
      is measured from the header itself and kept in a custom property, so it
      cannot go stale again the next time the header changes. */
+  #tblfilt th { position:static; padding:3px 4px; text-transform:none; letter-spacing:0; }
+  #tblfilt input, #tblfilt select { width:100%; min-width:50px; box-sizing:border-box; font:inherit; font-size:12px; color:var(--text); background:var(--bg); border:1px solid var(--line2); border-radius:4px; padding:2px 5px; }
+  #tblfilt input.on, #tblfilt select.on { border-color:var(--accent); }
   th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim2); padding:8px 8px; border-bottom:1px solid var(--line); position:sticky; top:var(--stickytop, 118px); background:var(--bg); z-index:5; }
   td { padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
   tr.job:hover { background:var(--panel); }
@@ -137,7 +140,7 @@
 
   .actionbar { position:fixed; bottom:0; left:0; right:0; z-index:30; background:var(--panel2); border-top:1px solid var(--line2); transform:translateY(100%); transition:transform .15s; }
   .actionbar.show { transform:translateY(0); }
-  .actionbar .inner { max-width:1280px; margin:0 auto; padding:12px 18px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .actionbar .inner { max-width:min(1900px, 98vw); margin:0 auto; padding:12px 18px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .actionbar .n { font-weight:700; }
   .actionbar .btn.primary { background:var(--accent); color:#04121f; border-color:var(--accent); font-weight:600; }
   .actionbar .btn.warn { border-color:var(--warn); color:#e3b341; }
@@ -183,18 +186,13 @@
   .iconbtn:hover { border-color:var(--accent); color:var(--accent); }
   .iconbtn.on { color:#ff6b81; border-color:#ff6b81; }
   .iconbtn.dim:hover { border-color:var(--warn); color:var(--warn); }
-  /* The Outreach button on an application card, and the leads panel it opens. */
-  .iconbtn.leads { font-size:12px; margin-left:auto; }
+  /* The Outreach button on an application, and the people panel on the Outreach tab. */
+  .iconbtn.leads { font-size:12px; margin-left:auto; white-space:nowrap; }
   .iconbtn.leads.has { color:var(--good); border-color:rgba(63,185,80,.5); }
   .iconbtn.leads.busy { color:var(--warn); border-color:rgba(210,153,34,.6); }
-  .leadsback { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:60; }
-  .leadsdrawer { position:fixed; top:0; right:0; bottom:0; width:min(560px,100vw); background:var(--panel); border-left:1px solid var(--line2);
-    z-index:61; overflow-y:auto; padding:18px 20px 40px; box-shadow:-12px 0 30px rgba(0,0,0,.35); }
-  .leadsdrawer h2 { margin:0 0 2px; font-size:17px; line-height:1.3; }
-  .leadsdrawer .co { color:var(--dim); font-size:13px; }
-  .leadsdrawer .x { position:absolute; top:12px; right:14px; }
-  .leadsdrawer .sec { margin-top:16px; }
-  .leadsdrawer .sec > h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim2); }
+  .leadsec .sec { margin-top:12px; }
+  .leadsec .sec:first-child { margin-top:0; }
+  .leadsec .sec > h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim2); }
   .lead { border:1px solid var(--line2); border-radius:9px; padding:10px 12px; margin-bottom:9px; background:var(--panel2); }
   .lead .who { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
   .lead .who b { font-size:14px; }
@@ -234,6 +232,14 @@
 
   .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:11px; margin-top:14px; }
   .tile { background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:13px 14px; }
+  /* His pace (2026-10-16): confirmed applications a day. */
+  .pace { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 18px; margin-bottom:12px; display:flex; gap:22px; align-items:flex-end; flex-wrap:wrap; }
+  .pace .num { font-size:26px; font-weight:700; line-height:1; }
+  .pace .lab { font-size:12px; color:var(--dim); margin-top:4px; }
+  .pace .bars { display:flex; gap:3px; align-items:flex-end; height:44px; margin-left:auto; }
+  .pace .bars div { width:12px; background:var(--accent, #5aa2ff); border-radius:3px 3px 0 0; min-height:2px; opacity:.85; }
+  .pace .bars div.zero { background:var(--line); opacity:1; }
+  .pace .down { color:#e5a54b; } .pace .up { color:#3fbf7f; }
   .tile .n { font-size:23px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:-.5px; }
   .tile .l { color:var(--dim); font-size:12px; margin-top:3px; }
   .tile .s { color:var(--dim2); font-size:11px; margin-top:5px; }
@@ -450,7 +456,7 @@
         <button data-view="library" title="Everything scored that nobody has reviewed yet. Deck mode lives here.">Library</button>
         <button data-view="applications" title="The tracker, then Review &amp; Send beneath it — one page.">Applications</button>
         <button data-view="resumes">Resumes</button>
-        <button data-view="outreach" title="Who to talk to about the jobs you have committed to. Drafts only — you send it.">Outreach</button>
+        <button data-view="outreach" title="The jobs you pressed Outreach on in Applications: who to talk to, and the message. Drafts only — you send it.">Outreach</button>
         <button data-view="hidden">Hidden</button>
       </div>
       <div class="seg sub" id="subview" role="tablist" aria-label="Views" style="display:none"></div>
@@ -537,6 +543,7 @@
         <option value="fair">Fair fit &amp; up</option>
       </select>
       <label class="chk"><input type="checkbox" id="relOnly"> rel&nbsp;&ge;&nbsp;10</label>
+      <label class="chk" title="Hide postings the daily curation read in full and turned down (their reason shows under the title)"><input type="checkbox" id="hideTurnedDown"> hide turned down</label>
       </span>
       <!-- "354 of 3,152 undecided" belongs WITH the filters that produced it,
            not on a line of its own below them. Pushed right so it reads as the
@@ -556,7 +563,7 @@
 
   <main class="tablewrap" id="tablewrap">
   <table id="tbl">
-    <th scope="col"ead><tr>
+    <thead id="tblhead"><tr id="tblhr">
       <th scope="col" style="width:72px"></th><th scope="col" style="width:44px" title="Fit score 0-100 against your profile, CV skills, seniority and pay target.">Fit</th><th scope="col">Role</th>
       <th scope="col" style="width:56px">Age</th>
       <!-- Pay lived only on the card, so scanning the list — the view you
@@ -592,6 +599,15 @@
 </div></div>
 
 <script>
+// WHOSE DASHBOARD THIS IS. The server stamps the person into <head>
+// (window.__JARVIS_PERSON, from jarvis/targeting.mjs); the literal below is
+// only what a page opened without that server shows.
+const PERSON = Object.assign({ fullName: 'Alex Rivera', firstName: 'Alex', preset: 'hardware-engineering', fieldLabels: null },
+  (typeof window !== 'undefined' && window.__JARVIS_PERSON) || {});
+/** "<Full Name> Resume.pdf": the name every downloaded resume is saved under. */
+const RESUME_FILE = PERSON.resumeFileName || `${PERSON.fullName} Resume.pdf`;
+const isPlainResumeFile = (file) => String(file || '').toLowerCase() === RESUME_FILE.toLowerCase();
+const withoutPersonPrefix = (file) => { const p = `${PERSON.fullName} - `; const t = String(file || ''); return t.startsWith(p) ? t.slice(p.length) : t; };
 const S = { jobs:[], scans:[], counts:{}, filtered:[], sel:new Set(), cursor:0, open:new Set(), cap:400, details:new Map(), inflight:new Set(), hiddenCo:new Set(), cardIdx:0, showDupes:false, filtersOpen:false,
   // "new since last visit": baseline is the PREVIOUS page load's timestamp.
   prevVisit: localStorage.getItem('jarvis-last-visit') || '' };
@@ -697,7 +713,16 @@ function renderCounts() {
     `<span><b>${n((c.inbox||0)+(c.queued||0))}</b> inbox</span>`+
     `<span><b>${n(c.new)}</b> library</span>`+
     `<span><b>${n((c.interested||0))}</b> tracking</span>`+
-    `<span><b>${n(c.applied)}</b> applied</span>`;
+    `<span><b>${n(c.applied)}</b> applied</span>`+
+    // HIS PACE, ON EVERY PAGE (2026-10-16: "where my pace meter"). It lived
+    // only on Inbox → Overview. Today's count and this week's rate against the
+    // week before; the full card stays on the Overview.
+    (S.pace ? `<span title="Applications sent: ${S.pace.perDay30}/day over 30 days, ${S.pace.streak}-day streak — Inbox → Overview has the full card" style="cursor:pointer" onclick="goView('home')"><b>${S.pace.today}</b> sent today · <b style="color:${S.pace.perDay7 >= S.pace.perDayPrev7 ? '#3fb950' : '#d29922'}">${S.pace.perDay7}/day</b> this week ${S.pace.perDay7 >= S.pace.perDayPrev7 ? '▲' : '▼'}</span>` : '');
+  if (!S.pace && !S.paceAsked) {
+    S.paceAsked = true;
+    fetch('/api/pace').then((r) => r.json()).then((p) => { if (p && Number.isFinite(p.today)) { S.pace = p; renderCounts(); } }).catch(() => {});
+    setInterval(() => fetch('/api/pace').then((r) => r.json()).then((p) => { if (p && Number.isFinite(p.today)) { S.pace = p; renderCounts(); } }).catch(() => {}), 10 * 60 * 1000);
+  }
   const last = S.scans[0];
   $('#freshness').textContent = last
     ? `${(c.total||0).toLocaleString()} postings in store · last scan ${timeAgo(last.at)}`
@@ -773,7 +798,7 @@ async function apply(keepPage) {
   // Hub views own the whole surface — no list, no filters.
   if (view==='home' || view==='resumes' || view==='review' || view==='outreach') {
     S.filtered=[];
-    $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove();
+    $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove(); $('#appsbar')?.remove();
     $('#tbl').style.display='none'; $('#empty').style.display='none';
     $('#scanpanel').style.display='none'; $('#keyhint').style.display='none';
     // The whole control panel goes, rather than its contents — hiding only the
@@ -828,6 +853,8 @@ async function apply(keepPage) {
     // only the board left the bar 32,000 pixels down, under the card list
     // (2026-09-17, found in his browser).
     const mail = $('#mailbar'); if (mail && board) board.parentNode.insertBefore(mail, board);
+    // Sheet | Board | Download sits between the mail bar and the tracker.
+    const apps = $('#appsbar'); if (apps && board) { board.parentNode.insertBefore(apps, board); if (mail) board.parentNode.insertBefore(mail, apps); }
     const note = $('#boardempty'); if (note && board) board.parentNode.insertBefore(note, board.nextSibling);
     return renderReview();
   }
@@ -841,7 +868,7 @@ async function apply(keepPage) {
     $('#controls').style.display='none';
     return renderBoard();
   }
-  $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove(); $('#tbl').style.display='';
+  $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove(); $('#appsbar')?.remove(); $('#tbl').style.display='';
 
   // Every filter below becomes a query parameter and then an indexed WHERE
   // clause. The rules are unchanged — including that each one is ABSOLUTE: a
@@ -952,6 +979,7 @@ async function apply(keepPage) {
   else if (visa==='block') p.set('fitBlocked','1');
   else if (visa==='good') { p.set('sponsors','1'); p.set('blocked','0'); p.set('fitBlocked','0'); }
   if (relOnly) p.set('minRelevance','10');
+  if ($('#hideTurnedDown')?.checked) p.set('hideTurnedDown','1');
   // An explicit window set by a Home tile beats the "since last visit" flag:
   // the tile counted a 24-hour window and its destination has to use the same
   // one, or it repeats F-47 (a number that opens a different number).
@@ -1039,6 +1067,14 @@ async function apply(keepPage) {
   // that is where the cache is dropped.
   const cached = S.viewCache && S.viewCache.get(ticket);
   if (cached) paintPayload(cached, view, ticket);
+  // …AND WITHOUT ONE, THE LAST TAB'S ROWS DO NOT STAND IN FOR THIS ONE'S
+  // (2026-10-16). While a scan held the store, Hidden took nine seconds to
+  // answer and showed the Deck's Library cards under the Hidden tab the whole
+  // time. "Show more" (keepPage) keeps its rows.
+  else if (!keepPage) {
+    $('#rows').innerHTML = ''; $('#empty').style.display = 'none';
+    $('#showing').textContent = 'Loading…';
+  }
   // THE `today` BRANCH THAT USED TO BE HERE WAS UNREACHABLE, and expensive if it
   // ever stopped being. `VIEW_ALIAS.today = 'library'` rewrites the view before
   // `apply()` sees it and there is no `data-view="today"` button, so
@@ -1103,13 +1139,21 @@ function paintPayload(d, view, ticket) {
     const dead = (j) => (j.goneAt ? 1 : 0);
     S.filtered = [...S.filtered].sort((a,b)=>
       (dead(a) - dead(b)) || ((b.status==='inbox') - (a.status==='inbox')));
-  }
+    // …AND FOLDS (2026-10-16): "why are there so many dead jobs" — 23 closed
+    // picks at the bottom of the Inbox still read as dead jobs. One chip says
+    // how many and shows them again.
+    S.closedFolded = S.filtered.filter((j) => j.goneAt).length;
+    if (!S.showClosed) S.filtered = S.filtered.filter((j) => !j.goneAt);
+  } else S.closedFolded = 0;
   // d.total counts rows the SERVER has, which it has not collapsed. Comparing
   // that against the collapsed list is what produced a phantom "Show 8 more"
   // button on any view where something folded: clicking it raised the cap,
   // refetched the same rows, re-collapsed them, and the button came back
   // unchanged. Discount what folded so the two numbers are on one scale.
   S.total = d.total - (d.jobs.length - S.filtered.length);
+  // The whole list, then what the column filters and header sort leave of it.
+  S.rawRows = S.filtered;
+  S.filtered = tableView(S.filtered, view);
   if (view==='today') { S.todayRemaining = d.todayRemaining; S.todayNewGrad = d.todayNewGrad; }
   if (d.counts) { S.counts = d.counts; renderCounts(); }
 
@@ -1270,6 +1314,73 @@ function visaChip(j){
   return ['dim', '—', 'Posting says nothing about visa sponsorship either way — not a disqualifier, worth confirming at application'];
 }
 
+// ── sort and filter the list by any column (2026-09-30) ──────────────
+//
+// "we need to add more filters, in my inbox too, its annoying not being able
+// to sort by stuff". The Inbox and Hidden lists arrive whole (tens of rows), so
+// they sort and filter right here, by every column, the way the Applications
+// sheet does. The Library is the store — hundreds of thousands of rows a page at
+// a time — so a header there asks the SERVER to sort (fit, newest, company);
+// sorting one loaded page would be a lie about the rest.
+const TBL = { inbox: { sort: '', dir: 1, cols: {} }, hidden: { sort: '', dir: 1, cols: {} } };
+const LEVEL_LABEL = { entry:'entry', stretch:'stretch', exclude:'senior', unknown:'level?', mid:'mid' };
+const statusWord = (j) => (j.status === 'new' ? 'library' : j.status);
+const daysOld = (j) => { const t = ageOf(j); return t ? Math.floor((Date.now() - t) / 86400000) : null; };
+const TBL_COLS = [
+  { k:'act' },
+  { k:'fit', v:(j)=>fitScore(j), text:(j)=>String(j.fit ? j.fit.score : ''), num:(j)=>(j.fit ? j.fit.score : null) },
+  { k:'role', v:(j)=>`${coName(j.company)} ${j.title}`.toLowerCase(), text:(j)=>`${coName(j.company)} ${j.title} ${j.team || ''} ${j.pickNote || ''}` },
+  { k:'age', v:(j)=>daysOld(j) ?? 99999, text:(j)=>String(daysOld(j) ?? ''), num:daysOld },
+  // Pay compares in thousands a year: ">100" is over $100K.
+  { k:'pay', v:(j)=>j.salary?.max || j.salary?.min || 0, text:(j)=>fmtPay(j.salary) || '', num:(j)=>{ const n = j.salary?.max || j.salary?.min; return n ? Math.round(n / 1000) : null; } },
+  { k:'loc', v:(j)=>String(j.location || '').toLowerCase(), text:(j)=>`${j.location || ''} ${locBadge(j.triage.locationBucket)[0]}` },
+  { k:'level', v:(j)=>Object.keys(LEVEL_LABEL).indexOf(j.triage.experience.level), text:(j)=>LEVEL_LABEL[j.triage.experience.level] || '?', options: Object.values(LEVEL_LABEL) },
+  { k:'auth', v:(j)=>visaChip(j)[1], text:(j)=>visaChip(j)[1], options: null },
+  { k:'status', v:(j)=>statusWord(j), text:(j)=>(j.goneAt ? 'gone' : statusWord(j)), options: null },
+];
+const tblState = (view) => TBL[view] || null;
+/** The rows as the column filters and the header sort leave them. */
+function tableView(jobs, view){
+  const st = tblState(view); if (!st) return jobs;
+  const out = jobs.filter((j)=>passesFilters(j, TBL_COLS, st.cols));
+  const col = TBL_COLS.find((c)=>c.k === st.sort);
+  if (col) out.sort((a,b)=>{ const x = col.v(a), y = col.v(b); return (x < y ? -1 : x > y ? 1 : 0) * st.dir; });
+  return out;
+}
+/** Header clicks, arrows, and the filter row under them. */
+function paintTableHead(view){
+  const hr = $('#tblhr'); if (!hr) return;
+  const st = tblState(view);
+  // A filter row already up for this view stays: rebuilding it on every
+  // keystroke's redraw would take the cursor out of the box being typed in.
+  const kept = $('#tblfilt');
+  if (kept && !(st && kept.dataset.view === view)) kept.remove();
+  const LIB_SORT = { fit:'fit', age:'new', role:'company' };
+  [...hr.children].forEach((th, i)=>{
+    const c = TBL_COLS[i]; if (!c || c.k === 'act') return;
+    th.dataset.label ||= th.textContent.trim();
+    const serverSort = !st && LIB_SORT[c.k] && $('#sort');
+    const arrow = st ? (st.sort === c.k ? (st.dir > 0 ? ' ▲' : ' ▼') : '') : (serverSort && $('#sort').value === LIB_SORT[c.k] ? ' ▼' : '');
+    th.textContent = th.dataset.label + arrow;
+    th.style.cursor = st || serverSort ? 'pointer' : '';
+    th.onclick = st ? ()=>{
+      // Numbers start high-to-low, words A to Z; a second click flips it.
+      if (st.sort === c.k) st.dir = -st.dir; else { st.sort = c.k; st.dir = (c.k === 'role' || c.k === 'loc' || c.k === 'status' || c.k === 'auth' || c.k === 'age') ? 1 : -1; }
+      S.filtered = tableView(S.rawRows || S.filtered, view); render();
+    } : serverSort ? ()=>{ $('#sort').value = LIB_SORT[c.k]; $('#sort').dispatchEvent(new Event('change')); } : null;
+  });
+  if (!st || $('#tblfilt')) return;
+  // Menus list only what is actually in the list.
+  const raw = () => S.rawRows || S.filtered;
+  const cols = TBL_COLS.map((c)=>(c.options === null ? { ...c, options: [...new Set(raw().map(c.text))].sort() } : c));
+  const f = filterRow(cols, st.cols, ()=>{ S.filtered = tableView(raw(), view); S.cursor = 0; render(); });
+  f.id = 'tblfilt'; f.dataset.view = view;
+  const a = el('button','iconbtn dim','clear'); a.title = 'Clear every column filter and the sort'; a.style.fontSize = '11px';
+  a.onclick = ()=>{ st.cols = {}; st.sort = ''; S.filtered = raw(); f.remove(); render(); };
+  f.firstChild.appendChild(a);
+  hr.after(f);
+}
+
 async function render() {
   // Recomputed here rather than threaded in from apply(): the empty state and
   // the count line both need to know whether the filters mean anything in this
@@ -1279,6 +1390,7 @@ async function render() {
   // WHERE HE WAS (2026-09-24): emptying the table shortened the page and the
   // browser clamped him back to the top; the scroll is put back once it is full.
   const keepY = window.scrollY;
+  paintTableHead(view);
   const rowsEl = $('#rows'); rowsEl.innerHTML='';
   // BUILT OFF-DOCUMENT, APPENDED ONCE. A 400-row page creates roughly 12,000
   // elements (nine cells, three buttons, badges and a logo tile per row) and
@@ -1344,7 +1456,9 @@ async function render() {
   // your five saved jobs against the entire store, which measures nothing.
   showing.innerHTML = filtersApply
     ? `Showing <b>${shown}</b>${total>shown?` of <b>${total.toLocaleString()}</b> matching`:''} (of ${(S.counts.total||0).toLocaleString()} captured). Filtered out is never deleted — widen filters to see it.`
-    : `<b>${shown}</b> ${shown===1?'job':'jobs'} — ${view==='hidden'?'stashed by you':'your own picks'}, shown in full. Filters do not apply here.`;
+    : (S.rawRows && S.rawRows.length !== shown
+      ? `<b>${shown}</b> of ${S.rawRows.length} — the column filters under the header set the rest aside.`
+      : `<b>${shown}</b> ${shown===1?'job':'jobs'} — ${view==='hidden'?'stashed by you':'your own picks'}. Click a column to sort it; filter under the header.`);
 
   // Collapsing is never silent: say how many rows it folded and offer them back.
   const folded = S.filtered.reduce((n,j)=>n+((j._dupes||1)-1), 0);
@@ -1353,6 +1467,13 @@ async function render() {
     chip.style.marginLeft='8px'; chip.style.fontSize='11px';
     chip.title = 'Companies re-list the same opening many times. One row per opening by default.';
     chip.onclick = ()=>{ S.showDupes = !S.showDupes; apply(true); };
+    showing.appendChild(chip);
+  }
+  if (S.closedFolded) {
+    const chip = el('button','iconbtn dim', S.showClosed ? `showing ${S.closedFolded} closed — fold them` : `${S.closedFolded} closed posting${S.closedFolded===1?'':'s'} folded — show`);
+    chip.style.marginLeft='8px'; chip.style.fontSize='11px';
+    chip.title = 'Postings their company has taken down. Kept, never deleted.';
+    chip.onclick = ()=>{ S.showClosed = !S.showClosed; apply(true); };
     showing.appendChild(chip);
   }
   if (S.sinceOverride) {
@@ -1376,7 +1497,17 @@ async function render() {
   // to that view to do.
   if (S.hiddenCo.size && (filtersApply || view==='hidden')) {
     const wrap = el('span');
-    wrap.appendChild(document.createTextNode('  ⊘ '));
+    // ONE LINE, NOT A WALL (2026-10-16). At 110 hidden companies the chips
+    // filled ten lines of the sticky filter bar — a third of the screen — and
+    // covered the top of every expanded row. Collapsed behind a count; open
+    // on the Hidden view, which is where he goes to unhide one.
+    const open = view === 'hidden' || S.showHiddenCo;
+    const toggle = el('button', 'iconbtn dim', open ? `⊘ ${S.hiddenCo.size} companies hidden ▾` : `⊘ ${S.hiddenCo.size} companies hidden ▸`);
+    toggle.style.marginLeft = '8px'; toggle.style.fontSize = '11px';
+    toggle.title = open ? 'Collapse the list' : 'Show them — click one to unhide it';
+    toggle.onclick = () => { S.showHiddenCo = !S.showHiddenCo; render(); };
+    showing.appendChild(toggle);
+    if (!open) { /* collapsed */ } else
     [...S.hiddenCo].forEach(co=>{
       const chip = el('button','iconbtn dim', co+' ✕');
       chip.title = 'Company hidden — click to unhide';
@@ -1510,9 +1641,11 @@ async function render() {
     rows.appendChild(tr);
     if (S.open.has(j.id)) rows.appendChild(detailRow(j));
   });
-  if (S.total > S.filtered.length) {
+  // Against the whole loaded list: rows a column filter set aside are loaded.
+  const loaded = (S.rawRows || S.filtered).length;
+  if (S.total > loaded) {
     const tr=el("tr"); const td=el("td"); td.colSpan=9; td.style.textAlign='center'; td.style.padding='14px';
-    const remaining = S.total - S.filtered.length;
+    const remaining = S.total - loaded;
     const b=el('button','btn',`Show ${Math.min(400, remaining)} more (${remaining.toLocaleString()} remaining)`);
     b.onclick=()=>{ S.cap+=400; apply(true); };
     td.appendChild(b); tr.appendChild(td); rows.appendChild(tr);
@@ -1559,9 +1692,20 @@ const FIELD_BADGE = {
   energy:        ['⚡ energy', 'b-dim'],
   industrial:    ['⚙️ industrial', 'b-dim'],
 };
+/**
+ * A FIELD THE TABLE ABOVE DOES NOT KNOW. Those keys are the hardware preset's;
+ * another preset has its own (fpa, investment-banking, data-analytics…). The
+ * server's label for it when the preset has one, else the key title-cased —
+ * never nothing, which read as "no field".
+ */
+function genericFieldBadge(f){
+  const label = PERSON.fieldLabels?.[f]
+    || String(f).split(/[-_\s]+/).filter(Boolean).map((w) => w.length <= 3 && /^(fpa|ai|bi|ml|hr)$/i.test(w) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)).join(' ');
+  return label ? [esc(label), 'b-dim'] : null;
+}
 function fieldBadge(j){
   const f = j?.fit?.field;
-  const b = FIELD_BADGE[f];
+  const b = FIELD_BADGE[f] || (f && f !== 'other' && f !== 'none' ? genericFieldBadge(f) : null);
   if (!b) return '';
   // Launch and satellite work is the most export-controlled sector there is,
   // and the postings do not say so: of 78 space reqs in the deck, ZERO state
@@ -2207,7 +2351,10 @@ async function extensionAsk(msg){
     if(!window.chrome?.runtime?.sendMessage) return null;
     const d = await (await fetch('/api/extension')).json();
     const extId = d.chrome?.id;
-    if(!extId || d.chrome?.disabled) return null;
+    // Chrome's Preferences file lags behind: re-enabled at chrome://extensions,
+    // it still read "disabled" and every call was refused unasked (2026-09-24).
+    // A disabled extension simply does not answer, so always ask.
+    if(!extId) return null;
     return await new Promise((res) => {
       try {
         chrome.runtime.sendMessage(extId, msg, (x) => { void chrome.runtime.lastError; res(x && x.ok ? x : null); });
@@ -2495,10 +2642,26 @@ async function singleAct(id, status){
   await persist({ids: j ? withDupes(j) : [id], status});
   await apply(true);
 }
+/**
+ * GONE FROM THE SCREEN ON THE CLICK (2026-09-30, F-628: "why the hell is hide
+ * all jobs from button still so damn unresponsive it takes like 5s"). It used
+ * to wait for the whole list to be fetched again — 1 s on the Inbox, 2-4 s on
+ * the Library — and the save behind it queues for the store's write lock
+ * while a scan or enrich holds it (15.7 s measured). The rows already on
+ * screen are dropped here at once; the save and the refill follow quietly.
+ */
 function hideCompany(company){
   S.hiddenCo.add(company);
-  apply();
+  const keep = (j) => j.company !== company;
+  const before = S.filtered.length;
+  S.filtered = S.filtered.filter(keep);
+  if (S.rawRows) S.rawRows = S.rawRows.filter(keep);
+  if (typeof S.total === 'number') S.total = Math.max(0, S.total - (before - S.filtered.length));
+  S.cardIdx = Math.min(S.cardIdx || 0, Math.max(0, S.filtered.length - 1));
+  repaint();
   persist({company, hidden:true}, '/api/company');
+  // Refill the page from the server (the rows that move up into view), keeping his place.
+  apply(true);
 }
 function unhideCompany(company){
   S.hiddenCo.delete(company);
@@ -2533,7 +2696,7 @@ document.querySelectorAll('.actionbar [data-act]').forEach(b=>b.onclick=()=>act(
 $('#clearsel').onclick=()=>{S.sel.clear();render();};
 
 // ── controls wiring ──
-['q','tier','loc','visa','sort','relOnly','prog','fitband','field','posted'].forEach(id=>{ const e=$('#'+id); e.addEventListener(e.tagName==='INPUT'&&e.type!=='checkbox'?'input':'change',apply); });
+['q','tier','loc','visa','sort','relOnly','hideTurnedDown','prog','fitband','field','posted'].forEach(id=>{ const e=$('#'+id); e.addEventListener(e.tagName==='INPUT'&&e.type!=='checkbox'?'input':'change',apply); });
 $('#view').querySelectorAll('button').forEach(b=>{ b.setAttribute('role','tab'); b.setAttribute('aria-selected', String(b.classList.contains('on'))); });
 $('#view').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   $('#view button.on').classList.remove('on'); b.classList.add('on'); S.cursor=0;
@@ -2751,10 +2914,335 @@ const STAGES = [
   { key:'offer',     label:'Offer 🎉',  next:null },
   { key:'rejected',  label:'Rejected',  next:null },
 ];
+// ── The tracker as a spreadsheet (2026-09-24) ───────────────────────
+//
+// "change application tracker to an excel sheet kinda format". One row per
+// application, every column sortable, a filter box, status changed in the
+// row, his own notes saved as he types them, and the file for Excel. The
+// board is one click away (the choice is remembered on this browser).
+/** When he applied: the engine's record, else the day the card moved to Applied. */
+// …and only once he HAS applied (2026-10-16). `appliedAt` is when the engine
+// FILLED the form, so 33 Tracking cards he never sent read "Applied Oct 15".
+// His rule that night: no confirmation, not applied.
+const SENT_STATUSES = new Set(['applied', 'responded', 'interview', 'offer', 'rejected']);
+const appliedOn = (j) => (SENT_STATUSES.has(j.status) ? (j.appliedAt || (j.status === 'applied' ? j.statusChangedAt : '') || '') : '');
+/**
+ * How old the posting was when he applied, in days (2026-09-25: "so i could
+ * gauge how stale it was when i applied"). With no posting date, the day
+ * Jarvis first saw it is a floor, so it reads "≥". Not applied yet: today's
+ * age, marked as such. Null when a repost moved the date past his application.
+ */
+function postingAge(j){
+  const posted = j.postedAt ? new Date(j.postedAt).getTime() : 0;
+  const start = posted || Date.parse(j.firstSeen || '') || 0;
+  if (!start) return null;
+  const applied = Date.parse(appliedOn(j)) || 0;
+  const at = applied || Date.now();
+  if (at < start) return null;
+  return { days: Math.floor((at - start) / 86400000), floor: !posted, applied: !!applied, start };
+}
+const SHEET = { sort: 'updated', dir: -1, q: '', status: '', open: new Set() };
+const SHEET_STATUS_LABEL = { interested: 'Tracking', applied: 'Applied', responded: 'Responded', interview: 'Interview', offer: 'Offer', rejected: 'Rejected' };
+function appsMode(){ try { return localStorage.getItem('jarvis-apps-view') || 'sheet'; } catch { return 'sheet'; } }
+function setAppsMode(m){ try { localStorage.setItem('jarvis-apps-view', m); } catch { /* this session only */ } renderBoard(); }
+function appsViewBar(mode){
+  const bar = el('div'); bar.id = 'appsbar';
+  bar.style.cssText = 'display:flex;gap:8px;align-items:center;margin:6px 0 10px;flex-wrap:wrap';
+  for (const [m, label] of [['sheet','▦ Sheet'],['board','▥ Board']]) {
+    const b = el('button', 'btn' + (mode === m ? ' on' : ''), label);
+    b.style.cssText = mode === m ? 'font-weight:600' : 'opacity:.75';
+    b.onclick = () => setAppsMode(m);
+    bar.appendChild(b);
+  }
+  // In the toolbar, not #showing: the Applications page does not show that
+  // line, so the board read "45 Tracking" under a header of 53 with nothing
+  // to say why (2026-10-16).
+  if (S.closedTrackingCount) {
+    const chip = el('button', 'btn', S.showClosed ? `showing ${S.closedTrackingCount} closed in Tracking — fold them` : `${S.closedTrackingCount} closed posting${S.closedTrackingCount===1?'':'s'} in Tracking folded — show`);
+    chip.style.cssText = 'opacity:.75;font-size:12px';
+    chip.title = 'Postings their company has taken down. Kept, never deleted.';
+    chip.onclick = () => { S.showClosed = !S.showClosed; renderBoard(); };
+    bar.appendChild(chip);
+  }
+  const dl = el('a', 'btn', '⬇ Download for Excel');
+  dl.href = '/api/applications.csv'; dl.style.marginLeft = 'auto'; dl.style.textDecoration = 'none';
+  bar.appendChild(dl);
+  return bar;
+}
+function sheetStyle(){
+  if ($('#sheetcss')) return;
+  const s = document.createElement('style'); s.id = 'sheetcss';
+  s.textContent = `
+    .sheetwrap{overflow-x:auto;border:1px solid var(--line,#30363d);border-radius:8px}
+    table.sheet{border-collapse:collapse;width:100%;font-size:13px;min-width:1000px}
+    table.sheet th,table.sheet td{border-bottom:1px solid var(--line,#30363d);border-right:1px solid var(--line,#30363d);padding:4px 8px;text-align:left;vertical-align:middle}
+    table.sheet td.co{min-width:150px;max-width:240px}
+    table.sheet td.role{min-width:240px}
+    table.sheet tr.filt th{top:28px;cursor:default;padding:3px 4px;font-weight:400}
+    table.sheet tr.filt input,table.sheet tr.filt select{width:100%;min-width:60px;box-sizing:border-box;font:inherit;font-size:12px;color:inherit;background:var(--bg,#0d1117);border:1px solid var(--line,#30363d);border-radius:4px;padding:2px 5px}
+    table.sheet tr.filt input.on,table.sheet tr.filt select.on{border-color:#58a6ff}
+    table.sheet th{position:sticky;top:0;background:var(--panel,#161b22);cursor:pointer;white-space:nowrap;user-select:none;font-weight:600}
+    table.sheet tr:nth-child(even) td{background:rgba(127,127,127,.05)}
+    table.sheet tr:hover td{background:rgba(88,166,255,.08)}
+    table.sheet td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+    table.sheet select,table.sheet textarea{font:inherit;color:inherit;background:transparent;border:1px solid transparent;border-radius:4px}
+    table.sheet select:hover,table.sheet textarea:hover,table.sheet textarea:focus{border-color:var(--line,#30363d)}
+    table.sheet textarea{width:100%;min-width:180px;resize:vertical;min-height:22px}
+    table.sheet .closed{opacity:.55}
+    table.sheet tr.grp td{cursor:pointer}
+    table.sheet tr.sub td{background:rgba(88,166,255,.04)}
+    table.sheet tr.sub td:first-child{padding-left:28px;opacity:.7}
+  `;
+  document.head.appendChild(s);
+}
+/**
+ * EXCEL-STYLE COLUMN FILTERS (2026-09-30: "can we enable filters for all
+ * tables"). A row under the header: a box per column that narrows the rows to
+ * those containing the text, or a menu when the column holds a few fixed
+ * values. On a number column, ">30" / "<14" / "=0" compare instead.
+ *   cols: [{ k, text:(row)=>string, num?:(row)=>number|null, options?:string[] }]
+ *   state: { [k]: string } — kept by the caller, so a redraw keeps the filters.
+ */
+function filterRow(cols, state, onChange){
+  const tr = el('tr','filt');
+  for (const c of cols){
+    const th = el('th');
+    if (c.options){
+      const s = el('select'); s.appendChild(new Option('All', ''));
+      for (const o of c.options) s.appendChild(new Option(o, o));
+      s.value = state[c.k] || ''; s.classList.toggle('on', !!s.value);
+      s.onchange = ()=>{ state[c.k] = s.value; s.classList.toggle('on', !!s.value); onChange(); };
+      th.appendChild(s);
+    } else if (c.text){
+      const i = el('input'); i.placeholder = c.num ? '>, <, or text' : 'filter';
+      i.value = state[c.k] || ''; i.classList.toggle('on', !!i.value);
+      i.oninput = ()=>{ state[c.k] = i.value; i.classList.toggle('on', !!i.value); onChange(); };
+      th.appendChild(i);
+    }
+    tr.appendChild(th);
+  }
+  return tr;
+}
+function passesFilters(row, cols, state){
+  for (const c of cols){
+    const want = String(state[c.k] || '').trim();
+    if (!want || !c.text) continue;
+    if (c.options){ if (c.text(row) !== want) return false; continue; }
+    const cmp = c.num && want.match(/^([<>]=?|=)\s*(-?\d+(?:\.\d+)?)$/);
+    if (cmp){
+      const n = c.num(row); const x = Number(cmp[2]);
+      if (n == null || !Number.isFinite(n)) return false;
+      if (!({ '>': n > x, '>=': n >= x, '<': n < x, '<=': n <= x, '=': n === x })[cmp[1]]) return false;
+      continue;
+    }
+    if (!String(c.text(row) || '').toLowerCase().includes(want.toLowerCase())) return false;
+  }
+  return true;
+}
+const anyFilter = (state) => Object.values(state).some((v) => String(v || '').trim());
+/** A company as people search it: no Workday entity number ("0001 …"), no ", Inc". */
+// A function declaration, not a const: the Inbox list can draw before the
+// script reaches this line, and a const read early throws.
+function coName(s){ return String(s || '').replace(/^\d{2,}[\s-]+/, '').replace(/\s+Legal Entity$/i, '').replace(/,?\s+(?:Inc\.?|LLC|Corp\.?|Corporation|Ltd\.?)$/i, '').trim(); }
+/** "Hide rejected" is on unless he turned it off; remembered per browser. */
+function hideRejectedPref(){ try { return localStorage.getItem('jarvis-hide-rejected') !== '0'; } catch { return true; } }
+function setHideRejectedPref(on){ try { localStorage.setItem('jarvis-hide-rejected', on ? '1' : '0'); } catch { /* this session only */ } }
+
+/**
+ * THE RESUME THAT WENT WITH IT (2026-09-30): view it, or download it as
+ * "Alex Rivera Resume.pdf". Several same-title builds are listed to choose from —
+ * never one picked for him — and none says so.
+ */
+function resumeWord(j){ return j.resume?.url ? 'On file' : j.resume?.choices ? 'Pick one' : 'None'; }
+function resumeCell(j){
+  const td = el('td'); td.style.whiteSpace = 'nowrap';
+  const links = (url, label) => {
+    const line = el('div'); line.style.cssText = 'display:flex;gap:8px;align-items:center';
+    if (label) line.appendChild(el('span','m', label));
+    const v = el('a', null, 'View'); v.href = url; v.target = '_blank'; v.rel = 'noopener'; v.title = 'Open the PDF in a new tab';
+    const d = el('a', null, '⬇'); d.href = `${url}&download=1`; d.setAttribute('download', RESUME_FILE); d.title = `Download as "${RESUME_FILE}"`;
+    line.append(v, d); return line;
+  };
+  if (j.resume?.url) td.appendChild(links(j.resume.url));
+  else if (j.resume?.choices) {
+    const n = j.resume.choices.length;
+    td.title = j.resume.byTitle ? 'Not tied to this exact posting: built for the same company and title. Check it is the one you sent.' : `${n} builds for this posting`;
+    j.resume.choices.slice(0, 3).forEach((c) => td.appendChild(links(c.url, c.at ? new Date(c.at).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '?')));
+    if (j.resume.byTitle) td.style.color = '#d29922';
+  } else td.appendChild(el('span','m','—'));
+  return td;
+}
+
+function renderSheet(pipeline, mailEv, leadInfo = {}){
+  sheetStyle();
+  const wrap = el('div'); wrap.id = 'board';
+  const tools = el('div'); tools.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap';
+  const q = el('input'); q.placeholder = 'Search every column…'; q.value = SHEET.q; q.style.cssText = 'flex:1;min-width:220px;max-width:420px';
+  // HIDE REJECTED (2026-09-30), on by default. Picking "Rejected" in the
+  // Status filter shows them anyway: asking for them is the exception.
+  const hideLbl = el('label','chk'); const hideBox = el('input'); hideBox.type = 'checkbox'; hideBox.checked = hideRejectedPref();
+  hideLbl.append(hideBox, document.createTextNode(' Hide rejected'));
+  const clear = el('button','btn','Clear filters');
+  const count = el('span', 'm');
+  tools.append(q, hideLbl, clear, count);
+  wrap.appendChild(tools);
+  const days = (iso) => (iso ? Math.floor((Date.now() - Date.parse(iso)) / 86400000) : null);
+  const fmtDayShort = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '');
+  const statusLabel = (j) => SHEET_STATUS_LABEL[j.status] || j.status;
+  const mailLabel = (j) => { const m = mailEv.latest?.[j.id]; return m && !m.undone_at ? (MAIL_SHORT[m.kind] || m.kind) : 'None'; };
+  const COLS = [
+    { k:'company', label:'Company', v:(j)=>coName(j.company).toLowerCase(), text:(j)=>coName(j.company) },
+    { k:'title', label:'Role', v:(j)=>String(j.title||'').toLowerCase(), text:(j)=>j.title },
+    { k:'location', label:'Location', v:(j)=>String(j.location||'').toLowerCase(), text:(j)=>j.location },
+    { k:'status', label:'Status', v:(j)=>STAGES.findIndex(s=>s.key===j.status), text:statusLabel, options: STAGES.map((s)=>SHEET_STATUS_LABEL[s.key] || s.key) },
+    { k:'applied', label:'Applied', v:(j)=>appliedOn(j), text:(j)=>fmtDayShort(appliedOn(j)) },
+    { k:'age', label:'Posting age', v:(j)=>postingAge(j)?.days ?? -1, text:(j)=>String(postingAge(j)?.days ?? ''), num:(j)=>postingAge(j)?.days ?? null },
+    { k:'updated', label:'Last update', v:(j)=>j.statusChangedAt||'', text:(j)=>fmtDayShort(j.statusChangedAt) },
+    { k:'days', label:'Days', v:(j)=>days(j.statusChangedAt) ?? -1, text:(j)=>String(days(j.statusChangedAt) ?? ''), num:(j)=>days(j.statusChangedAt) },
+    // Pay compares in thousands: ">100" is over $100K.
+    { k:'pay', label:'Pay', v:(j)=>j.salary?.min || j.salary?.max || 0, text:(j)=>fmtPay(j.salary), num:(j)=>{ const n = j.salary?.max || j.salary?.min; return n ? n / 1000 : null; } },
+    { k:'mail', label:'Latest email', v:(j)=>mailEv.latest?.[j.id]?.sent_at || '', text:mailLabel, options:['None', ...Object.values(MAIL_SHORT)] },
+    { k:'resume', label:'Resume', v:(j)=>resumeWord(j), text:resumeWord, options:['On file','Pick one','None'] },
+    // Pressing it puts the job on the Outreach tab; sorting brings the chosen ones together.
+    { k:'outreach', label:'Outreach', v:(j)=>(leadInfo[j.id] ? 1 + (leadInfo[j.id].count || 0) : 0), text:(j)=>(leadInfo[j.id] ? 'Chosen' : 'Not chosen'), options:['Chosen','Not chosen'] },
+    { k:'note', label:'Your notes', v:(j)=>String(j.userNote||'').toLowerCase(), text:(j)=>j.userNote },
+  ];
+  SHEET.cols = SHEET.cols || {};
+  const table = el('table', 'sheet');
+  const thead = el('thead'); const hr = el('tr');
+  for (const c of COLS) {
+    const th = el('th', null, c.label + (SHEET.sort === c.k ? (SHEET.dir > 0 ? ' ▲' : ' ▼') : ''));
+    th.onclick = () => { if (SHEET.sort === c.k) SHEET.dir = -SHEET.dir; else { SHEET.sort = c.k; SHEET.dir = c.k === 'company' || c.k === 'title' || c.k === 'location' ? 1 : -1; } draw(); };
+    hr.appendChild(th);
+  }
+  let filt = filterRow(COLS, SHEET.cols, () => draw());
+  thead.append(hr, filt); table.appendChild(thead);
+  clear.onclick = () => { SHEET.cols = {}; SHEET.q = ''; q.value = ''; const f = filterRow(COLS, SHEET.cols, () => draw()); filt.replaceWith(f); filt = f; draw(); };
+  hideBox.onchange = () => { setHideRejectedPref(hideBox.checked); draw(); };
+  const tbody = el('tbody'); table.appendChild(tbody);
+  const scroll = el('div', 'sheetwrap'); scroll.appendChild(table); wrap.appendChild(scroll);
+  const fmtDay = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '');
+  const fmtPay = (s) => {
+    if (!s || (!s.min && !s.max)) return '';
+    const k = (n) => (n >= 1000 ? `${Math.round(n/1000)}K` : `${n}`);
+    return (s.min && s.max && s.min !== s.max ? `${k(s.min)}–${k(s.max)}` : k(s.min || s.max)) + (s.interval && s.interval !== 'year' ? `/${s.interval}` : '');
+  };
+  function draw(){
+    [...hr.children].forEach((th, i) => { const c = COLS[i]; th.textContent = c.label + (SHEET.sort === c.k ? (SHEET.dir > 0 ? ' ▲' : ' ▼') : ''); });
+    const needle = SHEET.q.trim().toLowerCase();
+    const col = COLS.find((c) => c.k === SHEET.sort) || COLS[5];
+    const askedRejected = SHEET.cols.status === SHEET_STATUS_LABEL.rejected;
+    const hidingRejected = hideBox.checked && !askedRejected;
+    const rows = pipeline
+      .filter((j) => !hidingRejected || j.status !== 'rejected')
+      .filter((j) => passesFilters(j, COLS, SHEET.cols))
+      .filter((j) => !needle || COLS.map((c) => c.text?.(j) || '').join(' ').toLowerCase().includes(needle))
+      .sort((a, b) => { const x = col.v(a), y = col.v(b); return (x < y ? -1 : x > y ? 1 : 0) * SHEET.dir; });
+    clear.style.display = anyFilter(SHEET.cols) || needle ? '' : 'none';
+    const rejectedHidden = hidingRejected ? pipeline.filter((j) => j.status === 'rejected').length : 0;
+    // ONE ROLE, ONE LINE (2026-09-26: "theres some duplicate roles in the
+    // applications tab"). Amazon's Tech Deployment role was five lines — five
+    // requisitions in three cities, each a real application — and nothing on
+    // screen told them apart. Rows with the same role (mail.mjs sameRoleKey)
+    // fold into one line that opens to the postings; each keeps its own status.
+    const groups = new Map();
+    for (const j of rows) { const k = j.roleKey || j.id; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(j); }
+    count.textContent = (groups.size === rows.length
+      ? `${rows.length} of ${pipeline.length}`
+      : `${groups.size} roles · ${rows.length} postings of ${pipeline.length}`)
+      + (rejectedHidden ? ` · ${rejectedHidden} rejected hidden` : '');
+    tbody.innerHTML = '';
+    for (const [k, members] of groups) {
+      if (members.length === 1) { tbody.appendChild(rowFor(members[0])); continue; }
+      const open = SHEET.open.has(k);
+      tbody.appendChild(groupRow(k, members, open));
+      if (open) for (const j of members) tbody.appendChild(rowFor(j, true));
+    }
+  }
+  /** The folded line: the role once, where it is posted, and how far each posting got. */
+  function groupRow(k, members, open){
+    const tr = el('tr', 'grp'); const lead = members[0];
+    if (members.every((j) => j.goneAt)) tr.classList.add('closed');
+    const co = el('td'); const cw = el('div'); cw.style.cssText = 'display:flex;gap:6px;align-items:center';
+    co.className = 'co'; cw.appendChild(logoEl(coName(lead.company), lead.url, 'sm')); cw.appendChild(el('span', null, coName(lead.company))); co.appendChild(cw); tr.appendChild(co);
+    const role = el('td', 'role');
+    const tog = el('button', 'iconbtn', `${open ? '▾' : '▸'} ${members.length} postings`);
+    tog.style.cssText = 'margin-left:6px;font-size:12px';
+    tog.title = 'The same role posted as separate requisitions. Each is its own application.';
+    role.appendChild(el('span', null, lead.title)); role.appendChild(tog); tr.appendChild(role);
+    tr.onclick = (e) => { if (e.target.closest('a,select,textarea')) return; if (open) SHEET.open.delete(k); else SHEET.open.add(k); draw(); };
+    const places = [...new Set(members.map((j) => String(j.location || '').split(',')[0].trim()).filter(Boolean))];
+    tr.appendChild(el('td', null, places.length > 2 ? `${places.slice(0, 2).join(', ')} +${places.length - 2}` : places.join(', ')));
+    const byStage = {}; for (const j of members) byStage[j.status] = (byStage[j.status] || 0) + 1;
+    tr.appendChild(el('td', null, STAGES.filter((s) => byStage[s.key]).map((s) => `${SHEET_STATUS_LABEL[s.key] || s.key}${byStage[s.key] > 1 ? ' ×' + byStage[s.key] : ''}`).join(' · ')));
+    const latest = (f) => members.map(f).filter(Boolean).sort().pop() || '';
+    tr.appendChild(el('td', 'num', fmtDay(latest(appliedOn))));
+    tr.appendChild(el('td', 'num'));
+    const upd = latest((j) => j.statusChangedAt);
+    tr.appendChild(el('td', 'num', fmtDay(upd)));
+    tr.appendChild(el('td', 'num', days(upd) == null ? '' : String(days(upd))));
+    tr.appendChild(el('td', 'num', fmtPay(members.find((j) => j.salary?.min || j.salary?.max)?.salary)));
+    const mc = el('td');
+    const m = members.map((j) => mailEv.latest?.[j.id]).filter(Boolean).sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at))).pop();
+    if (m) mc.appendChild(mailLine(m, true));
+    tr.appendChild(mc);
+    tr.appendChild(el('td')); tr.appendChild(el('td')); tr.appendChild(el('td'));
+    return tr;
+  }
+  /** One posting's line; `sub` when it sits under its role's folded line. */
+  function rowFor(j, sub){
+    {
+      const tr = el('tr'); if (j.goneAt) tr.classList.add('closed'); if (sub) tr.classList.add('sub');
+      const co = el('td'); const cw = el('div'); cw.style.cssText = 'display:flex;gap:6px;align-items:center';
+      co.className = 'co'; cw.appendChild(logoEl(coName(j.company), j.url, 'sm')); cw.appendChild(el('span', null, coName(j.company))); co.appendChild(cw); tr.appendChild(co);
+      const role = el('td', 'role'); const h = safeHref(j.url); const a = el(h ? 'a' : 'span', null, j.title);
+      if (h) { a.href = h; a.target = '_blank'; a.rel = 'noopener'; }
+      role.appendChild(a);
+      // Under a folded role the titles are identical; the requisition is what differs.
+      const req = sub ? (String(j.url || '').match(/\d{5,}/g) || []).pop() : '';
+      if (req) { const r = el('span', 'm', ` #${req}`); r.style.opacity = '.6'; role.appendChild(r); }
+      if (j.goneAt) role.appendChild(el('span', 'pill low', ' closed')); tr.appendChild(role);
+      tr.appendChild(el('td', null, j.location || ''));
+      const sc = el('td'); const sel = el('select');
+      for (const s of STAGES) sel.appendChild(new Option(SHEET_STATUS_LABEL[s.key] || s.key, s.key));
+      sel.value = j.status;
+      sel.onchange = async () => { const to = sel.value; await persist({ ids: [j.id], status: to }); j.status = to; j.statusChangedAt = new Date().toISOString(); draw(); };
+      sc.appendChild(sel); tr.appendChild(sc);
+      tr.appendChild(el('td', 'num', fmtDay(appliedOn(j))));
+      const ag = postingAge(j); const at = el('td', 'num');
+      if (ag) {
+        at.textContent = `${ag.floor ? '≥' : ''}${ag.days} d`;
+        if (!ag.applied) at.style.opacity = '.55';
+        at.title = (ag.applied ? 'How old the posting was when you applied. ' : 'Not applied yet — its age today. ')
+          + (ag.floor ? `No posting date; Jarvis first saw it ${fmtDay(new Date(ag.start).toISOString())}, so it was at least this old.` : `Posted ${fmtDay(new Date(ag.start).toISOString())}.`);
+      }
+      tr.appendChild(at);
+      tr.appendChild(el('td', 'num', fmtDay(j.statusChangedAt)));
+      tr.appendChild(el('td', 'num', days(j.statusChangedAt) == null ? '' : String(days(j.statusChangedAt))));
+      tr.appendChild(el('td', 'num', fmtPay(j.salary)));
+      const mc = el('td'); const m = mailEv.latest?.[j.id]; if (m) mc.appendChild(mailLine(m, true)); tr.appendChild(mc);
+      tr.appendChild(resumeCell(j));
+      const oc = el('td'); if (j.status !== 'rejected' || leadInfo[j.id]) oc.appendChild(outreachButton(j, leadInfo)); tr.appendChild(oc);
+      const nc = el('td'); const ta = el('textarea'); ta.rows = 1; ta.value = j.userNote || ''; ta.placeholder = 'add a note';
+      let saved = ta.value;
+      ta.onblur = async () => {
+        if (ta.value === saved) return;
+        const r = await fetch('/api/note', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ id: j.id, note: ta.value }) }).catch(() => null);
+        if (r && r.ok) { saved = ta.value; j.userNote = ta.value; ta.style.borderColor = ''; } else { ta.style.borderColor = '#d29922'; ta.title = 'not saved — the dashboard did not answer'; }
+      };
+      nc.appendChild(ta); tr.appendChild(nc);
+      return tr;
+    }
+  }
+  q.oninput = () => { SHEET.q = q.value; draw(); };
+  draw();
+  return wrap;
+}
+
 async function renderBoard(){
   $('#tbl').style.display='none';
   $('#empty').style.display='none';
-  $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove();
+  $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove(); $('#appsbar')?.remove();
   $('#showing').innerHTML = 'Application pipeline — a heart starts a card in Tracking; advance it as you apply and as companies respond. Statuses persist in the store.';
   const board = el('div','board'); board.id='board';
   // An all-zero board is a state worth explaining once, rather than five
@@ -2774,8 +3262,8 @@ async function renderBoard(){
   // awaited one after the next: the postings, then the leads, then the mail
   // pair. Measured 2026-09-22, the board was four round trips deep before it
   // drew a single card.
-  const [pipeline, leadInfo, mailSt, mailEv] = await Promise.all([
-    fetch('/api/jobs?limit=1000&sort=fit&status='+STAGES.map(s=>s.key).join(',')+hide)
+  let [pipeline, leadInfo, mailSt, mailEv] = await Promise.all([
+    fetch('/api/jobs?limit=1000&sort=fit&roleKey=1&status='+STAGES.map(s=>s.key).join(',')+hide)
       .then(r=>r.json()).then(d=>d.jobs).catch(()=>[]),
     // Which cards already have leads found, or research running.
     fetch('/api/outreach/leads/summary').then(r=>r.json()).then(d=>d.jobs||{}).catch(()=>({})),
@@ -2783,9 +3271,28 @@ async function renderBoard(){
     fetch('/api/mail/status').then(r=>r.json()).catch(()=>null),
     fetch('/api/mail/events').then(r=>r.json()).catch(()=>({ latest:{}, recent:[] })),
   ]);
+  // A CLOSED POSTING HE ONLY HEARTED IS FOLDED (2026-10-16): 17 of the
+  // Tracking cards were jobs nobody can apply to any more. Anything past
+  // Tracking is his record and stays as it is.
+  const closedTracking = pipeline.filter((j) => j.status === 'interested' && j.goneAt).length;
+  S.closedTrackingFolded = S.showClosed ? 0 : closedTracking;
+  S.closedTrackingCount = closedTracking;   // the toolbar's chip (appsViewBar)
+  if (!S.showClosed) pipeline = pipeline.filter((j) => !(j.status === 'interested' && j.goneAt));
   for (const j of pipeline) {
     if (!byStatus.has(j.status)) byStatus.set(j.status, []);
     byStatus.get(j.status).push(j);
+  }
+  // THE SHEET IS THE DEFAULT (2026-09-24); the board is the other button.
+  const mode = appsMode();
+  if (mode === 'sheet') {
+    const sheet = renderSheet(pipeline, mailEv, leadInfo);
+    const at = $('#tablewrap');
+    at.parentNode.insertBefore(sheet, at);
+    sheet.parentNode.insertBefore(appsViewBar(mode), sheet);
+    sheet.parentNode.insertBefore(mailBar(mailSt, mailEv), $('#appsbar'));
+    if (!pipeline.length) { emptyNote.style.display='block'; sheet.parentNode.insertBefore(emptyNote, sheet.nextSibling); }
+    $('#seln').textContent=S.sel.size; $('#actionbar').classList.remove('show');
+    return;
   }
   for (const st of STAGES){
     const jobs = (byStatus.get(st.key) || [])
@@ -2809,13 +3316,7 @@ async function renderBoard(){
       if (st.key==='interested'){ const u=el('button','iconbtn dim','↩'); u.title='Stop tracking — back to the Library'; u.onclick=()=>singleAct(j.id,'new'); acts.appendChild(u); }
       else if (st.key!=='rejected'){ const r=el('button','iconbtn dim','✗'); r.title='Mark rejected'; r.onclick=()=>singleAct(j.id,'rejected'); acts.appendChild(r); }
       else { const back=el('button','iconbtn','↩'); back.title='Back to Applied'; back.onclick=()=>singleAct(j.id,'applied'); acts.appendChild(back); }
-      if (st.key!=='rejected'){
-        const ob = el('button','iconbtn leads'); ob.title='Find the people hiring for this role';
-        ob.dataset.job = j.id;   // so a finished run can find its button again
-        paintLeadsButton(ob, leadInfo[j.id]);
-        ob.onclick = ()=>openLeads(j, ob);
-        acts.appendChild(ob);
-      }
+      if (st.key!=='rejected' || leadInfo[j.id]) acts.appendChild(outreachButton(j, leadInfo));
       card.appendChild(acts);
       col.appendChild(card);
     }
@@ -2830,7 +3331,8 @@ async function renderBoard(){
   const anchor = $('#tablewrap');
   anchor.parentNode.insertBefore(board, anchor);
   $('#mailbar')?.remove();
-  board.parentNode.insertBefore(mailBar(mailSt, mailEv), board);
+  board.parentNode.insertBefore(appsViewBar(mode), board);
+  board.parentNode.insertBefore(mailBar(mailSt, mailEv), $('#appsbar'));
   if (!pipeline.length) { emptyNote.style.display='block'; board.parentNode.insertBefore(emptyNote, board.nextSibling); }
   $('#seln').textContent=S.sel.size; $('#actionbar').classList.remove('show');
 }
@@ -2840,16 +3342,20 @@ async function renderBoard(){
 // Read-only Gmail (jarvis/mail.mjs). The bar sets it up and says when it last
 // looked; a card an email moved says which email, and undo puts it back.
 const MAIL_KIND = { received:'Application received', assessment:'Assessment', interview:'Interview request', offer:'Offer', rejection:'Rejection' };
-function mailLine(e){
+// The sheet's short words for the same verdicts: one line in a cell, not a
+// two-line capsule (2026-09-30: "it feels too long, and cluttered").
+const MAIL_SHORT = { received:'Received', assessment:'Assessment', interview:'Interview', offer:'Offer', rejection:'Rejected' };
+function mailLine(e, compact = false){
   const line = el('div','m');
-  line.style.cssText = 'margin-top:5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+  line.style.cssText = compact ? 'display:flex;gap:5px;align-items:center;white-space:nowrap' : 'margin-top:5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap';
   const when = e.sent_at ? new Date(e.sent_at).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
-  const tag = el('span', 'pill ' + (e.kind==='rejection' ? 'low' : e.kind==='offer' || e.kind==='interview' ? 'high' : 'medium'), `✉ ${MAIL_KIND[e.kind] || e.kind}`);
+  const tag = el('span', 'pill ' + (e.kind==='rejection' ? 'low' : e.kind==='offer' || e.kind==='interview' ? 'high' : 'medium'), `✉ ${(compact ? MAIL_SHORT : MAIL_KIND)[e.kind] || e.kind}`);
+  if (compact) tag.style.cssText = 'text-transform:none;letter-spacing:0;padding:1px 6px;font-size:11px';
   tag.title = `${e.subject}\n${e.sender}\n${e.snippet || ''}`;
   line.appendChild(tag);
   line.appendChild(el('span', null, when + (e.undone_at ? ' · undone' : '')));
   if (e.to_status && !e.undone_at){
-    const u = el('button','iconbtn dim','undo'); u.style.fontSize='11px';
+    const u = el('button','iconbtn dim', compact ? '↶' : 'undo'); u.style.fontSize='11px';
     u.title = `Put this card back to "${e.from_status}"`;
     u.onclick = async()=>{ u.disabled = true; await OJ('/api/mail/undo', { msgId: e.msg_id }); renderBoard(); };
     line.appendChild(u);
@@ -2920,9 +3426,14 @@ function mailBar(st, ev){
   }
   bar.appendChild(el('b',null, `✉ Reading ${st.account || 'Gmail'}`));
   const last = st.lastSyncAt ? `checked ${fmtAge(Date.parse(st.lastSyncAt))} ago` : 'not checked yet';
-  const res = st.lastResult ? ` · last check read ${st.lastResult.read} new, moved ${st.lastResult.moved}` : '';
+  const res = st.lastResult ? ` · last check read ${st.lastResult.read} new, moved ${st.lastResult.moved}${st.lastResult.linkedin ? `, ${st.lastResult.linkedin} LinkedIn update${st.lastResult.linkedin===1?'':'s'} for Outreach` : ''}` : '';
   bar.appendChild(el('span','hint', `${last}${res}. Checks every 30 minutes.`));
   if (st.lastError) bar.appendChild(el('span','leadwarn', st.lastError));
+  // A Testing-mode Google app logs him out every 7 days: one click back in.
+  if (/invalid_grant|expired|revoked|reconnect/i.test(st.lastError || '')){
+    const again = el('a','btn','Reconnect Gmail'); again.href = '/api/mail/connect';
+    bar.appendChild(again);
+  }
   const now = el('button','btn', st.syncing ? 'Checking…' : 'Check email now');
   now.disabled = !!st.syncing;
   now.onclick = async()=>{
@@ -2969,74 +3480,96 @@ function mailSetup(st){
   return box;
 }
 
-// ── Leads: the Outreach button on an application card ──────────────
+// ── The Outreach button on an application (sheet row or board card) ──
 //
-// Press it and Jarvis researches the people hiring for that one job (web search
-// only — jarvis/leads.mjs) and shows them here. It takes a few minutes; the
-// panel polls, and the research keeps going if the panel is closed. Nothing is
-// sent and nothing is saved unless he presses "Save to tracker".
+// Alex, 2026-09-25: "i should be able to choose outreach in application list
+// then it appears in the outreach tab". The FIRST press chooses the job: it
+// goes on the Outreach tab and Jarvis starts finding the people behind it (web
+// search only — jarvis/leads.mjs) while he stays on the list to pick the next
+// one. Every press after that opens the job in the Outreach tab, which is the
+// one place everything the research found is kept. It used to open a drawer
+// here instead, so the people lived in one view and the messages in another.
 function paintLeadsButton(btn, info){
   btn.classList.remove('has','busy');
-  if (info?.status === 'running'){ btn.textContent = 'Finding…'; btn.classList.add('busy'); }
-  else if (info?.status === 'done'){ btn.textContent = info.count ? `${info.count} lead${info.count===1?'':'s'}` : 'No leads'; if (info.count) btn.classList.add('has'); }
-  else btn.textContent = 'Outreach';
+  if (!info){ btn.textContent = 'Outreach'; btn.title = 'Add this job to the Outreach tab and find the people hiring for it'; return; }
+  btn.title = 'Open it in the Outreach tab';
+  if (info.status === 'running'){ btn.textContent = 'Finding people…'; btn.classList.add('busy'); }
+  else if (info.status === 'done'){ btn.textContent = info.count ? `${info.count} ${info.count===1?'person':'people'} →` : 'No one found →'; if (info.count) btn.classList.add('has'); }
+  else if (info.status === 'failed') btn.textContent = 'Search failed →';
+  else btn.textContent = 'In Outreach →';
 }
 
-let LEADS_TIMER = null;
-function closeLeads(){
-  clearTimeout(LEADS_TIMER); LEADS_TIMER = null;
-  $('#leadsback')?.remove(); $('#leadsdrawer')?.remove();
-  document.removeEventListener('keydown', leadsEsc);
+/** @param leadInfo the board's summary map — written to, so a redraw keeps the press. */
+function outreachButton(j, leadInfo){
+  const b = el('button','iconbtn leads');
+  b.dataset.job = j.id;
+  paintLeadsButton(b, leadInfo[j.id]);
+  b.onclick = async()=>{
+    if (leadInfo[j.id]){ showOutreachJob(j.id); return; }
+    b.disabled = true;
+    const res = await OJ('/api/outreach/leads', { id: j.id });
+    b.disabled = false;
+    if (!res.run){ b.textContent = res.error || 'Could not add it'; return; }
+    leadInfo[j.id] = { status: res.run.status, count: res.run.result?.people?.length || 0 };
+    paintLeadsButton(b, leadInfo[j.id]);
+    if (res.run.status === 'running') watchLeadButton(b, j.id, leadInfo);
+  };
+  if (leadInfo[j.id]?.status === 'running') watchLeadButton(b, j.id, leadInfo);
+  return b;
 }
-function leadsEsc(e){ if (e.key === 'Escape') closeLeads(); }
 
-async function openLeads(job, cardBtn){
-  closeLeads();
-  const back = el('div','leadsback'); back.id='leadsback'; back.onclick = closeLeads;
-  const d = el('div','leadsdrawer'); d.id='leadsdrawer';
-  document.body.append(back, d);
-  document.addEventListener('keydown', leadsEsc);
+/** Repaint the button when its research finishes; stops once the button is gone. */
+function watchLeadButton(btn, id, leadInfo){
+  const t = setInterval(async()=>{
+    if (!btn.isConnected){ clearInterval(t); return; }
+    const res = await fetch(`/api/outreach/leads?id=${encodeURIComponent(id)}`).then(r=>r.json()).catch(()=>null);
+    const run = res?.run;
+    if (!run || run.status === 'running') return;
+    clearInterval(t);
+    leadInfo[id] = { status: run.status, count: run.result?.people?.length || 0 };
+    paintLeadsButton(btn, leadInfo[id]);
+  }, 6000);
+}
 
-  const x = el('button','btn x','Close'); x.onclick = closeLeads;
-  const head = el('div'); head.style.paddingRight='70px';
-  head.appendChild(el('h2',null, job.title));
-  head.appendChild(el('div','co', `${job.company}${job.location?` · ${job.location}`:''}`));
-  const body = el('div');
-  d.append(x, head, body);
-
-  // Start it if it has never run; otherwise just show what is there.
-  let first = await fetch(`/api/outreach/leads?id=${encodeURIComponent(job.id)}`).then(r=>r.json()).catch(()=>null);
-  if (first?.run?.status === 'none') first = await OJ('/api/outreach/leads', { id: job.id });
-  draw(first);
+/**
+ * The people the research found, for the Outreach tab's job page. Polls while
+ * the research runs. `onWrite(person)` fills the message form below it; it is
+ * absent when the ledger already has someone on this role.
+ */
+function leadsPanel(job, { seq, onWrite, onSaved }){
+  const p = el('div','panel leadsec');
+  p.appendChild(el('h3',null,'People Jarvis found'));
+  const body = el('div'); p.appendChild(body);
+  body.appendChild(el('div','hint','Loading…'));
+  const live = () => seq === OUT_SEQ;
+  const load = async()=> fetch(`/api/outreach/leads?id=${encodeURIComponent(job.id)}`).then(r=>r.json()).catch(()=>null);
+  load().then(draw);
 
   function draw(res){
-    if (!document.getElementById('leadsdrawer')) return;   // closed meanwhile
+    if (!live()) return;
     body.innerHTML = '';
     if (!res || res.error){ body.appendChild(el('div','leadwarn', res?.error || 'The dashboard did not answer.')); return; }
     const run = res.run || { status:'none' };
-    // The board may have been redrawn under us, which leaves the button we were
-    // handed detached; the card's own button is found by job id.
-    const btn = (cardBtn && cardBtn.isConnected) ? cardBtn : $(`#board .iconbtn.leads[data-job="${CSS.escape(job.id)}"]`);
-    if (btn) paintLeadsButton(btn, { status: run.status, count: run.result?.people?.length || 0 });
 
     const bar = el('div','sec');
     const status = el('div','hint');
     if (run.status === 'running'){
       const secs = Math.max(0, Math.round((Date.now() - Date.parse(run.startedAt)) / 1000));
-      status.textContent = `Researching the people behind this role… ${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')} so far. This usually takes 1 to 5 minutes. You can close this; it keeps going.`;
+      status.textContent = `Researching the people behind this role… ${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')} so far. This usually takes 1 to 5 minutes, and keeps going if you leave this page.`;
     } else if (run.status === 'failed'){
-      status.textContent = '';
       bar.appendChild(el('div','leadwarn', run.error || 'The research failed.'));
     } else if (run.status === 'done'){
       const age = run.finishedAt ? Date.now() - Date.parse(run.finishedAt) : 0;
       const when = age < 90 * 1000 ? 'just now' : `${fmtAge(Date.parse(run.finishedAt))} ago`;
       status.textContent = `Found ${when}. From public pages only; open each profile to confirm they are still there before you write.`;
+    } else {
+      status.textContent = 'Not searched yet.';
     }
     bar.appendChild(status);
     if (run.status !== 'running'){
-      const again = el('button','btn', run.status === 'done' ? 'Search again' : 'Find leads');
+      const again = el('button','btn', run.status === 'done' ? 'Search again' : 'Find people');
       again.style.marginTop='8px';
-      again.onclick = async()=>{ again.disabled = true; draw(await OJ('/api/outreach/leads', { id: job.id, refresh: true })); poll(); };
+      again.onclick = async()=>{ again.disabled = true; draw(await OJ('/api/outreach/leads', { id: job.id, refresh: run.status !== 'none' })); };
       bar.appendChild(again);
     }
     body.appendChild(bar);
@@ -3050,40 +3583,49 @@ async function openLeads(job, cardBtn){
         body.appendChild(w);
       }
       const people = el('div','sec');
-      people.appendChild(el('h3',null, r.people.length ? 'People' : 'No credible person found'));
+      if (!r.people.length) people.appendChild(el('div','hint','No credible person found. The LinkedIn searches further down are the next step.'));
       const saved = new Set((res.contacts||[]).map(c=>String(c.name).toLowerCase()));
-      for (const p of r.people){
+      for (const pp of r.people){
         const c = el('div','lead');
         const who = el('div','who');
-        who.appendChild(el('b',null,p.name));
-        who.appendChild(el('span','pill', p.persona));
-        who.appendChild(el('span','pill '+p.confidence, p.confidence));
+        who.appendChild(el('b',null,pp.name));
+        who.appendChild(el('span','pill', pp.persona));
+        who.appendChild(el('span','pill '+pp.confidence, pp.confidence));
         c.appendChild(who);
-        if (p.title) c.appendChild(el('div','ttl', p.title));
-        if (p.why) c.appendChild(el('div','why', p.why));
+        if (pp.title) c.appendChild(el('div','ttl', pp.title));
+        if (pp.why) c.appendChild(el('div','why', pp.why));
+        for (const extraLine of [leadWhyLine(pp), signalLine(pp.signal), personalLine(pp.personal)]) if (extraLine) c.appendChild(extraLine);
         const links = el('div','links');
         const link = (label, href)=>{ const h = safeHref(href); if(!h) return; const a = el('a','btn',label); a.href=h; a.target='_blank'; a.rel='noopener'; links.appendChild(a); };
-        link('Profile', p.profile_url);
-        if (p.evidence_url && p.evidence_url !== p.profile_url) link('Evidence', p.evidence_url);
-        if (p.public_email){
-          const m = el('button','btn', p.public_email);
+        link(/linkedin\.com/i.test(String(pp.profile_url || '')) ? 'LinkedIn profile' : 'Profile', pp.profile_url);
+        if (pp.evidence_url && pp.evidence_url !== pp.profile_url) link('Evidence', pp.evidence_url);
+        if (pp.public_email){
+          const m = el('button','btn', pp.public_email);
           m.title = 'Published publicly — click to copy';
-          m.onclick = ()=>{ navigator.clipboard?.writeText(p.public_email); m.textContent='Copied'; setTimeout(()=>m.textContent=p.public_email,1200); };
+          m.onclick = ()=>{ navigator.clipboard?.writeText(pp.public_email); m.textContent='Copied'; setTimeout(()=>m.textContent=pp.public_email,1200); };
           links.appendChild(m);
-          link('Where it is published', p.email_source_url);
+          link('Where it is published', pp.email_source_url);
         }
-        const save = el('button','btn', saved.has(p.name.toLowerCase()) ? 'In tracker' : 'Save to tracker');
-        save.disabled = saved.has(p.name.toLowerCase());
+        const isSaved = saved.has(pp.name.toLowerCase());
+        if (onWrite && !isSaved){
+          const w = el('button','btn','Write to them');
+          w.title = 'Put this person in the message form below';
+          w.onclick = ()=>onWrite(pp, r);
+          links.appendChild(w);
+        }
+        const save = el('button','btn', isSaved ? 'In tracker' : 'Save to tracker');
+        save.disabled = isSaved;
         save.onclick = async()=>{
           save.disabled = true;
           const out = await OJ('/api/outreach/contact', {
-            id: job.id, name: p.name, title: p.title, persona: p.persona,
-            channel: p.public_email ? 'email' : 'note', linkedin_url: p.profile_url,
-            email: p.public_email || undefined,
-            note: `Lead found by Jarvis (${p.confidence} confidence): ${p.why}${r.hook?` Hook: ${r.hook}`:''}`,
+            id: job.id, name: pp.name, title: pp.title, persona: pp.persona,
+            channel: pp.public_email ? 'email' : 'note', linkedin_url: pp.profile_url,
+            email: pp.public_email || undefined,
+            note: `Lead found by Jarvis (${pp.confidence} confidence): ${pp.why}${r.hook?` Hook: ${r.hook}`:''}`,
           });
           if (out.status === 409){ save.textContent = out.error; save.title = out.error; return; }
-          save.textContent = out.contact ? 'In tracker' : (out.error || 'Could not save');
+          if (!out.contact){ save.textContent = out.error || 'Could not save'; return; }
+          onSaved?.();
         };
         links.appendChild(save);
         c.appendChild(links);
@@ -3101,23 +3643,12 @@ async function openLeads(job, cardBtn){
         }
         if (r.careers_email) more.appendChild(el('div','hint', `Company inbox: ${r.careers_email}`));
         if (r.notes) more.appendChild(el('div','hint', r.notes));
-        const write = el('button','btn','Write a message in Outreach →');
-        write.style.marginTop='10px';
-        write.onclick = ()=>{ closeLeads(); goView('outreach'); setTimeout(()=>openOutreachJob(job.id), 50); };
-        more.appendChild(write);
         body.appendChild(more);
       }
     }
-    if (run.status === 'running') poll();
+    if (run.status === 'running') setTimeout(async()=>{ if (live()) draw(await load()); }, 4000);
   }
-
-  function poll(){
-    clearTimeout(LEADS_TIMER);
-    LEADS_TIMER = setTimeout(async()=>{
-      const res = await fetch(`/api/outreach/leads?id=${encodeURIComponent(job.id)}`).then(r=>r.json()).catch(()=>null);
-      draw(res);
-    }, 4000);
-  }
+  return p;
 }
 
 // ── Home: what Jarvis has actually done ────────────────────────────
@@ -3317,9 +3848,41 @@ async function renderHome(){
   let d;
   try { d = await (await fetch('/api/overview')).json(); }
   catch { hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load the overview — is the server still running?')); return; }
+  // AN ANSWER WITH NO NUMBERS IN IT (2026-10-16): right after a restart, while
+  // the background counter was still busy, /api/overview answered an error
+  // object, `d.stat` was undefined and the page threw on `s.readable` — a blank
+  // Overview twice in a minute. Say so and ask again.
+  if (!d || !d.stat) {
+    hub.innerHTML='';
+    hub.appendChild(el('div','empty', `The overview numbers are still being counted${d && d.error ? ` (${d.error})` : ''} — trying again in a few seconds.`));
+    clearTimeout(renderHome._retry);
+    renderHome._retry = setTimeout(() => { if (SUB.inbox === 'home' || location.hash === '#home') renderHome(); }, 5000);
+    return;
+  }
   hub.innerHTML='';
 
   const staleHome = staleBanner(d.code); if (staleHome) hub.appendChild(staleHome);
+
+  // HIS PACE FIRST (2026-10-16): "how many applications i have per day on avg
+  // to keep track of if im slacking or not". Confirmed applications only.
+  try {
+    const p = await (await fetch('/api/pace')).json();
+    if (p && typeof p.today === 'number') {
+      const card = el('div','pace');
+      const stat = (num, lab, cls = '') => { const w = el('div'); w.appendChild(el('div', `num ${cls}`, String(num))); w.appendChild(el('div','lab', lab)); return w; };
+      const trend = p.perDay7 < p.perDayPrev7 ? 'down' : p.perDay7 > p.perDayPrev7 ? 'up' : '';
+      card.appendChild(stat(p.today, 'sent today'));
+      card.appendChild(stat(`${p.perDay7}/day`, `last 7 days (${p.last7}) · the week before ${p.perDayPrev7}/day`, trend));
+      card.appendChild(stat(`${p.perDay30}/day`, '30-day average'));
+      card.appendChild(stat(p.streak ? `${p.streak}d` : (p.daysSinceLast == null ? '—' : `${p.daysSinceLast}d`), p.streak ? 'streak' : 'since the last one'));
+      const bars = el('div','bars');
+      const top = Math.max(1, ...p.days.map((x) => x.n));
+      for (const x of p.days) { const b = el('div', x.n ? '' : 'zero'); b.style.height = `${Math.max(2, Math.round(44 * x.n / top))}px`; b.title = `${x.day}: ${x.n}`; bars.appendChild(b); }
+      card.appendChild(bars);
+      card.title = `${p.total} confirmed applications since ${p.since}. Counted only when the employer's confirmation email (or a later reply) is on the card.`;
+      hub.appendChild(card);
+    }
+  } catch { /* the pace is a glance, never a reason the overview fails */ }
 
   renderSkipInsights(hub);
 
@@ -3535,14 +4098,18 @@ async function renderReview(){
     }
 
     const meta = el('div','hint');
-    const when = (() => { try { return new Date(r.at).toLocaleString(); } catch { return r.at; } })();
+    // A record with no fill time read "prepared Invalid Date"; one from July
+    // stores `skipped` as the LIST of fields and read "[object Object] left"
+    // (both found on the 2026-10-16 walk-through). Count a list; name a gap.
+    const when = (() => { const d = new Date(r.at); return r.at && !isNaN(d) ? d.toLocaleString() : 'at an unknown time'; })();
+    const count = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
     // Ticked boxes counted too, because the toolbar badge counts them and a
     // row that says "3 filled" under a badge that said 11 reads as work lost.
-    const did = `${r.filled} field(s) filled`
-      + (r.checked ? ` · ${r.checked} box(es) ticked` : '')
+    const did = `${count(r.filled)} field(s) filled`
+      + (count(r.checked) ? ` · ${count(r.checked)} box(es) ticked` : '')
       // Deliberately left alone — already correct, your call, or your
       // profile says blank. Different from the ones it could not answer.
-      + (r.skipped ? ` · ${r.skipped} left alone on purpose` : '');
+      + (count(r.skipped) ? ` · ${count(r.skipped)} left alone on purpose` : '');
     meta.textContent = `${r.location || ''}${r.location?' · ':''}prepared ${when} · ${did}`
       + (r.resume ? ' · resume attached' : ' · NO resume')
       + (r.reachedReview ? ' · reached Review page' : '');
@@ -3675,19 +4242,37 @@ async function renderReview(){
 // person, and he brings the name.
 const OJ = (path, body) => fetch(path, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body) }).then(r=>r.json().then(j=>({status:r.status, ...j}))).catch(()=>({status:0, error:'the dashboard did not answer'}));
 
-async function renderOutreach(){
-  const hub = $('#hub'); hub.innerHTML='';
-  hub.appendChild(el('div','hint','Loading outreach…'));
+// Every draw of the Outreach tab takes a number; a poll or a slow fetch from an
+// older draw sees it is stale and leaves the page alone.
+let OUT_SEQ = 0;
+// A job to open once the tab has switched — set by the Outreach button.
+let OUTREACH_OPEN = null;
+function showOutreachJob(id){ OUTREACH_OPEN = id; goView('outreach'); }
+
+const sentOf = (c) => !!(c.sent_at || c.status === 'replied');
+const dayOf = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '');
+
+/**
+ * The jobs he CHOSE, and nothing else: a job lands here when he presses
+ * Outreach on it in Applications (2026-09-25). Split by where the work stands —
+ * nobody written to yet, then written to — so what is left to do is the top.
+ */
+async function renderOutreach(quiet){
+  if (OUTREACH_OPEN){ const id = OUTREACH_OPEN; OUTREACH_OPEN = null; return openOutreachJob(id); }
+  const seq = ++OUT_SEQ;
+  const hub = $('#hub');
+  if (!quiet){ hub.innerHTML=''; hub.appendChild(el('div','hint','Loading outreach…')); }
   let d;
   try { d = await (await fetch('/api/outreach/queue')).json(); }
-  catch { hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load outreach.')); return; }
+  catch { if (seq === OUT_SEQ){ hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load outreach.')); } return; }
+  if (seq !== OUT_SEQ) return;
   hub.innerHTML='';
 
   const hero = el('div','hero');
   hero.appendChild(el('div','big', `${d.stats.sent} sent · ${d.stats.replied} replied`));
   hero.appendChild(el('div','lede',
-    'Referrals convert several times better than cold applications, so an hour here is worth more than an hour of applying. '
-    + 'Jarvis names the team and builds the search; you find the person and press send. It never messages anyone.'));
+    'The jobs you chose for outreach. Press Outreach on an application in the Applications tab and it lands here while Jarvis finds the people hiring for it. '
+    + 'You write and send; Jarvis never messages anyone.'));
   hub.appendChild(hero);
 
   // FOLLOW-UPS FIRST. One each, and it has to add something new — a second
@@ -3715,108 +4300,576 @@ async function renderOutreach(){
     hub.appendChild(p);
   }
 
-  // Jobs where people were already found come first: they are one click from a
-  // message, the rest are a search away.
-  const open = d.jobs.filter(j=>!j.hasContact).sort((a,b)=>(b.leadsRunning?1:0)+(b.leadsFound||0)-((a.leadsRunning?1:0)+(a.leadsFound||0)));
-  const done = d.jobs.filter(j=>j.hasContact);
-  const p = el('div','panel');
-  p.appendChild(el('h3',null,`${open.length} job${open.length===1?'':'s'} you committed to with nobody on them`));
-  if(!open.length) p.appendChild(el('div','empty','Every job you have queued or applied to has someone on it. That is the whole list.'));
-  for (const j of open.slice(0,40)){
-    const row = el('div','row');
-    const a = el('span','name', `${j.title}`);
-    a.style.cursor='pointer';
-    a.onclick = ()=>openOutreachJob(j.id);
-    row.appendChild(a);
-    row.appendChild(el('span','muted', `${j.company}${j.team?` · ${j.team}`:''}${j.location?` · ${j.location}`:''}`));
-    // People the card's Outreach button already found for this job.
-    if (j.leadsFound || j.leadsRunning){
-      const f = el('button','btn', j.leadsRunning ? 'Finding people…' : `${j.leadsFound} ${j.leadsFound===1?'person':'people'} found`);
-      f.title = 'Open the people Jarvis found for this role';
-      f.onclick = ()=>openLeads({ id:j.id, company:j.company, title:j.title, location:j.location }, f);
-      row.appendChild(f);
-    }
-    const b = el('button','btn','Who to talk to');
-    b.onclick = ()=>openOutreachJob(j.id);
-    row.appendChild(b);
-    p.appendChild(row);
-  }
-  if (open.length > 40) p.appendChild(el('div','hint', `…and ${open.length - 40} more. The 40 shown are your newest commitments.`));
-  hub.appendChild(p);
+  hub.appendChild(outreachSheet(d, seq));
+  hub.appendChild(linkedinPanel(d, seq));
 
-  if (done.length){
-    const q = el('div','panel');
-    q.appendChild(el('h3',null,`${done.length} with someone on them`));
-    for (const j of done.slice(0,40)){
-      const row = el('div','row');
-      const a = el('span','name', j.title); a.style.cursor='pointer'; a.onclick=()=>openOutreachJob(j.id);
-      row.appendChild(a);
-      row.appendChild(el('span','muted', j.company));
-      q.appendChild(row);
-    }
-    hub.appendChild(q);
+  // Research still running: look again shortly, without the loading flash.
+  if (d.jobs.some(j=>j.leads?.status === 'running')){
+    setTimeout(()=>{ if (seq === OUT_SEQ && currentView() === 'outreach') renderOutreach(true); }, 8000);
   }
 }
 
-/** One job: the search spec, the person he found, and the draft. */
+// ── Outreach as a sheet (2026-09-26) ─────────────────────────────────
+//
+// "it should show me link to those people's linkedin profile, and it says
+// drafted but wheres the message? … it should same ish format as applications
+// where its an excel sheet with logo and you can expand rows". One line per
+// job he chose; opening a line shows each person with their profile and the
+// message itself, ready to copy.
+const OUT_OPEN = new Set();
+// The Outreach sheet's column filters, kept across its redraws.
+const OUT_FILT = {};
+// outreachState's k, as the Message filter offers it.
+const OUT_STAGE = { 0: 'No one saved', 1: 'No message yet', 2: 'Ready, not sent', 3: 'Sent', 4: 'Replied' };
+
+/** Where one job's outreach stands, in a few words. */
+function outreachState(j){
+  const live = j.contacts.filter((c)=>!c.do_not_contact);
+  const replied = live.find((c)=>c.status === 'replied' || c.replied_at);
+  if (replied) return { k: 4, text: `${replied.name} replied` };
+  const sent = live.filter(sentOf).sort((a,b)=>String(b.sent_at||'').localeCompare(String(a.sent_at||'')))[0];
+  const li = j.linkedin?.last;
+  if (li && (!sent || String(li.at) > String(sent.sent_at || ''))) return { k: 3, text: `${li.name} · ${LI_KIND[li.kind] || li.kind} ${dayOf(li.at)}` };
+  if (sent) return { k: 3, text: `sent ${dayOf(sent.sent_at)}` };
+  if (live.some((c)=>c.draft)) return { k: 2, text: 'message ready · not sent' };
+  if (live.length) return { k: 1, text: 'no message written yet' };
+  const l = j.leads;
+  if (!l) return { k: 0, text: 'not searched yet' };
+  if (l.status === 'running') return { k: 0, text: 'finding people…' };
+  if (l.status === 'failed') return { k: 0, text: 'search failed' };
+  return { k: 0, text: l.count ? `${l.count} found · none saved` : 'no one found' };
+}
+
+function outreachSheet(d, seq){
+  sheetStyle();
+  const wrap = el('div','panel');
+  wrap.appendChild(el('h3',null, `${d.jobs.length} ${d.jobs.length===1?'job':'jobs'} chosen for outreach`));
+  if (!d.jobs.length){ wrap.appendChild(el('div','empty','Nothing chosen yet. In the Applications tab, press Outreach on a job and it appears here.')); return wrap; }
+  const table = el('table','sheet'); table.style.minWidth = '860px';
+  const hr = el('tr');
+  for (const h of ['Company','Role','Application','Person','Message','']) hr.appendChild(el('th', null, h));
+  // The same column filters as Applications (2026-09-30), on the row's own words.
+  const appLabel = (j) => SHEET_STATUS_LABEL[j.status] || (j.status === 'new' || j.status === 'inbox' ? 'Not applied' : j.status);
+  const peopleOf = (j) => { const live = j.contacts.filter((c)=>!c.do_not_contact); return live.length ? live : (j.found || []); };
+  const FCOLS = [
+    { k:'company', text:(r)=>coName(r.j.company) },
+    { k:'role', text:(r)=>`${r.j.title} ${r.j.location || ''}` },
+    { k:'app', text:(r)=>appLabel(r.j), options:[...new Set(d.jobs.map(appLabel))] },
+    { k:'person', text:(r)=>peopleOf(r.j).map((p)=>p.name).join(' ') },
+    { k:'msg', text:(r)=>OUT_STAGE[r.st.k], options:Object.values(OUT_STAGE) },
+    { k:'act' },
+  ];
+  const tools = el('div'); tools.style.cssText = 'display:flex;gap:8px;align-items:center;margin:4px 0 8px;flex-wrap:wrap';
+  const hideLbl = el('label','chk'); const hideBox = el('input'); hideBox.type = 'checkbox'; hideBox.checked = hideRejectedPref();
+  hideLbl.append(hideBox, document.createTextNode(' Hide rejected'));
+  const clear = el('button','btn','Clear filters'); const count = el('span','m');
+  tools.append(hideLbl, clear, count); wrap.appendChild(tools);
+  const thead = el('thead'); let filt = filterRow(FCOLS, OUT_FILT, ()=>draw());
+  thead.append(hr, filt); table.appendChild(thead);
+  const tbody = el('tbody'); table.appendChild(tbody);
+  hideBox.onchange = ()=>{ setHideRejectedPref(hideBox.checked); draw(); };
+  clear.onclick = ()=>{ for (const k of Object.keys(OUT_FILT)) delete OUT_FILT[k]; const f = filterRow(FCOLS, OUT_FILT, ()=>draw()); filt.replaceWith(f); filt = f; draw(); };
+  // Work left to do first: nothing written, then written and unsent, then sent.
+  const all = [...d.jobs].map((j)=>({ j, st: outreachState(j) })).sort((a,b)=>a.st.k - b.st.k);
+  const draw = ()=>{
+    if (seq !== OUT_SEQ) return;
+    tbody.innerHTML = '';
+    const hiding = hideBox.checked && OUT_FILT.app !== SHEET_STATUS_LABEL.rejected;
+    const jobs = all.filter((r)=>!(hiding && r.j.status === 'rejected')).filter((r)=>passesFilters(r, FCOLS, OUT_FILT));
+    const hiddenRej = hiding ? all.filter((r)=>r.j.status === 'rejected').length : 0;
+    count.textContent = `${jobs.length} of ${all.length}${hiddenRej ? ` · ${hiddenRej} rejected hidden` : ''}`;
+    clear.style.display = anyFilter(OUT_FILT) ? '' : 'none';
+    for (const { j, st } of jobs){
+      const tr = el('tr','grp'); if (j.gone) tr.classList.add('closed');
+      const co = el('td'); const cw = el('div'); cw.style.cssText = 'display:flex;gap:6px;align-items:center';
+      co.className = 'co'; cw.appendChild(logoEl(coName(j.company), j.url, 'sm')); cw.appendChild(el('span', null, coName(j.company))); co.appendChild(cw); tr.appendChild(co);
+      const role = el('td');
+      role.appendChild(el('span', null, `${OUT_OPEN.has(j.id) ? '▾' : '▸'} `));
+      const h = safeHref(j.url); const a = el(h ? 'a' : 'span', null, j.title);
+      if (h){ a.href = h; a.target = '_blank'; a.rel = 'noopener'; }
+      role.appendChild(a);
+      if (j.location) role.appendChild(el('div','m', j.location));
+      tr.appendChild(role);
+      tr.appendChild(el('td', null, `${SHEET_STATUS_LABEL[j.status] || (j.status === 'new' || j.status === 'inbox' ? 'not applied' : j.status)}${j.gone ? ' · closed' : ''}`));
+      // The person, linked to their profile — the one thing he opens most.
+      const pc = el('td');
+      const people = j.contacts.filter((c)=>!c.do_not_contact);
+      const shown = people.length ? people : (j.found || []);
+      for (const p of shown.slice(0, 2)){
+        const href = safeHref(p.linkedin_url || p.profile_url);
+        const n = el(href ? 'a' : 'span', null, p.name);
+        if (href){ n.href = href; n.target = '_blank'; n.rel = 'noopener'; n.title = 'Their LinkedIn profile'; }
+        const line = el('div'); line.appendChild(n);
+        if (!people.length) line.appendChild(el('span','m',' · found'));
+        pc.appendChild(line);
+      }
+      if (shown.length > 2) pc.appendChild(el('div','m', `+${shown.length - 2} more`));
+      tr.appendChild(pc);
+      tr.appendChild(el('td', null, st.text));
+      const ac = el('td'); ac.style.whiteSpace = 'nowrap';
+      const open = el('button','btn','Open'); open.title = 'The full page: searches, the message form, LinkedIn history';
+      open.onclick = (e)=>{ e.stopPropagation(); openOutreachJob(j.id); };
+      const off = el('button','btn','Remove'); off.title = 'Take it off this list. What was found is kept; pressing Outreach on the application brings it back.';
+      off.onclick = async(e)=>{ e.stopPropagation(); off.disabled = true; await OJ('/api/outreach/remove', { id: j.id }); renderOutreach(true); };
+      ac.append(open, off); tr.appendChild(ac);
+      tr.onclick = (e)=>{ if (e.target.closest('a,button,textarea,input,select')) return; if (OUT_OPEN.has(j.id)) OUT_OPEN.delete(j.id); else OUT_OPEN.add(j.id); draw(); };
+      tbody.appendChild(tr);
+      if (OUT_OPEN.has(j.id)){
+        const xr = el('tr','sub'); const td = el('td'); td.colSpan = 6;
+        td.appendChild(outreachDetail(j, ()=>renderOutreach(true)));
+        xr.appendChild(td); tbody.appendChild(xr);
+      }
+    }
+  };
+  draw();
+  const scroll = el('div','sheetwrap'); scroll.appendChild(table); wrap.appendChild(scroll);
+  return wrap;
+}
+
+/**
+ * WHAT THEY SAID IN PUBLIC, AND WHEN (2026-09-26). A fresh "send me your
+ * resume" is the best lead there is; the same words six months old are worth
+ * nothing, and a repost is the AUTHOR's invitation, never the reposter's.
+ * The standing is decided by the server from the post's date (leads.mjs).
+ */
+function signalLine(sig){
+  if (!sig) return null;
+  const line = el('div'); line.style.cssText = 'display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;font-size:13px';
+  const age = sig.ageDays == null ? 'no date found' : sig.ageDays < 14 ? `${sig.ageDays} days ago` : sig.ageDays < 60 ? `${Math.round(sig.ageDays/7)} weeks ago` : `${Math.round(sig.ageDays/30)} months ago`;
+  const what = sig.kind === 'invited' ? 'invited candidates to reach out' : sig.kind === 'relevant_post' ? 'posted about the team\'s work' : 'posted about hiring';
+  const label = {
+    fresh: [`✅ ${what} · ${age}`, 'high'],
+    recent: [`${what} · ${age}`, 'medium'],
+    stale: [`⚠ ${what} ${age} — too old to count`, 'low'],
+    undated: [`${what} · no date found, so it counts for little`, 'low'],
+    reposted: [`↻ reposted ${sig.author}'s post${sig.ageDays == null ? '' : ` (${age})`} — the invitation is ${sig.author}'s, not theirs`, 'low'],
+  }[sig.standing] || [what, 'low'];
+  line.appendChild(el('span', 'pill ' + label[1], label[0]));
+  if (sig.quote){ const q = el('span','m', `“${sig.quote}”`); q.style.fontStyle = 'italic'; line.appendChild(q); }
+  const h = safeHref(sig.url); if (h){ const a = el('a', null, 'the post'); a.href = h; a.target = '_blank'; a.rel = 'noopener'; line.appendChild(a); }
+  if (sig.standing === 'stale') line.style.opacity = '.7';
+  return line;
+}
+/**
+ * WHY THIS IS (OR IS NOT) AN EXCELLENT LEAD (2026-09-27): public evidence they
+ * answer — an invitation, a recent post of theirs, or posting actively.
+ */
+function excellenceLine(p){
+  const line = el('div'); line.style.cssText = 'display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;font-size:13px';
+  line.appendChild(p.excellent ? el('span','pill high', `★ Excellent lead: ${p.excellent}`) : el('span','pill low', 'No public sign found that they answer messages'));
+  const a = p.activity;
+  if (a){
+    const age = a.ageDays < 14 ? `${a.ageDays} days ago` : a.ageDays < 60 ? `${Math.round(a.ageDays/7)} weeks ago` : `${Math.round(a.ageDays/30)} months ago`;
+    const t = { active: `posts actively: ${a.recent_posts} of their own in 6 weeks, newest ${age}`, occasional: `posts now and then, newest ${age}`, quiet: `quiet: newest post ${age}` }[a.level];
+    line.appendChild(el('span','m', t));
+    const h = safeHref(a.url); if (h){ const l = el('a', null, 'seen here'); l.href = h; l.target = '_blank'; l.rel = 'noopener'; line.appendChild(l); }
+  }
+  return line;
+}
+/** One sourced thing about them, for the message's personal line. */
+function personalLine(p){
+  if (!p?.text) return null;
+  const line = el('div','m'); line.style.fontSize = '13px';
+  line.textContent = `About them: ${p.text} `;
+  const h = safeHref(p.source_url); if (h){ const a = el('a', null, 'source'); a.href = h; a.target = '_blank'; a.rel = 'noopener'; line.appendChild(a); }
+  return line;
+}
+
+/** An opened line: every saved person with their message, then the people found and not saved. */
+function outreachDetail(j, refresh){
+  const box = el('div'); box.style.cssText = 'display:flex;flex-direction:column;gap:10px;padding:4px 0';
+  const people = j.contacts.filter((c)=>!c.do_not_contact);
+  for (const c of people) box.appendChild(contactCard(c, refresh, j));
+  const savedNames = new Set(j.contacts.map((c)=>String(c.name).toLowerCase()));
+  const extra = (j.found || []).filter((p)=>!p.saved && !savedNames.has(String(p.name).toLowerCase()));
+  if (extra.length){
+    box.appendChild(el('div','m', people.length ? 'The research\'s top 3 (one person per role; switch if one of them is the better lead):' : 'The research\'s top 3 — save the one you want; nothing is written until you press Write:'));
+    for (const p of extra){
+      const r = el('div'); r.style.cssText = 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap';
+      const href = safeHref(p.profile_url);
+      const n = el(href ? 'a' : 'b', null, p.name); if (href){ n.href = href; n.target = '_blank'; n.rel = 'noopener'; }
+      r.appendChild(n);
+      if (p.title) r.appendChild(el('span','m', p.title));
+      if (p.confidence) r.appendChild(el('span','pill '+p.confidence, p.confidence));
+      if (href){ const li = el('a','btn','LinkedIn profile'); li.href = href; li.target = '_blank'; li.rel = 'noopener'; r.appendChild(li); }
+      if (!people.length){
+        // SAVING WRITES NOTHING (2026-09-27): "only ever do the message if i
+        // tell you to". The card's Write buttons are the only way a message is made.
+        const s = el('button','btn','Save this person');
+        const out = el('span','m');
+        s.onclick = async()=>{
+          s.disabled = true; out.textContent = 'Saving…';
+          const saved = await OJ('/api/outreach/contact', { id: j.id, name: p.name, title: p.title, persona: p.persona, channel: p.public_email ? 'email' : 'note',
+            linkedin_url: p.profile_url, email: p.public_email || undefined, note: `Lead found by Jarvis (${p.confidence} confidence): ${p.why}` });
+          if (!saved.contact){ out.textContent = saved.error || 'Could not save'; s.disabled = false; return; }
+          refresh();
+        };
+        r.append(s, out);
+      } else {
+        // THE ROLE HAS ONE SLOT: a better lead replaces the saved person he
+        // has not written to yet (2026-09-27).
+        const current = people.find((c)=>!c.sent_at && !c.replied_at);
+        if (current){
+          const sw = el('button','btn', `Save ${p.name.split(' ')[0]} instead of ${current.name.split(' ')[0]}`);
+          const out = el('span','m');
+          sw.title = `${current.name} has not been written to, so they come off this role and ${p.name} takes the slot. Their research is kept. No message is written until you press Write.`;
+          sw.onclick = async()=>{
+            sw.disabled = true; out.textContent = 'Switching…';
+            const res = await OJ('/api/outreach/contact/swap', { contactId: current.id, name: p.name, title: p.title, persona: p.persona, linkedin_url: p.profile_url, email: p.public_email || undefined });
+            if (!res.contact){ out.textContent = res.error || 'Could not switch'; sw.disabled = false; return; }
+            refresh();
+          };
+          r.append(sw, out);
+        }
+      }
+      if (p.why){ const why = el('div','m', p.why); why.style.flexBasis = '100%'; r.appendChild(why); }
+      for (const extraLine of [excellenceLine(p), leadWhyLine(p), signalLine(p.signal), personalLine(p.personal)]) if (extraLine){ extraLine.style.flexBasis = '100%'; r.appendChild(extraLine); }
+      box.appendChild(r);
+    }
+  }
+  if (!people.length && !extra.length){
+    const l = j.leads;
+    if (l?.status === 'running') box.appendChild(el('div','m','Finding people… this usually takes 1 to 5 minutes.'));
+    else {
+      const f = el('button','btn', l ? 'Search again' : 'Find people');
+      f.onclick = async()=>{ f.disabled = true; f.textContent = 'Searching…'; await OJ('/api/outreach/leads', { id: j.id, refresh: !!l }); refresh(); };
+      box.appendChild(f);
+    }
+  }
+  return box;
+}
+
+/**
+ * One saved person: who, their profile, and THE MESSAGE — shown, editable,
+ * copyable. A person saved with no message says so and offers to write it,
+ * where the old row said "drafted" over nothing (17 of 17, 2026-09-26).
+ */
+/** Why the research put this person in the top 3 (2026-09-27): kind of lead, reason, use, five scores. */
+const LEAD_TYPE = { decision: 'closest to the hiring decision', technical: 'approachable engineer on the work', alternate: 'alternate connection' };
+function leadWhyLine(p){
+  if (!p?.lead_type && !p?.usefulness && !p?.scores) return null;
+  const line = el('div','m'); line.style.fontSize = '13px';
+  const parts = [];
+  if (p.lead_type) parts.push(LEAD_TYPE[p.lead_type] || p.lead_type);
+  if (p.usefulness) parts.push(`can help by: ${p.usefulness}`);
+  line.textContent = parts.join(' · ');
+  if (p.scores){
+    const s = p.scores; const total = s.proximity + s.hook + s.reply + s.help + s.competition;
+    const sc = el('span','pill', `reply value ${total}/25`);
+    sc.title = `close to the work ${s.proximity} · real reason to write ${s.hook} · likely to reply ${s.reply} · able to help ${s.help} · not buried in messages ${s.competition} (each out of 5)`;
+    sc.style.marginLeft = '6px'; line.appendChild(sc);
+  }
+  return line;
+}
+
+/** Clipboard write that says whether it worked. It fails when this page is not focused. */
+async function copyText(text){
+  try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
+}
+/**
+ * The server copies the resume into Downloads as exactly "Alex Rivera Resume.pdf",
+ * replacing the last one (a browser download would pile up "(1)", "(2)"…).
+ */
+async function resumeToDownloads(resumeUrl){
+  const q = new URLSearchParams(String(resumeUrl).split('?')[1] || '');
+  const r = await OJ('/api/outreach/resume-to-downloads', { dir: q.get('dir') || '', file: q.get('file') || '' });
+  return r.ok ? r : { ok: false, error: r.error || 'the dashboard did not answer' };
+}
+function toDownloadsLink(resumeUrl, status){
+  const a = el('a', null, `put it in Downloads as "${RESUME_FILE}"`); a.href = '#';
+  a.onclick = async(e)=>{ e.preventDefault(); const r = await resumeToDownloads(resumeUrl); status.textContent = r.ok ? `Saved as ${r.path} (replaced the last one)` : `⚠ Resume not saved: ${r.error}`; };
+  return a;
+}
+
+function contactCard(c, refresh, job = null){
+  const card = el('div'); card.style.cssText = 'border:1px solid var(--line,#30363d);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px';
+  const head = el('div'); head.style.cssText = 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap';
+  const href = safeHref(c.linkedin_url);
+  const n = el(href ? 'a' : 'b', null, c.name); if (href){ n.href = href; n.target = '_blank'; n.rel = 'noopener'; }
+  n.style.fontWeight = '600'; head.appendChild(n);
+  if (c.title) head.appendChild(el('span','m', c.title));
+  const where = ()=>c.replied_at || c.status === 'replied' ? 'replied'
+    : c.sent_at ? `sent ${dayOf(c.sent_at)}${c.status === 'followed_up' ? ' · followed up' : ''}`
+    : c.draft ? 'message ready · not sent' : 'no message written yet';
+  const pill = el('span','pill', where());
+  head.appendChild(pill);
+  const tools = el('span'); tools.style.cssText = 'margin-left:auto;display:flex;gap:6px;flex-wrap:wrap';
+  if (href){ const li = el('a','btn','LinkedIn profile'); li.href = href; li.target = '_blank'; li.rel = 'noopener'; tools.appendChild(li); }
+  else tools.appendChild(el('span','m','no profile link saved'));
+  if (c.email){ const m = el('button','btn', c.email); m.title = 'Click to copy'; m.onclick = ()=>{ navigator.clipboard?.writeText(c.email); m.textContent = 'Copied'; setTimeout(()=>m.textContent = c.email, 1200); }; tools.appendChild(m); }
+  head.appendChild(tools);
+  card.appendChild(head);
+  for (const extraLine of [(c.scores || c.signal || c.lead_type) ? excellenceLine(c) : null, leadWhyLine(c), signalLine(c.signal), personalLine(c.personal)]) if (extraLine) card.appendChild(extraLine);
+
+  const out = el('div','m');
+  // What each channel holds. A free LinkedIn account gets THREE personalised
+  // connection notes a month at 200 characters (LinkedIn Help, 2026-09-26); the
+  // full formula (job link, portfolio, resume) goes in a message or InMail.
+  const CH = {
+    note: { label: 'LinkedIn note', cap: 200, hint: 'a connection request note: a free account gets 3 a month, 200 characters each; no links, no resume' },
+    message: { label: 'LinkedIn message', cap: 1150, hint: 'the full message with the job link, portfolio and resume: after they accept, or as an InMail' },
+    email: { label: 'Email', cap: 1400, hint: 'the same message by email' },
+  };
+  const chOf = ()=>CH[c.channel] ? c.channel : 'note';
+  const writeBtn = (label, channel)=>{
+    const b = el('button','btn', label);
+    b.onclick = async()=>{
+      b.disabled = true; out.textContent = 'Writing… about a minute. It is checked against your CV and what was found about them before it is shown.';
+      const w = await OJ('/api/outreach/contact/write', { contactId: c.id, channel: channel || chOf() });
+      b.disabled = false;
+      if (!w.text){ out.textContent = w.why || w.error || 'Nothing was written.'; return; }
+      // Only a message that passed is stored; a failed one is shown so he can see why.
+      if (!w.ok){ out.textContent = 'It failed its checks, so it was not saved: ' + (w.problems || []).join(' · ') + ' — press Write again.'; return; }
+      c.draft = w.text; c.channel = w.contact?.channel || channel || c.channel;
+      out.textContent = '';
+      showDraft();
+    };
+    return b;
+  };
+  const writeRow = (again)=>{
+    const r = el('div'); r.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center';
+    for (const k of ['note', 'message', 'email']){
+      const b = writeBtn(`${again && k === chOf() ? 'Rewrite' : 'Write'} ${CH[k].label}`, k);
+      b.title = CH[k].hint; r.appendChild(b);
+    }
+    return r;
+  };
+  const msg = el('div');
+  function showDraft(){
+    msg.innerHTML = '';
+    pill.textContent = where();
+    if (!c.draft){
+      if (!c.sent_at) msg.appendChild(writeRow(false));
+      else msg.appendChild(el('div','m','Sent, but the text was not kept here.'));
+      return;
+    }
+    msg.appendChild(el('div','m', `${CH[chOf()].label}:`));
+    const ta = el('textarea'); ta.value = c.draft; ta.className = 'wide';
+    ta.rows = Math.min(14, c.draft.split('\n').length + 2); ta.style.cssText = 'width:100%;font:inherit';
+    let saved = c.draft;
+    ta.onblur = async()=>{ if (ta.value === saved) return; const r = await OJ('/api/outreach/contact/draft', { contactId: c.id, draft: ta.value }); if (r.contact){ saved = ta.value; c.draft = ta.value; } };
+    msg.appendChild(ta);
+    const count = ()=>{ const cap = CH[chOf()].cap; const n = ta.value.length; chars.textContent = cap ? `${n} / ${cap} characters` : `${ta.value.split(/\s+/).filter(Boolean).length} words`; chars.style.color = cap && n > cap ? '#f85149' : ''; };
+    const chars = el('span','m'); count();
+    ta.oninput = count;
+    const row = el('div'); row.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px';
+    // THE SEND KIT (2026-09-27): he prepares at night and sends when he has a
+    // minute. Nothing here touches LinkedIn: the message, every link in it and
+    // the resume live in Jarvis, and one press gets all three in front of him —
+    // then he pastes, attaches "Alex Rivera Resume.pdf", and presses Send himself.
+    const resume = job?.resume?.url ? job.resume : null;
+    const choices = job?.resume?.choices || null;
+    const full = chOf() !== 'note';
+    const kitStatus = el('div','m'); kitStatus.style.fontSize = '13px';
+    if (href){
+      const idle = full && resume ? 'Get it ready: copy, resume, open LinkedIn' : 'Copy and open their LinkedIn';
+      const go = el('button','btn', idle);
+      go.style.fontWeight = '600';
+      go.title = full && resume ? `Copies the message, puts this job's resume in Downloads as "${RESUME_FILE}" (replacing the last one), opens their profile. Press Message, paste, attach it, Send.` : 'Copies the message and opens their profile.';
+      go.onclick = async()=>{
+        // ORDER MATTERS. The copy goes first: once the LinkedIn tab has focus
+        // the browser refuses a clipboard write from this page. The tab opens
+        // straight after, while the click still counts as his (a few seconds),
+        // or the pop-up blocker takes it.
+        // A failed copy stops here, before LinkedIn opens over the warning.
+        if (!await copyText(ta.value)){
+          kitStatus.textContent = '⚠ The message did NOT copy, so LinkedIn was not opened. Press again, or select the text above and press Ctrl+C.';
+          return;
+        }
+        const said = ['Message copied'];
+        window.open(href, '_blank', 'noopener');
+        if (full && resume){
+          const r = await resumeToDownloads(resume.url);
+          said.push(r.ok ? `resume saved as ${r.path}` : `⚠ Resume not saved: ${r.error}`);
+        }
+        said.push('profile opened');
+        kitStatus.textContent = said.join(' · ');
+        go.textContent = said.some((s)=>s.startsWith('⚠')) ? 'Something failed, see below' : 'Ready: paste, attach, send';
+        setTimeout(()=>{ go.textContent = idle; }, 4000);
+      };
+      row.appendChild(go);
+    }
+    const copy = el('button','btn','Copy message');
+    copy.onclick = async()=>{ copy.textContent = await copyText(ta.value) ? 'Copied' : 'Did not copy: select it, Ctrl+C'; setTimeout(()=>copy.textContent = 'Copy message', 2500); };
+    row.appendChild(copy);
+    row.appendChild(chars);
+    msg.appendChild(row);
+    msg.appendChild(kitStatus);
+    if (full){
+      const rz = el('div','m'); rz.style.fontSize = '13px';
+      if (resume){
+        rz.appendChild(document.createTextNode('Resume to attach: the one sent with this application · '));
+        rz.appendChild(toDownloadsLink(resume.url, kitStatus));
+        rz.appendChild(document.createTextNode(' · '));
+        const v = el('a', null, 'view it'); v.href = resume.url; v.target = '_blank'; v.rel = 'noopener'; rz.appendChild(v);
+      } else if (choices){
+        // More than one was built for this posting: his call, never a guess.
+        rz.appendChild(el('div', null, job.resume.byTitle
+          ? `No resume is tied to this exact posting. ${choices.length === 1 ? 'This one was' : 'These were'} built for a ${job.company} "${job.title}" posting; check it is the one you sent before attaching:`
+          : `${choices.length} resumes were built for this application. Pick the one you sent:`));
+        for (const ch of choices){
+          const line = el('div'); line.style.marginLeft = '12px';
+          const d = toDownloadsLink(ch.url, kitStatus);
+          const v = el('a', null, 'view'); v.href = ch.url; v.target = '_blank'; v.rel = 'noopener';
+          line.append(document.createTextNode(`built ${dayOf(ch.at)} · `), v, document.createTextNode(' · '), d);
+          rz.appendChild(line);
+        }
+        rz.style.color = '#d29922';
+      } else {
+        rz.textContent = 'No resume on file for this application, so the message says "Resume: Attached" with nothing to attach. Build one from Applications first; Jarvis will not pick one for you.';
+        rz.style.color = '#d29922';
+      }
+      msg.appendChild(rz);
+    }
+    if (!c.sent_at) msg.appendChild(writeRow(true));
+  }
+  showDraft();
+  card.appendChild(msg);
+  card.appendChild(out);
+
+  const marks = el('div'); marks.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
+  if (!c.sent_at && !c.do_not_contact){
+    const s = el('button','btn','I sent it'); s.onclick = async()=>{ s.disabled = true; await OJ('/api/outreach/mark',{ contactId: c.id, what: 'sent' }); refresh(); };
+    marks.appendChild(s);
+  }
+  if (c.sent_at && c.status !== 'replied' && !c.do_not_contact){
+    const r = el('button','btn','They replied'); r.onclick = async()=>{ r.disabled = true; await OJ('/api/outreach/mark',{ contactId: c.id, what: 'replied' }); refresh(); };
+    marks.appendChild(r);
+  }
+  if (marks.children.length) card.appendChild(marks);
+  return card;
+}
+
+// ── LinkedIn: who he wrote to there, and who answered ────────────────
+// Nothing signs in to LinkedIn (jarvis/OUTREACH.md §2a). Gmail brings accepted
+// invitations and InMail replies by itself; LinkedIn's own data export, when
+// he imports one, brings what he sent (jarvis/linkedin-activity.mjs).
+const LI_KIND = { invite_sent:'invited', invite_accepted:'accepted', message_sent:'messaged', message_received:'replied on LinkedIn' };
+const LI_WORDS = { invite_sent:'You invited', invite_accepted:'Accepted your invitation:', message_sent:'You messaged', message_received:'Message from' };
+
+function linkedinPanel(d, seq){
+  const p = el('div','panel');
+  p.appendChild(el('h3',null,'LinkedIn'));
+  const body = el('div'); p.appendChild(body);
+  body.appendChild(el('div','hint','Loading…'));
+  fetch('/api/linkedin/status').then(r=>r.json()).catch(()=>null).then((s)=>{
+    if (seq !== OUT_SEQ) return;
+    body.innerHTML = '';
+    if (!s){ body.appendChild(el('div','hint','LinkedIn status unavailable.')); return; }
+    body.appendChild(el('div','hint', (d.mail?.connected
+      ? 'Your Gmail check (every 30 minutes) picks up accepted invitations and InMail replies and ties them to the people here. '
+      : 'Connect Gmail on the Applications tab and accepted invitations and InMail replies will be picked up here automatically. ')
+      + 'LinkedIn never emails you what you sent, so that comes from your LinkedIn data export.'));
+    const r = el('div','row');
+    const li = s.lastImport;
+    r.appendChild(el('span','muted', li
+      ? `Last export: ${li.file}, imported ${dayOf(li.at)} — ${li.events} messages and invitations, ${li.tied} tied to jobs here${li.sent?`, ${li.sent} marked sent`:''}${li.replied?`, ${li.replied} marked replied`:''}.`
+      : 'No LinkedIn export imported yet.'));
+    const out = el('span','hint');
+    const done = (res)=>{ if (res.error){ out.textContent = res.error; return; } renderOutreach(true); };
+    if (s.download){
+      const b = el('button','btn', `Import ${s.download.name}`);
+      b.title = `Found in your Downloads, saved ${dayOf(s.download.mtime)}`;
+      b.onclick = async()=>{ b.disabled = true; out.textContent = 'Reading…'; done(await OJ('/api/linkedin/import', {})); };
+      r.appendChild(b);
+    }
+    const pick = el('input'); pick.type = 'file'; pick.accept = '.zip'; pick.style.display = 'none';
+    pick.onchange = async()=>{
+      const f = pick.files?.[0]; if (!f) return;
+      out.textContent = 'Reading…';
+      const res = await fetch('/api/linkedin/upload', { method:'POST', headers:{ 'content-type':'application/zip' }, body: f })
+        .then(x=>x.json()).catch(()=>({ error:'the dashboard did not answer' }));
+      done(res);
+    };
+    const choose = el('button','btn', s.download ? 'Choose another file' : 'Choose the export .zip');
+    choose.onclick = ()=>pick.click();
+    const ask = el('a','btn','Request it from LinkedIn'); ask.href = 'https://www.linkedin.com/mypreferences/d/download-my-data'; ask.target = '_blank'; ask.rel = 'noopener';
+    ask.title = 'Pick "Messages" and "Invitations". LinkedIn emails a download link, usually within about 10 minutes.';
+    r.append(choose, ask, pick);
+    body.appendChild(r);
+    body.appendChild(out);
+
+    // What he sent on LinkedIn that no chosen job claims. He says which job it was about.
+    if (s.untied?.length){
+      const det = el('details'); det.style.marginTop = '8px';
+      det.appendChild(el('summary','hint', `${s.untied.length} ${s.untied.length===1?'person':'people'} you wrote to on LinkedIn in the last 90 days, not tied to a job here`));
+      for (const u of s.untied){
+        const row = el('div','row');
+        const h = safeHref(u.profile_url);
+        const nm = el(h?'a':'span','name', u.name); if (h){ nm.href = h; nm.target = '_blank'; nm.rel = 'noopener'; }
+        row.appendChild(nm);
+        row.appendChild(el('span','muted', `last ${dayOf(u.at)}${u.answered ? ' · they answered' : ''}`));
+        const sel = el('select'); sel.appendChild(new Option('Tie to a job…', ''));
+        for (const j of d.jobs) sel.appendChild(new Option(`${j.company} — ${j.title}`.slice(0, 70), j.id));
+        sel.onchange = async()=>{ if (!sel.value) return; sel.disabled = true; await OJ('/api/linkedin/tie', { name: u.name, jobId: sel.value }); renderOutreach(true); };
+        row.appendChild(sel);
+        det.appendChild(row);
+      }
+      body.appendChild(det);
+    }
+  });
+  return p;
+}
+
+/** One job's LinkedIn history, newest first. */
+function linkedinHistory(events){
+  const p = el('div','panel');
+  p.appendChild(el('h3',null,'On LinkedIn'));
+  for (const e of events){
+    const row = el('div','row');
+    row.appendChild(el('span','name', `${LI_WORDS[e.kind] || e.kind} ${e.name}`));
+    row.appendChild(el('span','muted', `${dayOf(e.at)}${e.text ? ` · “${e.text.length > 220 ? e.text.slice(0, 220) + '…' : e.text}”` : ''}`));
+    const h = safeHref(e.profile_url);
+    if (h){ const a = el('a','btn','Profile'); a.href = h; a.target = '_blank'; a.rel = 'noopener'; row.appendChild(a); }
+    p.appendChild(row);
+  }
+  p.appendChild(el('div','hint', 'From your Gmail and your LinkedIn export. Read the thread on LinkedIn before you write again.'));
+  return p;
+}
+
+/** One job: the people found, who is on it, the message, and the searches. */
 async function openOutreachJob(id){
+  const seq = ++OUT_SEQ;
   const hub = $('#hub'); hub.innerHTML='';
   hub.appendChild(el('div','hint','Loading…'));
   let d;
   try { d = await (await fetch(`/api/outreach?id=${encodeURIComponent(id)}`)).json(); }
-  catch { hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load that job.')); return; }
+  catch { if (seq === OUT_SEQ){ hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load that job.')); } return; }
+  if (seq !== OUT_SEQ) return;
   hub.innerHTML='';
 
-  const back = el('button','btn','← Outreach'); back.onclick = renderOutreach;
-  hub.appendChild(back);
+  const top = el('div'); top.style.cssText = 'display:flex;gap:8px;align-items:center';
+  const back = el('button','btn','← Outreach'); back.onclick = ()=>renderOutreach();
+  const off = el('button','btn','Remove from Outreach'); off.style.marginLeft = 'auto';
+  off.title = 'Take it off the list. What was found is kept; pressing Outreach on the application brings it back.';
+  off.onclick = async()=>{ off.disabled = true; await OJ('/api/outreach/remove', { id }); renderOutreach(); };
+  top.append(back, off);
+  hub.appendChild(top);
 
-  const hero = el('div','hero');
+  const hero = el('div','hero'); hero.style.marginTop = '10px';
   hero.appendChild(el('div','big', d.job.title));
-  hero.appendChild(el('div','lede', `${d.job.company}${d.job.location?` · ${d.job.location}`:''}`));
+  const lede = el('div','lede', `${d.job.company}${d.job.location?` · ${d.job.location}`:''} · ${SHEET_STATUS_LABEL[d.job.status] || d.job.status} `);
+  const href = safeHref(d.job.url);
+  if (href){ const a = el('a',null,'posting'); a.href = href; a.target='_blank'; a.rel='noopener'; lede.appendChild(a); }
+  hero.appendChild(lede);
   hub.appendChild(hero);
 
-  const facts = el('div','panel');
-  facts.appendChild(el('h3',null,'What the posting tells us'));
-  const fact = (k,v)=>{ const r=el('div','row'); r.appendChild(el('span','name',k)); r.appendChild(el('span','muted',v)); facts.appendChild(r); };
-  fact('Team', d.spec.team || 'not named — the search falls back to alumni');
-  if (d.spec.managerTitle) fact('Reports to', d.spec.managerTitle);
-  fact('Email domain', d.emailHint.domain
-    ? `${d.emailHint.domain}${d.emailHint.pattern?` · ${d.emailHint.pattern}, confirmed from one of their own postings`:' · format unknown, so any address is a guess to check'}`
-    : 'unknown — nothing in their postings names one');
-  hub.appendChild(facts);
+  // The form further down is built after this panel, so "Write to them" calls
+  // through this slot.
+  let fillWriter = null;
+  hub.appendChild(leadsPanel(d.job, {
+    seq,
+    onWrite: d.gate.ok ? (p, r)=>fillWriter?.(p, r) : null,
+    onSaved: ()=>openOutreachJob(id),
+  }));
 
-  const s = el('div','panel');
-  s.appendChild(el('h3',null,'Who to look for, best first'));
-  s.appendChild(el('div','hint','Target choice matters more than the message. Alumni reply to students; a recruiter is the most spammed and the least able to vouch for you.'));
-  for (const search of d.spec.searches){
-    const row = el('div','row');
-    row.appendChild(el('span','name', search.label));
-    const go = el('button','btn','Search LinkedIn');
-    go.onclick = ()=>window.open(search.url,'_blank','noopener');
-    row.appendChild(go);
-    s.appendChild(row);
-  }
-  hub.appendChild(s);
+  if (d.linkedin?.length) hub.appendChild(linkedinHistory(d.linkedin));
 
   if (d.contacts.length){
     const c = el('div','panel');
     c.appendChild(el('h3',null,'Already on this role'));
-    for (const k of d.contacts){
-      const row = el('div','row');
-      row.appendChild(el('span','name', `${k.name}${k.title?` · ${k.title}`:''}`));
-      row.appendChild(el('span','muted', `${k.status}${k.sent_at?` · sent ${String(k.sent_at).slice(0,10)}`:''}${k.email?` · ${k.email}`:''}`));
-      if (k.draft){
-        const copy = el('button','btn','Copy draft');
-        copy.onclick = ()=>{ navigator.clipboard?.writeText(k.draft); copy.textContent='Copied'; setTimeout(()=>copy.textContent='Copy draft',1200); };
-        row.appendChild(copy);
-      }
-      if (!k.sent_at && !k.do_not_contact){
-        const sent = el('button','btn','I sent it');
-        sent.onclick = async()=>{ await OJ('/api/outreach/mark',{contactId:k.id, what:'sent'}); openOutreachJob(id); };
-        row.appendChild(sent);
-      }
-      c.appendChild(row);
-    }
+    // The same card as the sheet's opened line: profile link and the message itself.
+    for (const k of d.contacts) if (!k.do_not_contact) c.appendChild(contactCard(k, ()=>openOutreachJob(id), d.job));
     hub.appendChild(c);
   }
 
@@ -3827,41 +4880,76 @@ async function openOutreachJob(id){
   if (!d.gate.ok){
     w.appendChild(el('div','empty', d.gate.why));
     hub.appendChild(w);
-    return;
-  }
-  const nameIn = el('input'); nameIn.placeholder='Their full name, from LinkedIn'; nameIn.className='wide';
-  const titleIn = el('input'); titleIn.placeholder='Their title (optional)'; titleIn.className='wide';
-  const personaSel = el('select');
-  for (const p of d.spec.personas){ const o=el('option',null,p.label); o.value=p.key; personaSel.appendChild(o); }
-  const chanSel = el('select');
-  for (const [k,v] of Object.entries(d.channels)){ const o=el('option',null,v.label); o.value=k; chanSel.appendChild(o); }
-  const r1 = el('div','row'); r1.append(nameIn, titleIn);
-  const r2 = el('div','row'); r2.append(personaSel, chanSel);
-  const out = el('div','hint','');
-  const draftBtn = el('button','btn','Draft it');
-  draftBtn.onclick = async()=>{
-    const name = nameIn.value.trim();
-    if(!name){ out.textContent='A message needs a person. Find one first.'; return; }
-    draftBtn.disabled = true; out.textContent='Writing…';
-    const res = await OJ('/api/outreach/draft',{ id, name, title:titleIn.value.trim(), persona:personaSel.value, channel:chanSel.value });
-    draftBtn.disabled = false;
-    if(!res.text){ out.textContent = res.why || res.error || 'Nothing was written.'; return; }
-    out.textContent = '';
-    const box = el('textarea'); box.value = res.text; box.rows = Math.min(18, res.text.split('\n').length + 4); box.className='wide';
-    const notes = el('div','hint',
-      (res.ok ? 'Passed its checks. Read it anyway — it goes out under your name.' : 'IT FAILED ITS CHECKS: ' + res.problems.join(' · ')));
-    const save = el('button','btn','Save to the ledger');
-    save.onclick = async()=>{
-      const saved = await OJ('/api/outreach/contact',{ id, name, title:titleIn.value.trim(), persona:personaSel.value, channel:chanSel.value, draft:box.value });
-      if(saved.status===409){ out.textContent = saved.error; return; }
-      openOutreachJob(id);
+  } else {
+    const nameIn = el('input'); nameIn.placeholder='Their full name — from the people above, or LinkedIn'; nameIn.className='wide';
+    const titleIn = el('input'); titleIn.placeholder='Their title (optional)'; titleIn.className='wide';
+    const personaSel = el('select');
+    for (const p of d.spec.personas){ const o=el('option',null,p.label); o.value=p.key; personaSel.appendChild(o); }
+    const chanSel = el('select');
+    for (const [k,v] of Object.entries(d.channels)){ const o=el('option',null,v.label); o.value=k; chanSel.appendChild(o); }
+    const r1 = el('div','row'); r1.append(nameIn, titleIn);
+    const r2 = el('div','row'); r2.append(personaSel, chanSel);
+    const out = el('div','hint','');
+    const draftBtn = el('button','btn','Draft it');
+    // The person this form was filled from, so the saved row keeps their
+    // profile link and published address.
+    let picked = null;
+    fillWriter = (p)=>{
+      picked = p;
+      nameIn.value = p.name; titleIn.value = p.title || '';
+      if ([...personaSel.options].some(o=>o.value===p.persona)) personaSel.value = p.persona;
+      if (p.public_email && d.channels.email) chanSel.value = 'email';
+      w.scrollIntoView({ behavior:'smooth', block:'start' });
+      nameIn.focus();
     };
-    out.textContent='';
-    w.append(box, notes, save);
-    if (res.email) w.appendChild(el('div','hint', `${res.email.address} — ${res.email.note}`));
-  };
-  w.append(r1, r2, draftBtn, out);
-  hub.appendChild(w);
+    draftBtn.onclick = async()=>{
+      const name = nameIn.value.trim();
+      if(!name){ out.textContent='A message needs a person. Pick one above or find one on LinkedIn.'; return; }
+      draftBtn.disabled = true; out.textContent='Writing…';
+      const res = await OJ('/api/outreach/draft',{ id, name, title:titleIn.value.trim(), persona:personaSel.value, channel:chanSel.value });
+      draftBtn.disabled = false;
+      if(!res.text){ out.textContent = res.why || res.error || 'Nothing was written.'; return; }
+      out.textContent = '';
+      const box = el('textarea'); box.value = res.text; box.rows = Math.min(18, res.text.split('\n').length + 4); box.className='wide';
+      const notes = el('div','hint',
+        (res.ok ? 'Passed its checks. Read it anyway — it goes out under your name.' : 'IT FAILED ITS CHECKS: ' + res.problems.join(' · ')));
+      const save = el('button','btn','Save to the ledger');
+      save.onclick = async()=>{
+        const same = picked && picked.name.toLowerCase() === name.toLowerCase() ? picked : null;
+        const saved = await OJ('/api/outreach/contact',{
+          id, name, title:titleIn.value.trim(), persona:personaSel.value, channel:chanSel.value, draft:box.value,
+          linkedin_url: same?.profile_url || undefined, email: same?.public_email || undefined,
+        });
+        if(saved.status===409){ out.textContent = saved.error; return; }
+        openOutreachJob(id);
+      };
+      w.append(box, notes, save);
+      if (res.email) w.appendChild(el('div','hint', `${res.email.address} — ${res.email.note}`));
+    };
+    w.append(r1, r2, draftBtn, out);
+    hub.appendChild(w);
+  }
+
+  // The manual route, for when the research found nobody or he wants a
+  // different person: what the posting names, and the searches built from it.
+  const facts = el('div','panel');
+  facts.appendChild(el('h3',null,'Search LinkedIn yourself'));
+  facts.appendChild(el('div','hint','Target choice matters more than the message. Alumni reply to students; a recruiter is the most spammed and the least able to vouch for you.'));
+  const fact = (k,v)=>{ const r=el('div','row'); r.appendChild(el('span','name',k)); r.appendChild(el('span','muted',v)); facts.appendChild(r); };
+  fact('Team', d.spec.team || 'not named — the search falls back to alumni');
+  if (d.spec.managerTitle) fact('Reports to', d.spec.managerTitle);
+  fact('Email domain', d.emailHint.domain
+    ? `${d.emailHint.domain}${d.emailHint.pattern?` · ${d.emailHint.pattern}, confirmed from one of their own postings`:' · format unknown, so any address is a guess to check'}`
+    : 'unknown — nothing in their postings names one');
+  for (const search of d.spec.searches){
+    const row = el('div','row');
+    row.appendChild(el('span','name', search.label));
+    const go = el('button','btn','Search LinkedIn');
+    go.onclick = ()=>window.open(search.url,'_blank','noopener');
+    row.appendChild(go);
+    facts.appendChild(row);
+  }
+  hub.appendChild(facts);
 }
 
 // ── Resumes: the PDFs, previewed inline ────────────────────────────
@@ -3876,12 +4964,15 @@ async function renderResumes(){
   const stale = staleBanner(d.code); if (stale) hub.appendChild(stale);
 
   const hero = el('div','hero');
-  hero.appendChild(el('div','big', `${d.resumes.length} resume${d.resumes.length===1?'':'s'}`));
+  const nBase = d.resumes.filter((r)=>isPlainResumeFile(r.file) || r.job).length;
+  hero.appendChild(el('div','big', `${nBase} base resume${nBase===1?'':'s'}`));
   hero.appendChild(el('div','lede',
-    'Four resumes, one per lane — total experience, automation, manufacturing, mechanical. '
-    + 'Every application gets the one matching the posting’s title, with the internship titles '
-    + 'to match. Each file is named "Alex Rivera Resume.pdf" on purpose: the folder is the variant, '
-    + 'so no company ever receives two differently-named resumes.'));
+    (PERSON.preset === 'hardware-engineering'
+      ? `${nBase} base resume${nBase===1?'':'s'} across four lanes — total experience, automation, manufacturing, mechanical. `
+      : `${nBase} base resume${nBase===1?'':'s'} — total experience, built from your whole bullet pool. `)
+    + `Each base is "${RESUME_FILE}" in its lane’s folder. An application gets a resume reshaped `
+    + `for that posting from the base its title matches, uploaded as "${PERSON.fullName} - <Company> - <Role>.pdf" `
+    + 'so the form shows which one went on (F-409).'));
   hub.appendChild(hero);
 
   if (!d.resumes.length){
@@ -3891,151 +4982,173 @@ async function renderResumes(){
     hub.appendChild(p); return;
   }
 
-  // Every file shares one name, so the preview/open/download links must carry
-  // the folder too — without ?dir= they would all resolve to the same PDF.
+  // Every file shares one name, so the open/download links must carry the
+  // folder too — without ?dir= they would all resolve to the same PDF.
   const href = (r) => `/resume?file=${encodeURIComponent(r.file)}${r.dir?`&dir=${encodeURIComponent(r.dir)}`:''}`;
+  resumeStyle();
 
-  const grid = el('div','rgrid'); grid.style.marginTop='16px';
-  for (const r of d.resumes){
-    const card = el('div','rcard'+(r.isDefault?' isdefault':''));
-    const prev = el('div','rprev');
-    const fr = document.createElement('iframe');
-    // #toolbar=0 keeps the card a clean preview; the Open button gives the
-    // full viewer in its own tab.
-    fr.src = `${href(r)}#toolbar=0&navpanes=0&view=FitH`;
-    fr.title = r.family || r.file; fr.loading='lazy';
-    prev.appendChild(fr);
-    card.appendChild(prev);
-
-    const meta = el('div','rmeta');
-    // The FAMILY is the identity here — the filenames are all identical.
-    meta.appendChild(el('div','rt', r.familyLabel || r.family || r.file.replace(/\.pdf$/i,'')));
-    const bits = [];
-    if (r.family) bits.push(`${r.family}/${r.file}`);
-    if (r.bytes) bits.push(Math.round(r.bytes/1024)+' KB');
-    if (r.mtime) bits.push('built '+timeAgo(r.mtime));
-    meta.appendChild(el('div','rs', bits.join(' · ')));
-    // Which internship title this one presents — the thing to check at a glance.
-    for (const t of (r.titles||[])) meta.appendChild(el('div','hint', t));
-    const tag = el('div','rj');
-    if (r.isDefault){
-      const b = el('span','badge b-good','FALLBACK'); tag.appendChild(b);
-      tag.appendChild(document.createTextNode(' used when a posting has no clear lane'));
-    } else if (r.job){
-      const b = el('span','badge b-dim','ONE-OFF'); tag.appendChild(b);
-      tag.appendChild(document.createTextNode(' '));
-      const a = el('a',null,`${r.job.company} — ${r.job.title}`);
-      const h3=safeHref(r.job.url); if(h3){ a.href=h3; a.target='_blank'; a.rel='noopener'; } tag.appendChild(a);
-    } else {
-      const b = el('span','badge b-dim','BY TITLE'); tag.appendChild(b);
-      tag.appendChild(document.createTextNode(' auto-picked for postings in this lane'));
-    }
-    meta.appendChild(tag);
-    card.appendChild(meta);
-
-    const acts = el('div','racts');
-    const open = el('a','btn','Open ↗');
-    open.href = href(r); open.target='_blank';
-    acts.appendChild(open);
-    const dl = el('a','btn','Download');
-    dl.href = href(r); dl.download = r.file;
-    acts.appendChild(dl);
-    card.appendChild(acts);
-    grid.appendChild(card);
+  // THE FOUR BASES, ONE LINE EACH (2026-09-30). They were four embedded PDF
+  // previews, each a screen tall: "we dont need photo preview id say its abit
+  // redundant ngl coz i have to scroll so much". Open shows the real thing.
+  const base = el('table','sheet rtable'); base.style.marginTop = '12px';
+  const bh = el('tr'); for (const h of ['Lane','Internship titles it presents','Used for','Built','']) bh.appendChild(el('th', null, h));
+  const bt = el('thead'); bt.appendChild(bh); base.appendChild(bt);
+  const bb = el('tbody'); base.appendChild(bb);
+  // Only the BASES: each lane folder also holds a working copy per job ("Alex
+  // Ha - <Company> - <Role>.pdf", 200 of 204 on 2026-09-30), and every one of
+  // those is in the sent list below. They go in a closed section at the end.
+  const isBase = (r) => isPlainResumeFile(r.file) || !!r.job;
+  const working = d.resumes.filter((r)=>!isBase(r));
+  for (const r of d.resumes.filter(isBase)){
+    const tr = el('tr');
+    tr.appendChild(el('td', null, r.familyLabel || r.family || r.file.replace(/\.pdf$/i,'')));
+    tr.appendChild(el('td', 'm', (r.titles || []).join(' · ')));
+    const use = el('td');
+    if (r.isDefault) use.append(el('span','badge b-good','FALLBACK'), document.createTextNode(' no clear lane'));
+    else if (r.job){ const a = el('a', null, `${r.job.company} — ${r.job.title}`); const h3 = safeHref(r.job.url); if (h3){ a.href = h3; a.target = '_blank'; a.rel = 'noopener'; } use.append(el('span','badge b-dim','ONE-OFF'), document.createTextNode(' '), a); }
+    else use.append(el('span','badge b-dim','BY TITLE'), document.createTextNode(' postings in this lane'));
+    tr.appendChild(use);
+    tr.appendChild(el('td', 'num', r.mtime ? timeAgo(r.mtime) + ' ago' : ''));
+    tr.appendChild(resumeLinks(href(r), r.file));
+    bb.appendChild(tr);
   }
-  hub.appendChild(grid);
+  const bw = el('div','sheetwrap'); bw.appendChild(base); hub.appendChild(bw);
+  const workingBox = () => {
+    if (!working.length) return null;
+    const dd = document.createElement('details'); dd.style.marginTop = '18px';
+    const sum = document.createElement('summary'); sum.className = 'm'; sum.style.cursor = 'pointer';
+    sum.textContent = `${working.length} working copies in the lane folders (the same resumes as the sent list, by their build name)`;
+    dd.appendChild(sum);
+    const t = el('table','sheet rtable'); const tb = el('tbody'); t.appendChild(tb);
+    for (const r of working.sort((a,b)=>String(a.file).localeCompare(String(b.file)))){
+      const tr = el('tr');
+      tr.appendChild(el('td', null, withoutPersonPrefix(r.file).replace(/\.pdf$/i, '')));
+      tr.appendChild(el('td','m', r.familyLabel || r.family || ''));
+      tr.appendChild(el('td','num', r.mtime ? timeAgo(r.mtime) + ' ago' : ''));
+      tr.appendChild(resumeLinks(href(r), r.file));
+      tb.appendChild(tr);
+    }
+    const w = el('div','sheetwrap'); w.appendChild(t); dd.appendChild(w);
+    return dd;
+  };
 
   // -- Every tailored resume that has actually gone out --------------
   //
   // Alex, 2026-09-02: "i think we need to make a resume viewer, i think we
-  // already have that but like a storage for all tailored resume".
+  // already have that but like a storage for all tailored resume". One file per
+  // application, named "Alex Rivera Resume - <family> - <Company> - <Position>".
   //
-  // The four above are the TEMPLATES. These are the history: one file per
-  // application, named "Alex Rivera Resume - <family> - <Company> - <Position>"
-  // so fifty near-identical PDFs can be told apart - the naming he asked for,
-  // and the reason this list is readable at all.
-  //
-  // Separate from the grid above on purpose. Mixing "what I would send" with
-  // "what I did send" loses the only distinction that matters here.
+  // GROUPED (2026-09-30): 282 cards was a scroll he would not make ("maybe group
+  // it by family or companies?"). Groups start closed; each line says how many
+  // and the newest; a search opens whatever it matches.
   const arch = d.archive || [];
-  if (arch.length){
-    const head = el('div','hero');
-    head.style.marginTop = '22px';
-    head.appendChild(el('div','big', arch.length + ' tailored resume' + (arch.length===1?'':'s') + ' sent'));
-    head.appendChild(el('div','lede',
-      'One per application, newest first. The company and job title are in the filename, '
-      + 'so you can see exactly what went to whom - including the ones the job site '
-      + 'would not show you back.'));
-    hub.appendChild(head);
+  if (!arch.length){ const wb = workingBox(); if (wb) hub.appendChild(wb); return; }
+  const head = el('div','hero'); head.style.marginTop = '22px';
+  head.appendChild(el('div','big', arch.length + ' tailored resume' + (arch.length===1?'':'s') + ' uploaded to application forms'));
+  head.appendChild(el('div','lede', `One per application. Grouped so you can find one; open a group, then View or ⬇ (downloads as "${RESUME_FILE}").`));
+  hub.appendChild(head);
 
-    const list = el('div','rgrid'); list.style.marginTop='16px';
-    for (const a of arch){
-      const card = el('div','rcard acard');
-      // WHO AND WHAT, with the logo. Then WHICH: the requisition id, the
-      // location and the posting link are what separate two resumes to the
-      // same company for the same title a week apart (Alex, 2026-09-03:
-      // "not very distinguishable which resume is for which job").
-      const head = el('div','ahead');
-      head.appendChild(logoEl(a.company, a.postingUrl, 'lg'));
-      const who = el('div','who');
-      who.appendChild(el('div','rname', a.company || 'Unknown company'));
-      if (a.title) who.appendChild(el('div','rtitle', a.title));
-      head.appendChild(who);
-      card.appendChild(head);
-
-      const ids = el('div','ids');
-      if (a.requisition){ const b=el('span','badge b-dim b-id','#'+a.requisition); b.title='The requisition id the company uses for this posting'; ids.appendChild(b); }
-      if (a.jobId){ const b=el('span','badge b-dim b-id', String(a.jobId).slice(0,8)); b.title='Job id in your store: '+a.jobId; ids.appendChild(b); }
-      if (a.location) { const loc = el('span','badge b-loc', a.location); loc.title = a.location; ids.appendChild(loc); }
-      if (a.status && a.status!=='new') ids.appendChild(el('span','badge '+(a.status==='applied'?'b-good':'b-dim'), a.status));
-      const h3 = safeHref(a.postingUrl);
-      if (h3){ const pl=el('a','badge b-dim','posting ↗'); pl.href=h3; pl.target='_blank'; pl.rel='noopener'; ids.appendChild(pl); }
-      if (ids.childNodes.length) card.appendChild(ids);
-
-      card.appendChild(el('div','hint',
-        (a.family || 'resume') + ' · ' + (a.at||'').slice(0,10) + ' · ' + Math.round((a.bytes||0)/1024) + ' KB'));
-
-      // WHAT WAS REWORDED FOR THIS POSTING, and not just that something was.
-      //
-      // The PDF answers "what went out". This answers "how did it differ from
-      // my standing resume, and did anything get refused" - which was reported
-      // once while the resume was building and then lost with the page.
-      if ((a.rewrites||[]).length){
-        const d = document.createElement('details');
-        d.className = 'rwhy';
-        const sum = document.createElement('summary');
-        sum.textContent = a.rewrites.length + ' reworded for this posting'
-          + (a.refused ? ' · ' + a.refused + ' refused' : '');
-        d.appendChild(sum);
-        for (const w of a.rewrites){
-          const row = el('div','rwrow');
-          row.appendChild(el('div','was', w.from));
-          row.appendChild(el('div','now', w.to));
-          d.appendChild(row);
-        }
-        card.appendChild(d);
-      } else if (a.why){
-        card.appendChild(el('div','hint', a.why));
-      } else {
-        // NO DIFF IS TWO DIFFERENT FACTS. A card that simply says nothing reads
-        // as "nothing was reworded", and for most of this archive the truth is
-        // "no record was kept". He should not have to guess which.
-        card.appendChild(el('div','hint', a.logged
-          ? 'No rewrites — the standing wording already fitted this posting.'
-          : 'Built before rewrites were logged, so there is no record of what changed. The PDF is still exactly what went out.'));
-      }
-      const acts = el('div','racts');
-      const open = el('a','btn','Open');
-      open.href = a.url; open.target='_blank'; open.rel='noopener';
-      acts.appendChild(open);
-      const dl = el('a','btn','Download');
-      dl.href = a.url; dl.download = a.file;
-      acts.appendChild(dl);
-      card.appendChild(acts);
-      list.appendChild(card);
-    }
-    hub.appendChild(list);
+  const tools = el('div'); tools.style.cssText = 'display:flex;gap:8px;align-items:center;margin:12px 0 8px;flex-wrap:wrap';
+  const q = el('input'); q.type = 'search'; q.placeholder = 'Search company, role, location, req #…'; q.value = RES.q; q.style.cssText = 'flex:1;min-width:220px;max-width:420px';
+  const seg = el('div','seg');
+  for (const [k, label] of [['company','By company'],['family','By lane'],['month','By month']]){
+    const b = el('button', RES.by === k ? 'on' : '', label);
+    b.onclick = ()=>{ RES.by = k; RES.open.clear(); try { localStorage.setItem('jarvis-res-by', k); } catch { /* this session */ } draw(); [...seg.children].forEach((x)=>x.classList.toggle('on', x === b)); };
+    seg.appendChild(b);
   }
+  const all = el('button','btn','Open all'); const count = el('span','m');
+  tools.append(q, seg, all, count); hub.appendChild(tools);
+  const box = el('div'); hub.appendChild(box);
+
+  const keyOf = (a) => RES.by === 'family' ? (a.family || 'unknown lane')
+    : RES.by === 'month' ? ((a.at || '').slice(0, 7) || 'undated')
+    : (coName(a.company) || 'Unknown company');
+  const hay = (a) => `${a.company} ${a.title} ${a.location || ''} ${a.requisition || ''} ${a.family || ''} ${a.status || ''}`.toLowerCase();
+  function draw(){
+    box.innerHTML = '';
+    const needle = RES.q.trim().toLowerCase();
+    const rows = arch.filter((a)=>!needle || hay(a).includes(needle));
+    const groups = new Map();
+    for (const a of rows){ const k = keyOf(a); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); }
+    const keys = [...groups.keys()].sort((x, y)=> RES.by === 'month' ? y.localeCompare(x) : x.localeCompare(y));
+    count.textContent = `${rows.length} resume${rows.length===1?'':'s'} in ${keys.length} group${keys.length===1?'':'s'}`;
+    const allOpen = keys.length && keys.every((k)=>RES.open.has(k));
+    all.textContent = allOpen ? 'Close all' : 'Open all';
+    all.onclick = ()=>{ if (allOpen) RES.open.clear(); else keys.forEach((k)=>RES.open.add(k)); draw(); };
+    const table = el('table','sheet rtable');
+    const tb = el('tbody'); table.appendChild(tb);
+    for (const k of keys){
+      const items = groups.get(k).sort((x, y)=>String(y.at||'').localeCompare(String(x.at||'')));
+      // A search opens what it matched: a hit hidden in a closed group is no hit.
+      const open = RES.open.has(k) || !!needle;
+      const gr = el('tr','grp');
+      const gc = el('td'); gc.colSpan = 7;
+      const line = el('div'); line.style.cssText = 'display:flex;gap:8px;align-items:center';
+      line.appendChild(el('span', null, open ? '▾' : '▸'));
+      if (RES.by === 'company') line.appendChild(logoEl(k, items[0].postingUrl, 'sm'));
+      line.appendChild(el('b', null, RES.by === 'month' ? new Date(k + '-15').toLocaleDateString(undefined, { month:'long', year:'numeric' }) : k));
+      line.appendChild(el('span','m', `${items.length} · newest ${(items[0].at || '').slice(0, 10)}`));
+      gc.appendChild(line); gr.appendChild(gc);
+      gr.onclick = ()=>{ if (RES.open.has(k)) RES.open.delete(k); else RES.open.add(k); draw(); };
+      tb.appendChild(gr);
+      if (!open) continue;
+      for (const a of items){
+        const tr = el('tr','sub');
+        const role = el('td','role');
+        const h3 = safeHref(a.postingUrl);
+        const t = el(h3 ? 'a' : 'span', null, RES.by === 'company' ? (a.title || a.file) : `${coName(a.company)} — ${a.title || ''}`);
+        if (h3){ t.href = h3; t.target = '_blank'; t.rel = 'noopener'; t.title = 'The posting'; }
+        role.appendChild(t);
+        tr.appendChild(role);
+        tr.appendChild(el('td', 'm', [a.requisition ? '#' + a.requisition : '', a.location || ''].filter(Boolean).join(' · ')));
+        tr.appendChild(el('td', null, a.status && a.status !== 'new' ? (SHEET_STATUS_LABEL[a.status] || a.status) : ''));
+        tr.appendChild(el('td', 'm', a.family || ''));
+        tr.appendChild(el('td', 'num', (a.at || '').slice(0, 10)));
+        // What was reworded for this posting, one click away instead of a block per card.
+        const why = el('td','m');
+        if ((a.rewrites || []).length){
+          const dd = document.createElement('details');
+          const sum = document.createElement('summary');
+          sum.textContent = a.rewrites.length + ' reworded' + (a.refused ? ' · ' + a.refused + ' refused' : '');
+          dd.appendChild(sum);
+          for (const w of a.rewrites){ const r = el('div','rwrow'); r.appendChild(el('div','was', w.from)); r.appendChild(el('div','now', w.to)); dd.appendChild(r); }
+          why.appendChild(dd);
+        } else why.textContent = a.why ? a.why.slice(0, 80) : (a.logged ? 'no rewrites' : 'no record');
+        if (a.why) why.title = a.why;
+        tr.appendChild(why);
+        tr.appendChild(resumeLinks(a.url, a.file));
+        tb.appendChild(tr);
+      }
+    }
+    const w = el('div','sheetwrap'); w.appendChild(table); box.appendChild(w);
+  }
+  q.oninput = ()=>{ RES.q = q.value; draw(); };
+  draw();
+  const wb = workingBox(); if (wb) hub.appendChild(wb);
+}
+
+/** The Resumes tab's grouping, remembered per browser; open groups for this visit. */
+const RES = { by: (()=>{ try { return localStorage.getItem('jarvis-res-by') || 'company'; } catch { return 'company'; } })(), q: '', open: new Set() };
+function resumeStyle(){
+  sheetStyle();
+  if ($('#rescss')) return;
+  const s = document.createElement('style'); s.id = 'rescss';
+  s.textContent = `
+    table.rtable{min-width:0}
+    table.rtable tr.grp td{background:var(--panel,#161b22)}
+    table.rtable tr.sub td:first-child{padding-left:28px;opacity:1}
+    table.rtable details summary{cursor:pointer}
+    table.rtable .rwrow{margin:4px 0;white-space:normal;max-width:70ch}
+  `;
+  document.head.appendChild(s);
+}
+/** View in a new tab, or download as "Alex Rivera Resume.pdf". */
+function resumeLinks(url, file){
+  const td = el('td'); td.style.whiteSpace = 'nowrap';
+  const v = el('a', null, 'View'); v.href = url; v.target = '_blank'; v.rel = 'noopener'; v.title = file || '';
+  const dl = el('a', null, '⬇'); dl.href = `${url}${url.includes('?') ? '&' : '?'}download=1`; dl.setAttribute('download', RESUME_FILE); dl.title = `Download as "${RESUME_FILE}"`; dl.style.marginLeft = '10px';
+  td.append(v, dl);
+  return td;
 }
 
 function renderScan(){

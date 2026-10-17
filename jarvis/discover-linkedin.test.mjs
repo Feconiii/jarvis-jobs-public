@@ -9,7 +9,7 @@
 
 import {
   parseSearchPage, companyKey, newCompanies, searchUrl, harvest,
-  NEVER_TRACK, DEFAULT_QUERIES,
+  NEVER_TRACK, DEFAULT_QUERIES, websiteFromCompanyPage, companyWebsites,
 } from './discover-linkedin.mjs';
 
 let pass = 0, fail = 0;
@@ -271,6 +271,48 @@ console.log('🧪 discover-linkedin: the default searches are role searches');
   // find companies we cannot name yet.
   const named = DEFAULT_QUERIES.filter(q => /applied materials|tesla|spacex|intel|micron|lam |asml/i.test(q));
   check('no query names a company', named, []);
+}
+
+// F-657: a name alone could not reach JPL (`citjpl`) or Vertex (pod `wd501`),
+// and both picks sent him to LinkedIn's login wall. The company's own LinkedIn
+// page names its website; the resolver follows that site's careers page.
+console.log('🧪 discover-linkedin: each card keeps its company page, and that page names a website');
+{
+  const rows = parseSearchPage(FRAGMENT);
+  check('the company page comes off the card', rows[0].companyUrl, 'https://www.linkedin.com/company/freeformfuture');
+  // Verbatim shape of the live card, 2026-10-02: tracking attributes first, a ?trk= tail.
+  const live = parseSearchPage(`<div data-entity-urn="urn:li:jobPosting:1"><h3 class="base-search-card__title">X</h3>
+    <a class="hidden-nested-link" data-tracking-client-ingraph data-tracking-control-name="public_jobs_jserp-result_job-search-card-subtitle" data-tracking-will-navigate href="https://www.linkedin.com/company/amazon?trk=public_jobs_jserp-result_job-search-card-subtitle">Amazon</a></div>`);
+  check('the tracking tail is dropped', live[0].companyUrl, 'https://www.linkedin.com/company/amazon');
+  const fresh = newCompanies(rows, []);
+  check('the company keeps it', fresh.find(c => c.name === 'Freeform').companyUrl, 'https://www.linkedin.com/company/freeformfuture');
+
+  // Verbatim from Vertex's page, 2026-10-02: the attribute comes BEFORE href.
+  check('the website comes out of LinkedIn\'s redirect',
+    websiteFromCompanyPage('<a class="link-no-visited-state hover:no-underline" data-tracking-control-name="about_website" href="https://www.linkedin.com/redir/redirect?url=https%3A%2F%2Fwww%2Evrtx%2Ecom%2F&amp;urlhash=-DWr&amp;trk=about_website" target="_blank">'),
+    'https://www.vrtx.com');
+  check('href first works too',
+    websiteFromCompanyPage('<a href="https://www.linkedin.com/redir/redirect?url=https%3A%2F%2Fwww.jpl.nasa.gov%2F&amp;trk=about_website" data-tracking-control-name="about_website">'),
+    'https://www.jpl.nasa.gov');
+  check('a page with no website names none', websiteFromCompanyPage('<html>Sign in</html>'), '');
+  check('a link back into LinkedIn is not a website',
+    websiteFromCompanyPage('<a data-tracking-control-name="about_website" href="https://www.linkedin.com/redir/redirect?url=https%3A%2F%2Fwww.linkedin.com%2Fcompany%2Fx">'), '');
+}
+
+console.log('🧪 discover-linkedin: the website lookup stops at a rate limit instead of waiting it out');
+{
+  const page = (site) => `<a data-tracking-control-name="about_website" href="https://www.linkedin.com/redir/redirect?url=${encodeURIComponent(site)}">`;
+  const answers = [{ status: 200, body: page('https://a.example/') }, { status: 429, body: '' }, { status: 200, body: page('https://c.example/') }];
+  let asked = 0;
+  const fetchImpl = async () => { const a = answers[asked++]; return { ok: a.status === 200, status: a.status, text: async () => a.body }; };
+  const got = await companyWebsites([
+    { name: 'A', companyUrl: 'https://www.linkedin.com/company/a' },
+    { name: 'NoPage' },
+    { name: 'B', companyUrl: 'https://www.linkedin.com/company/b' },
+    { name: 'C', companyUrl: 'https://www.linkedin.com/company/c' },
+  ], { fetchImpl, pause: async () => {} });
+  check('the site before the refusal is kept', [...got], [['A', 'https://a.example']]);
+  check('nothing is asked after the refusal, and a company with no page is not asked', asked, 2);
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

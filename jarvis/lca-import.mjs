@@ -24,6 +24,7 @@ import { openDb } from './db.mjs';
 import { dbPath as storeDbPath, db as storeDb } from './store.mjs';
 import { aggregateLca, summarise, matchEmployers, verdictFor } from './lca.mjs';
 import { guardArgs } from './cli.mjs';
+import { discovery } from './targeting.mjs';
 
 const USAGE = `
   node jarvis/lca-import.mjs <file.xlsx> [options]
@@ -191,7 +192,7 @@ if (acronyms.length) {
   console.log(`\n  ${acronyms.length} matched on a short name — check these, an acronym is not an identity:`);
   for (const [company, m] of acronyms) {
     const s = summarise(m.key, byEmployer.get(m.key));
-    const eng = s.engCertified ? `${s.engCertified} in engineering` : 'NONE in engineering';
+    const eng = s.engCertified ? `${s.engCertified} in ${discovery.socShortLabel}` : `NONE in ${discovery.socShortLabel}`;
     console.log(`    ${company.slice(0, 26).padEnd(28)} → ${s.name.slice(0, 32).padEnd(34)} ${s.certified} filings, ${eng}`);
   }
 }

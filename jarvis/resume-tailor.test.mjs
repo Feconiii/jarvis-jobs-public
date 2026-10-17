@@ -274,6 +274,10 @@ test('THE FRAMEWORKS THAT ARE A STUDY STAY OUT — DOE, SPC, Cpk, Gage R&R, belt
     const res = checkRewrite({ text: bad, source, vocab, label: 'acme.dimensional' });
     assert.equal(res.ok, false, `must refuse: ${bad}`);
   }
+  // DOE became his on 2026-10-12 — for the Neuro-T model settings only.
+  const neuro = 'Developed a two-stage Neuro-T machine-vision workflow combining object detection and image classification.';
+  const doe = checkRewrite({ text: 'Developed a two-stage Neuro-T machine-vision workflow, using DOE on object detection and image classification.', source: neuro, vocab, label: 'amat.neuro-t' });
+  assert.ok(!doe.problems.some((p) => /design of experiments/.test(p)), doe.problems.join(' | '));
   // And the ones he CAN say still pass the vocabulary gate.
   for (const good of ['5 Whys', 'fishbone', 'Pareto', 'poka-yoke', 'kaizen', 'PDCA', 'DMAIC', 'PFMEA']) {
     assert.ok(cv.toLowerCase().includes(good.toLowerCase()), `cv.md must name "${good}" for the tailor to use it`);
@@ -306,4 +310,60 @@ test('A COMPOUND JOINED FROM APPROVED PIECES IS NOT A NEW NAME: "drawings/BOMs" 
   assert.deepEqual(ok.problems, [], JSON.stringify(ok));
   const bad = checkRewrite({ text: 'Designed a fixture in Autodesk Inventor; created drawings/PLCs and released the design through Teamcenter.', source: [src], vocab });
   assert.ok(bad.problems.some((x) => /drawings\/plcs/i.test(x)), JSON.stringify(bad.problems));
+});
+
+// Alex, 2026-09-29: "never ever mention version 1". The 6-DOF arm is the only arm.
+test('a rewrite may not bring back the earlier arm', async () => {
+  const { checkRewrite } = await import('./resume-tailor.mjs');
+  const source = ['Designed and built a 6-DOF robotic arm with serial-bus servos and a parallel-jaw gripper.'];
+  for (const bad of ['Designed and built a 4 DOF robotic arm with serial-bus servos.', 'Designed and built a robotic arm on MG90S servos and a parallel-jaw gripper.', 'Designed a four degree of freedom robotic arm with a parallel-jaw gripper.']) {
+    const r = checkRewrite({ text: bad, source, label: 'project.robotic-arm' });
+    assert.ok(r.problems.some((p) => /earlier robotic arm/.test(p)), `refused: ${bad}`);
+  }
+});
+
+test('forbiddenClaims: one list for every writer; his source excuses a claim, a cv.md comment does not', async () => {
+  const { forbiddenClaims } = await import('./resume-tailor.mjs');
+  assert.deepEqual(forbiddenClaims('Designed in CadQuery and printed in PLA.'), ['CAD modelled in code']);
+  assert.deepEqual(forbiddenClaims('Holds the Six Sigma Yellow Belt certification.', '## Certifications\n- Six Sigma Yellow Belt certification'), []);
+  assert.deepEqual(forbiddenClaims('Ran a Gage R&R on the fixture.', '<!-- postings ask for Gage R&R 1.6% -->'), ['a Gage R&R']);
+  assert.deepEqual(forbiddenClaims('Ran a DOE on the vision model settings.'), []);
+});
+
+test('forbiddenClaims in prose: a method he wants to learn is no claim; the arm bans read every sentence', async () => {
+  const { forbiddenClaims } = await import('./resume-tailor.mjs');
+  const p = (t) => forbiddenClaims(t, '', { prose: true });
+  assert.deepEqual(p('I am eager to build depth in process capability work.'), []);
+  assert.deepEqual(p('What draws me to this role is running SPC on the line.'), []);
+  assert.deepEqual(p('At Acme Steel I wrote ladder logic for the roll former.'), ['PLC experience']);
+  assert.deepEqual(p('The arm was modelled in Python before Fusion.'), ['CAD modelled in code']);
+});
+
+test('forbiddenClaims in prose reads clauses, not sentences (F-723)', async () => {
+  const { forbiddenClaims } = await import('./resume-tailor.mjs');
+  const p = (t) => forbiddenClaims(t, '', { prose: true });
+  // Caught: My/We/Our, a site of his, a claim joined to a wish, "would" that
+  // is no wish, "I'd" meaning "I had", a clause continuing his subject.
+  assert.deepEqual(p('My work at Acme Steel included PLC programming and ladder logic.'), ['PLC experience']);
+  assert.deepEqual(p('We wrote ladder logic for the line.'), ['PLC experience']);
+  assert.deepEqual(p('Our team ran a Gage R&R on the fixture.'), ['a Gage R&R']);
+  assert.deepEqual(p('At Acme Steel, PLC programming was part of the week.'), ['PLC experience']);
+  assert.deepEqual(p('I wrote ladder logic for the press line, and I would bring that to your team.'), ['PLC experience']);
+  assert.deepEqual(p('I wrote ladder logic that would stop the press on a fault.'), ['PLC experience']);
+  assert.deepEqual(p("I'd built SPC charts for the etch line."), ['SPC']);
+  assert.deepEqual(p('I programmed the cell, including its PLC.'), ['PLC experience']);
+  // Free: the role's work, a wish, his close.
+  assert.deepEqual(p("I'd like to learn SPC from your team."), []);
+  assert.deepEqual(p('Your team runs SPC daily, and I would bring the same discipline.'), []);
+  assert.deepEqual(p('The role calls for Gage R&R and Cpk, which I am keen to learn.'), []);
+  assert.deepEqual(p('I built the fixture at AMAT, and your SPC program is where I want to apply that.'), []);
+  assert.deepEqual(p("That is the approach I'd bring to Tesla's controls team, where ladder logic runs every cell."), []);
+});
+
+test('no writer passes the posting as an allowed source (F-723)', async () => {
+  const { readFileSync } = await import('node:fs');
+  for (const f of ['apply/essay.mjs', 'cover-letter.mjs', 'outreach.mjs']) {
+    const src = readFileSync(new URL(f, import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /forbiddenClaims\([^)]*\bjd\b/, `${f} lets the posting excuse a banned claim`);
+  }
 });

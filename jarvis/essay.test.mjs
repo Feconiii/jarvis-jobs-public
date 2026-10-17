@@ -26,7 +26,7 @@ Acme Steel Stud Company, Mechanical Engineer Intern, Springfield.
 Identified a magazine feeding issue that reduced jams by 70%.
 An Excel VBA macro to automate tolerance parsing, worth roughly $57,000 in annual material savings.
 Programmed a Universal Robots collaborative robot in RoboDK.
-State University, Bachelor of Science: Mechanical Engineering, May 2027.`;
+Lakeside University, Bachelor of Science: Mechanical Engineering, May 2027.`;
 const JOB = { company: 'Applied Intuition', title: 'Mechanical Engineer - New Grad' };
 const JD = 'You will design custom test fixtures and perform structural and thermal analysis. SolidWorks preferred. Baja SAE experience welcome.';
 
@@ -40,7 +40,19 @@ test('the question kinds are told apart, and the specific ones win', () => {
   assert.equal(of('Why should we hire you?'), 'why-you');
   assert.equal(of('Describe a time when you disagreed with a teammate'), 'challenge');
   assert.equal(of('What are your career goals?'), 'goals');
-  assert.equal(of('Anything else you would like us to know?'), 'other');
+  // Its own kind since 2026-09-27: he answers it with a personal note, never a
+  // project (Nudge; TODO.md §H).
+  assert.equal(of('Anything else you would like us to know?'), 'anything-else');
+  assert.equal(of('What do you know about Hyve Solutions?'), 'company-knowledge');
+  assert.equal(of('Why are you looking for new opportunities?'), 'why-looking');
+  assert.equal(of('Please briefly describe your experience deploying robotics and/or industrial automation machinery.'), 'experience');
+  // "If you see the word cover letter you should write it" (2026-10-03, F-670):
+  // Scrap Labs' cover note and Beech Valley's field-name label were left blank.
+  assert.equal(of('Pitch or cover note (optional)'), 'cover-letter');
+  assert.equal(of('cCoverLetter'), 'cover-letter');
+  assert.equal(of('How did you discover us?') === 'cover-letter', false);
+  assert.ok(isWrittenQuestion({ label: 'Cover Letter', type: 'text' }), 'a one-line cover-letter box is still written');
+  assert.ok(isWrittenQuestion({ label: 'Pitch or cover note (optional)', type: 'text' }));
   // Not questions at all.
   assert.equal(of('First name'), null);
   assert.equal(of('LinkedIn URL'), null);
@@ -482,13 +494,15 @@ test('ONE BRIEF, NOT A PROCEDURE — his CV, the job, the company, his rules, th
   assert.match(p, /WHAT JARVIS KNOWS ABOUT TESLA[\s\S]*Team on the posting: Manufacturing/);
   assert.match(p, /only source of facts about him: never add a tool, number, result, sequence of events or motive/);
   assert.match(p, /Tesla or SpaceX style roles/, 'register by company');
-  // The prompt teaches the CONSTRUCTION now, not just what to avoid: a claim
-  // first, the facts subordinated under it, and a long box may close on what
-  // the evidence has in common (2026-09-19).
-  assert.match(p, /THE FIRST SENTENCE IS A CLAIM ABOUT WHAT KIND OF ENGINEER HE IS/);
-  assert.match(p, /COMPRESSION IS PRIORITISATION/);
-  assert.match(p, /may close on what the evidence has in common/);
-  assert.match(p, /What is still banned is the EMPTY close/);
+  // HOW HE ACTUALLY WRITES THESE (2026-10-01): read off 24 answers he rewrote
+  // before sending — summary level, breadth, his opener and his close.
+  assert.match(p, /HOW HE ACTUALLY WRITES THESE/);
+  assert.match(p, /SUMMARY LEVEL, NOT A PLAY-BY-PLAY/);
+  assert.match(p, /BREADTH OVER ONE DEEP STORY/);
+  assert.match(p, /That is the approach I would bring to Tesla's Cell Assembly team\./);
+  assert.match(p, /110 fasteners/, 'the trivia he cut is named as trivia');
+  assert.match(p, /hands-on", "collision-free", "6-DOF"/, 'hyphenated, the way he writes');
+  assert.doesNotMatch(p, /Compound modifiers stay open/, 'the open-compound rule is gone');
   assert.match(p, /150 to 260 words/);
   assert.match(p, /fifty other applicants/, 'his check list, asked in the same call');
   assert.match(p, /REPLY IN EXACTLY TWO PARTS:\n\nPLAN\n/);
@@ -504,13 +518,13 @@ test('HIS REASONING RULES ARE IN EVERY PROMPT, verbatim — 2026-09-17', () => {
     const p = buildAnswerPrompt({ question, job: { company: 'Tesla', title: 'ME' }, cvText: CV, jd: JD });
     assert.match(p, /BEFORE WRITING - DO THIS INTERNALLY/);
     assert.match(p, /"The reader should finish this answer believing that Alex __________\."/);
-    assert.match(p, /Then select the smallest number of confirmed experiences necessary to prove that claim\./);
-    assert.match(p, /Do not put this reasoning in the answer\. Write it only in the PLAN below, which is stripped before anyone sees the answer\./);
+    assert.match(p, /Then choose the experiences that prove it\./);
+    assert.match(p, /Do not put this reasoning in the answer; write it only in the PLAN below, which is stripped before anyone sees the answer\./);
     assert.match(p, /APPLICATION STRATEGY\n\nApplication answers are persuasive arguments, not resume summaries\./);
-    assert.match(p, /\* which 1-3 confirmed experiences best prove it/);
-    assert.match(p, /Never invent technical details\. Relevance may be inferred; facts may not\./);
-    assert.match(p, /Choose the opening based on the persuasive argument, not just question type\./);
-    assert.match(p, /Do not mechanically begin with "At Applied Materials\.\.\." because the question is experience-related\./);
+    assert.match(p, /Never invent a fact: every number, tool, result and event comes from cv\.md or the posting\./);
+    assert.match(p, /HOW HE ACTUALLY WRITES THESE/);
+    assert.doesNotMatch(p, /smallest number of confirmed experiences/, 'one deep story is what he rewrote away from');
+    assert.doesNotMatch(p, /A TECHNICAL DETAIL EARNS ITS PLACE BY THE CONSTRAINT/, 'the rule that produced the trivia is gone');
     assert.doesNotMatch(p, /Open on what he did and what came of it/, 'the old opening rule is gone');
   }
 });
@@ -592,42 +606,24 @@ test('THE PRIVATE PLAN never reaches the box, and must rest on lines really in c
   assert.match(r.reading, /believe: The reader should finish/, 'the plan is kept for "why this answer"');
 });
 
-test('A FIT OR MOTIVATION ANSWER MAY NOT OPEN ON A RESUME LINE; a story may', () => {
-  const body = 'At Applied Materials I designed a machine vision inspection fixture for 3 Metal Deposition chamber variants in Autodesk Inventor.';
-  assert.ok(checkAnswer(body, { cvText: body, kind: 'why-you', job: JOB }).problems.some((x) => /opens on a resume line/.test(x)));
-  assert.ok(checkAnswer(body, { cvText: body, kind: 'excellence', job: JOB }).problems.some((x) => /opens on a resume line/.test(x)));
-  assert.ok(!checkAnswer(body, { cvText: body, kind: 'project', job: JOB }).problems.some((x) => /opens on a resume line/.test(x)));
-  const own = 'At Applied Intuition the team builds simulation for autonomy, and I designed a machine vision inspection fixture for 3 Metal Deposition chamber variants.';
-  assert.ok(!checkAnswer(own, { cvText: own, kind: 'why-company', job: JOB }).problems.some((x) => /opens on a resume line/.test(x)), 'opening on the employer he is applying to is not a resume line');
-
-  // …AND THE SAME BULLET WITH THE EMPLOYER MOVED TO THE END OF THE SENTENCE.
-  // Measured on the live Agility "why are you a good fit" box, 2026-09-17: the
-  // check above wants a sentence that STARTS on the employer, so this walked
-  // through it, and the answer then listed two more projects without ever
-  // saying what the reader should conclude.
-  const opened = (text, kind) => checkAnswer(text, { cvText: CV, kind, job: JOB })
-    .problems.some((x) => /opens on what he did/.test(x));
-  const agility = 'I designed and released a machine vision inspection fixture end to end at Applied Materials, covering three chamber variants in Autodesk Inventor. I also translated RoboDK simulations into a physical UR collaborative robot installation.';
-  assert.ok(opened(agility, 'why-you'), 'a bare accomplishment opening a why-you answer is still a bullet');
-  assert.ok(opened(agility, 'excellence'), 'and an excellence answer');
-  assert.ok(opened(agility, 'cover-letter'), 'and a cover letter');
-  assert.ok(!opened(agility, 'project'), 'a story may open on the work');
-  // A box that is not asking him to make a case may open on a plain fact;
-  // forcing an argument there would buy a 40-180s redo for nothing.
-  assert.ok(!opened(agility, 'other'), 'a plain "tell us anything else" box is left alone');
-  assert.ok(!opened(agility, 'goals'), 'and so is "where do you see yourself"');
-  // The same fact IS an argument when the sentence says what it means here.
-  assert.ok(!opened('I designed and released a machine vision inspection fixture end to end, which is exactly the loop this role runs on. Then the rest.', 'why-you'),
-    'a claim in the same sentence is not a bullet');
-  assert.ok(!opened('I can take a fixture from CAD to released hardware on my own. At Applied Materials I did exactly that.', 'why-you'),
-    'and an answer that opens on the claim is untouched');
+// THE OPENING AND BREADTH RULES WERE RETIRED ON 2026-10-01, and these tests are
+// the record. Three of his last seven Tesla answers open "At Applied
+// Materials' Automation Technology Group, I worked on …", and every answer he
+// sent covers two or three pieces of work with "I also …" — the checks that
+// refused both were sending his own shape back for a rewrite.
+test('HIS OPENINGS PASS: on the employer he worked for, or on the work itself', () => {
+  const opens = (text, kind) => checkAnswer(text, { cvText: CV, kind, job: JOB }).problems.some((x) => /opens on/.test(x));
+  const his = 'At Applied Materials I designed a machine vision inspection fixture for 3 Metal Deposition chamber variants in Autodesk Inventor.';
+  assert.equal(opens(his, 'excellence'), false);
+  assert.equal(opens(his, 'why-you'), false);
+  assert.equal(opens('I designed and released a machine vision inspection fixture end to end at Applied Materials.', 'excellence'), false);
+  // Still refused: a first sentence about the problem before any work is named.
+  assert.equal(opens('The challenge was keeping the camera repeatable. I designed a machine vision inspection fixture.', 'excellence'), true);
 });
 
-test('AN ANSWER THAT KEEPS ADDING PROJECTS reads as a list and goes back', () => {
+test('BREADTH PASSES: an answer that covers several pieces of work is his shape', () => {
   const list = 'I designed a machine vision inspection fixture for 3 Metal Deposition chamber variants. I also programmed a Universal Robots collaborative robot in RoboDK. I also identified a magazine feeding issue that reduced jams by 70%.';
-  assert.ok(checkAnswer(list, { cvText: CV }).problems.some((x) => /reads as a list of work/.test(x)));
-  const one = 'I designed a machine vision inspection fixture for 3 Metal Deposition chamber variants. I also ran the tolerance analysis for it.';
-  assert.ok(!checkAnswer(one, { cvText: `${CV} ran the tolerance analysis` }).problems.some((x) => /reads as a list of work/.test(x)), 'one add-on is ordinary prose');
+  assert.ok(!checkAnswer(list, { cvText: CV }).problems.some((x) => /reads as a list of work/.test(x)));
 });
 
 test('fieldLimits reads the form, and the check holds the answer to it', () => {
@@ -664,15 +660,19 @@ test('an answer may close on what it argues, but never on a flourish', () => {
   // ALLOWED now: saying what the work amounts to, and what he would do here.
   assert.equal(ends('That is the experience I would bring to designing, commissioning and improving manufacturing equipment here.'), false);
   assert.equal(ends('Across these roles I have learned unfamiliar equipment quickly and turned diagnosis into measured production changes.'), false);
+  // HIS closes, as sent (2026-09-29 and 10-01) — refused until 2026-10-01.
+  assert.equal(ends('That is the same process-focused, data-driven approach I would bring to Tesla\'s Cell Assembly team.'), false);
+  assert.equal(ends('These experiences taught me to approach manufacturing problems by understanding the process on the floor, collecting evidence, identifying the root cause, implementing practical changes, and verifying the result.'), false);
 
   // STILL REFUSED: the closers that could end any answer at any company.
   for (const slop of [
     'Both results came from the same approach to engineering problems.',
     'Overall, these projects show what I can do.',
-    'What I learned is that attention to detail matters.',
   ]) {
     assert.ok(ends(slop), `still refused: ${slop}`);
   }
+  assert.ok(checkAnswer(`${body}What I learned is that attention to detail matters.`, { cvText: CV, job: { company: 'Tesla' } })
+    .problems.some((x) => /what I learned is that/.test(x)), 'a "what I learned is that" moral is still refused');
   // A tie-back INSIDE an evidence sentence remains the strongest form.
   assert.equal(ends('The fixture automated the same pin alignment check this posting lists.'), false);
 });
@@ -917,6 +917,17 @@ test('writeAnswer classifies a series box on its stem, not its ordinal', async (
 
 // ── F-459: the pitch questions, and how an answer opens ─────────────
 
+test('"THE MOST IMPRESSIVE THING YOU\'VE BUILT" IS ONE PROJECT, not his whole case (Spinor, 2026-10-16)', () => {
+  for (const q of [
+    "What's the most impressive thing you've built?",
+    'Describe the most ambitious thing you have ever built.',
+    'Tell us about a machine you designed.',
+  ]) assert.equal(answerKind(q)?.kind, 'project', `"${q}" asks for one thing he built`);
+  // A question about his work as a whole is still the pitch.
+  assert.equal(answerKind('What is the most impressive work you have done?')?.kind, 'excellence');
+  assert.equal(answerKind('Evidence of Excellence')?.kind, 'excellence');
+});
+
 test('"EVIDENCE OF EXCELLENCE" IS A QUESTION, and it is a pitch', () => {
   // A two-word noun phrase with no verb in it matched nothing, fell through to
   // "a direct answer to exactly what was asked", and got an answer that opened
@@ -1113,10 +1124,14 @@ test('THE ANCHOR CHECK NEEDS A REAL POSTING TO READ — a title alone proves not
  * no maxlength produced 159-216.
  */
 test('a generous maxlength cannot raise the kind\'s ceiling', () => {
-  assert.deepEqual(targetWords({ maxLength: 2500 }, 'excellence'), { min: 150, max: 260 },
-    'Tesla\'s box must not turn a 260-word answer into a 326-word one');
-  assert.deepEqual(targetWords({}, 'excellence'), { min: 150, max: 260 },
+  // HIS LENGTH, 2026-09-28 to 10-01: seven Tesla evidence answers sent at
+  // about 200-265 words, each cut from a draft of 290-320. The band is his; a
+  // generous box still cannot push past it.
+  assert.deepEqual(targetWords({ maxLength: 5000 }, 'excellence'), { min: 190, max: 290 },
+    'a 5,000-character box does not stretch past his own length');
+  assert.deepEqual(targetWords({}, 'excellence'), { min: 190, max: 290 },
     'and the band is the same with no box limit at all');
+  assert.deepEqual(targetWords({}, 'why-company'), { min: 85, max: 125 }, 'his "why us" answers as sent: Kovari 87, Madrone 113, Mariana 128 words (2026-10-02)');
   assert.deepEqual(targetWords({ maxLength: 2500 }, 'cover-letter'), { min: 150, max: 250 });
   assert.deepEqual(targetWords({ maxLength: 2500 }, 'project'), { min: 110, max: 200 });
 });
@@ -1176,4 +1191,58 @@ test('his stories file travels with the CV', async () => {
   assert.equal(bare.cvText, CV, 'no stories folder, no change');
   assert.deepEqual(checkAnswer('The RS232 parameter was wrong, and I found it.', { cvText: src.cvText, jd: '', job: JOB, target: { min: 1, max: 50 }, question: 'Biggest failure?', limits: {}, kind: 'character' })
     .problems.filter((p) => /232/.test(p)), [], 'a named thing from his story is not flagged as unsupported');
+});
+
+test('"What is your favorite personal project?" is the project question (Vital Lyfe, 2026-09-26)', () => {
+  assert.equal(answerKind('What is your favorite personal project?').kind, 'project');
+  assert.equal(answerKind('What is the coolest hardware project you have built?').kind, 'project');
+});
+
+test('NEURALINK: "Second example:" and "Third example:" are their own boxes, so the first holds one example', () => {
+  const stem = 'Please provide three examples of accomplishments that highlight your exceptional ability. Provide quantitative details and metrics to describe your impact. First example:';
+  const boxes = [
+    { type: 'text', multiline: true, label: stem },
+    { type: 'text', label: 'Second example:' },
+    { type: 'text', label: 'Third example:' },
+  ];
+  for (const b of boxes) assert.equal(isWrittenQuestion(b), true, `written: ${b.label.slice(-16)}`);
+  const grouped = groupSeries(boxes.map((b) => ({ ...b })));
+  assert.deepEqual(grouped.map((g) => g.seriesIndex), [1, 2, 3], 'one series of three boxes');
+  assert.ok(grouped.every((g) => g.stem === stem), 'each box is asked the stem question');
+  assert.equal(isWrittenQuestion({ type: 'text', label: 'Second address line' }), false, 'an ordinal is not enough on its own');
+});
+
+test('WHY THIS COMPANY: his 2026-10-02 shape — "I want to join X because", why it matters, the disciplines, one broad line of background, what he would help do', () => {
+  const p = buildAnswerPrompt({ question: 'Why Kovari?', kind: 'why-company', job: { company: 'Kovari', title: 'Mechanical Engineer' }, cvText: CV, jd: JD });
+  assert.match(p, /I want to join Madrone because the problem is both technically interesting and important/);
+  assert.match(p, /One paragraph, 90 to 120 words/);
+  assert.match(p, /opened "What excites me about X is that you are…"/, 'the opener he rewrote away is named');
+  assert.match(p, /NEVER WRITE THESE[^\n]*"That fits how I like to work\."/, 'the bridge sentence he rewrote away is named as banned');
+  assert.doesNotMatch(p, /2\. The bridge, one short sentence/, 'and no longer offered as a step');
+  assert.match(p, /A "why this company" answer of about 100 words is one paragraph\./);
+});
+
+test('WHY-COMPANY CHECK, 2026-10-02: his Madrone answer passes; the draft he rewrote is refused for its opener and its detail', () => {
+  const his = "I want to join Madrone because the problem is both technically interesting and important. Data centers are becoming increasingly power-constrained, and reducing the energy and water spent on cooling means more of that infrastructure can actually go toward useful compute. Madrone's approach of improving cooling without relying on mechanical chillers is especially interesting to me because it combines thermodynamics, fluids, mechanical design, manufacturing, and testing in one physical system. My background has been strongest when I can design something, build it, troubleshoot it, and improve it in the real world, so the chance to help take Madrone's technology from prototypes to deployed hardware is exactly the kind of work I want to do.";
+  const ok = checkAnswer(his, { kind: 'why-company' });
+  assert.ok(!ok.problems.some((p) => /What excites me|project detail/.test(p)), ok.problems.join(' | '));
+  const draft = "What excites me about Lila is that it combines AI with a production robot fleet. At Acme Steel my fault analysis reduced jams by approximately 70%, and I built a 6-DOF arm with ROS 2/MoveIt.";
+  const bad = checkAnswer(draft, { kind: 'why-company' });
+  assert.ok(bad.problems.some((p) => /opens "What excites me about/.test(p)), bad.problems.join(' | '));
+  assert.ok(bad.problems.some((p) => /project detail/.test(p)), bad.problems.join(' | '));
+  // An excellence answer keeps its numbers.
+  assert.ok(!checkAnswer(draft, { kind: 'excellence' }).problems.some((p) => /project detail/.test(p)));
+});
+
+// ONE LIST OF CLAIMS HE CANNOT MAKE, 2026-10-12. FORBIDDEN used to be checked
+// on resume rewrites only, so an answer could still say the arm was modelled in
+// Python ("never ever mention python cad", 2026-10-03). Answers, letters and
+// outreach run the same check now.
+test('an answer that says the arm was modelled in code is refused; DOE is his now', () => {
+  const code = checkAnswer('I modelled the arm parametrically in Python with build123d, then checked every servo pocket against the STEP files.', { kind: 'project', cvText: CV });
+  assert.ok(code.problems.some((p) => /CAD modelled in code/.test(p)), code.problems.join(' | '));
+  const plc = checkAnswer('At Acme Steel I wrote ladder logic for the line.', { kind: 'project', cvText: CV });
+  assert.ok(plc.problems.some((p) => /PLC experience/.test(p)), plc.problems.join(' | '));
+  const doe = checkAnswer('I ran a DOE on the Neuro-T model settings.', { kind: 'project', cvText: CV });
+  assert.ok(!doe.problems.some((p) => /claims/.test(p)), doe.problems.join(' | '));
 });

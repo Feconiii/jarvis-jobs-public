@@ -6,7 +6,13 @@
  * had: "no resume attached". It has no DOM, so it is exercised the way it
  * actually runs — as a script, with `chrome` and `fetch` stubbed.
  */
-import test from 'node:test';
+import test, { after } from 'node:test';
+
+// THE WORKER'S OWN TIMERS OUTLIVE THE TESTS (2026-09-25): every assertion
+// passed and the process never exited, which stalled `npm run jarvis:test` at
+// this file. Two seconds after the last test, whatever the worker left running
+// is let go; the exit code node:test set (1 on any failure) is kept.
+after(() => { setTimeout(() => process.exit(process.exitCode ?? 0), 2000).unref(); });
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 import path from 'path';
@@ -503,6 +509,35 @@ test('the id the server worked out from the PAGE sticks to the tab — a fallbac
   await guess.sandbox.arm(3);
   await askFrom(guess.listeners, 3, { type: 'plan', fields: [], pageUrl: 'https://elsewhere.test/apply' });
   assert.equal((await guess.sandbox.armedState(3)).id, null, 'a fallback is a guess, and a guess is not the tab’s application');
+});
+
+test('A STALE TAB ID THE SERVER CORRECTED FROM THE PAGE IS REPLACED, TOTALS AND NAME WITH IT (F-568)', async () => {
+  // Measured 2026-09-24: one tab went from Western Digital to Cintal's Rippling
+  // form. The plan was Cintal's, but the tab kept WD's id, so the run was
+  // recorded as WD with WD's unanswered questions on Cintal's list.
+  let plan = { id: 'wd', matched: 'page', company: 'Western Digital', title: 'Hardware Engineer', actions: [] };
+  const { sandbox, listeners } = load({
+    routes: { '/api/apply-token': okToken, '/api/plan': () => ({ ok: true, status: 200, json: async () => plan }) },
+  });
+  await sandbox.arm(2);
+  await askFrom(listeners, 2, { type: 'plan', fields: [], pageUrl: 'https://jobs.smartrecruiters.com/wd' });
+  const st = await sandbox.armedState(2);
+  st.acc.unanswered.push('step 2: Do you have a Family or Close Friend relationship with anyone employed by WD?');
+  st.acc.filled = 60;
+
+  plan = { id: 'cintal', matched: 'page', company: 'Cintal Inc.', title: 'Embedded Software Engineer', actions: [] };
+  await askFrom(listeners, 2, { type: 'plan', fields: [], pageUrl: 'https://ats.rippling.com/cintal/jobs/x/apply' });
+  const after = await sandbox.armedState(2);
+  assert.equal(after.id, 'cintal');
+  assert.equal(after.company, 'Cintal Inc.');
+  assert.equal(after.acc.filled, 0, 'WD\'s totals are not Cintal\'s');
+  assert.deepEqual([...after.acc.unanswered], [], 'WD\'s questions leave the list');
+
+  // The same id, matched by id, changes nothing.
+  plan = { id: 'cintal', matched: 'id', company: 'Cintal Inc.', actions: [] };
+  after.acc.filled = 12;
+  await askFrom(listeners, 2, { type: 'plan', fields: [], pageUrl: 'https://ats.rippling.com/cintal/jobs/x/apply' });
+  assert.equal((await sandbox.armedState(2)).acc.filled, 12);
 });
 
 test('an Apply link that opens a NEW tab hands the arming and the id to it', async () => {
@@ -1432,4 +1467,42 @@ test('F-399: what a later run answers leaves the "left for you" list', async () 
   // Compared as text: the array comes from the worker's own realm.
   assert.equal(JSON.stringify([...st.acc.unanswered]), JSON.stringify(['step 1: Website']),
     `only what is still his stays; got ${JSON.stringify([...st.acc.unanswered])}`);
+});
+
+test('F-571: a frame that never loads does not hold the set-up injections — the fill still goes in', async () => {
+  // Lyft's careerpuck board, 2026-09-24: the Greenhouse iframe had not loaded,
+  // the context and netwatch injections (allFrames, no cap) never returned,
+  // and content.js was never injected at all.
+  const PAGE = 'https://app.careerpuck.com/job-board/lyft/job/1';
+  let filler = 0;
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken, '/api/filled': okJson({ recorded: true }) } });
+  sandbox.__jarvisSetupCap = 40;
+  sandbox.chrome.tabs.get = async () => ({ id: 21, url: PAGE, status: 'complete' });
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    if (!o.files?.includes('content.js')) return new Promise(() => {});   // waits on the frame for ever
+    filler += 1;
+    return [{ result: { filled: 30 } }];
+  };
+  await sandbox.arm(21, { id: 'job-21', company: 'Lyft', started: true });
+  const out = await sandbox.runOnTab(21, { auto: false, reset: true });
+  assert.equal(filler, 1, 'the fill went in despite the frame');
+  assert.equal(out[0].filled, 30);
+});
+
+test('a filled LinkedIn message tab is kept in memory; other LinkedIn pages are left to the browser', async () => {
+  // Opera discarded Benjamin's and Riley's filled messages at 0.5 GB free
+  // (2026-10-05); a click reloaded each compose page empty.
+  const { sandbox, fire } = load();
+  const kept = [];
+  sandbox.chrome.tabs.update = async (id, o) => { kept.push([id, o.autoDiscardable]); return { id }; };
+  await fire.updated(7, { url: 'https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AX&recipient=X' });
+  await fire.updated(8, { url: 'https://www.linkedin.com/messaging/thread/new/?recipient=Y' });
+  await fire.updated(9, { url: 'https://www.linkedin.com/in/someone/' });
+  await fire.updated(10, { url: 'https://www.linkedin.com/messaging/thread/2-abc/' });
+  assert.deepEqual(kept, [[7, false], [8, false]]);
+  // Tabs filled before the extension loaded are protected when it does.
+  sandbox.chrome.tabs.query = async () => [{ id: 11, url: 'https://www.linkedin.com/messaging/compose/?recipient=Z' }, { id: 12, url: 'https://www.linkedin.com/messaging/' }];
+  await sandbox.keepOpenLinkedInComposes();
+  assert.deepEqual(kept.at(-1), [11, false]);
+  assert.equal(kept.length, 3);
 });

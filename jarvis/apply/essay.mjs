@@ -18,8 +18,9 @@
  *
  * IT NEVER PRESSES SUBMIT. It writes into the box; the button stays his.
  */
-import { condenseJd, describeFailure, JUDGMENT_MODELS } from '../tailor-llm.mjs';
-import { numbersIn, entitiesIn } from '../resume-tailor.mjs';
+import { condenseJd, describeFailure, JUDGMENT_MODELS, ownsExamples, personLine } from '../tailor-llm.mjs';
+import { person, writing } from '../targeting.mjs';
+import { numbersIn, entitiesIn, forbiddenClaims } from '../resume-tailor.mjs';
 import { reviewAnswer, reviewFeedback } from './answer-review.mjs';
 import { mkdirSync as mkdirDebug, writeFileSync as writeDebug } from 'fs';
 import pathForDebug from 'path';
@@ -59,7 +60,10 @@ export const KINDS = [
   // "Brief Cover Letter" (Charge Robotics, 2026-09-17) was answered as a
   // project story with a closer, because nothing told the writer it was a
   // letter. First, so no other pattern claims it.
-  ['cover-letter', /\bcover letter\b|\bletter of (?:interest|intent|motivation)\b|\bmotivation(?:al)? letter\b/i,
+  // …and every other spelling of it: "Pitch or cover note" (Scrap Labs) and a
+  // box labelled only by its field name, "cCoverLetter" (Beech Valley), were
+  // left blank. His rule, 2026-10-03: the word cover letter means write it.
+  ['cover-letter', /cover(?:ing)?[\s_.-]?(?:letter|note)\b|\bletter of (?:interest|intent|motivation)\b|\bmotivation(?:al)? letter\b/i,
     'a short cover letter body in his own letter register: why this company and this role, then the one or two pieces of his work that fit it, no salutation and no sign-off'],
   // `tell us(?: about)?` — Gradient Robotics writes it without the "about":
   // "Tell us a technical project you built and the hardest problem you hit
@@ -67,12 +71,37 @@ export const KINDS = [
   // never reached the writer, and `other` is not a story kind, so the guard
   // against opening on a resume line fired on an answer that had every right
   // to open where the work happened.
-  ['project', /\b(?:project|something you (?:built|made|designed)|piece of work|technical (?:work|achievement|accomplishment))\b.*\b(?:proud|tell us|describe|share|walk us)|(?:proud|tell us(?: about)?|describe|share|walk us through)\b.*\b(?:project|something you built)\b/i,
+  // …and "What is your favorite personal project?" (Vital Lyfe, 2026-09-26):
+  // no verb of telling, but the same question.
+  // …and "What's the most impressive thing you've built?" (Spinor Energy,
+  // 2026-10-16, twice): ONE thing he built, not his whole case. It fell to
+  // `excellence` on "most impressive", came back as 280 words on the AMAT
+  // fixture, and both times he sent 154 words on his robotic arm instead.
+  ['project', /\b(?:project|something you (?:built|made|designed)|piece of work|technical (?:work|achievement|accomplishment))\b.*\b(?:proud|tell us|describe|share|walk us)|(?:proud|tell us(?: about)?|describe|share|walk us through)\b.*\b(?:project|something you built)\b|\b(?:favou?rite|best|coolest|most\s+(?:interesting|meaningful))\s+(?:personal\s+|side\s+|technical\s+|engineering\s+|hardware\s+)?project\b|\b(?:thing|things|project|system|device|machine|hardware)\s+(?:that\s+)?you(?:'ve|’ve|\s+have)?\s+(?:ever\s+)?(?:built|made|designed|created|engineered|fabricated)\b/i,
     'one project of his own, told as an engineer tells it'],
+  // FOUR QUESTIONS HE ANSWERS IN A SHAPE OF HIS OWN (2026-09-27, TODO.md §H):
+  // Hyve's "What do you know about…" and "Why are you looking…", Nudge's
+  // "anything else", Standard Bots' "describe your experience deploying…".
+  // Each fell to `other` or to nothing, and got a generic brief or no answer.
+  ['company-knowledge', /\bwhat do you know about\b|\bwhat (?:have you (?:heard|learned)|do you understand) about\b|\bwhat do you know of\b/i,
+    'what the company is and does, in his words: about them, not a pitch for himself'],
+  // Not "why are you LEAVING your current role": he has no current role, and
+  // that stays unanswered (essay.test).
+  ['why-looking', /\bwhy (?:are you|you are|you're) (?:looking|seeking|considering|exploring)\b|\breasons? for (?:looking|seeking)\b|\blooking for (?:a )?new (?:opportunit|role|position|job)/i,
+    'why he is looking: short, general and forward'],
+  ['anything-else', /\banything else\b|^\s*\(?optional\)?\s*additional information\s*$|^\s*additional (?:information|comments?)\s*$|\bis there anything (?:else )?(?:you would|you'd) like\b/i,
+    'a short personal note: where he is, how he wants to grow, why this company matters to him'],
+  ['experience', /\b(?:describe|tell us about|share|summari[sz]e|walk us through)\b[^?.]{0,25}\byour (?:hands[- ]on |relevant |direct )?experience\b/i,
+    'his hands-on experience with exactly what is asked, as the specific work he did'],
   ['why-company', /\bwhy (?:do you |would you |are you )?(?:want(?: to)?|interested|excited|keen)\b.*\b(?:here|us|this company|our|work(?:ing)? (?:at|for|with))|why (?:this company|us|our company|do you want to join)\b/i,
     'why this company, built only from what the posting says they do'],
-  ['why-role', /\bwhy (?:this|the) (?:role|position|job|opening|team)\b|what (?:interests|excites|draws|attracts) you (?:most )?(?:about|to) (?:this|the) (?:role|position|job|team|opportunity)/i,
+  // …and "Why does this role and environment appeal to you at this stage of
+  // your career?" (2026-09-26), which fell to `other`.
+  ['why-role', /\bwhy (?:this|the) (?:role|position|job|opening|team)\b|what (?:interests|excites|draws|attracts) you (?:most )?(?:about|to) (?:this|the) (?:role|position|job|team|opportunity)|\bwhy (?:does|do) (?:this|the) (?:role|position|job|opportunity)\b[^?]{0,40}\b(?:appeal|interest|excite)/i,
     'why this role in particular, named from its own responsibilities'],
+  // "Let the company know about your interest working there" (2026-09-26).
+  ['why-company', /\b(?:let|tell) (?:the company|us|them) know about your interest\b|\byour interest (?:in )?working (?:there|here|at|for|with)\b/i,
+    'why this company, built only from what the posting says they do'],
   // `why would you be a good fit` — found by the regression run, 2026-09-19.
   // "We are a small team and everyone wears several hats. Why would you be a
   // good fit here?" matched nothing, fell to `other`, and therefore ALSO fell
@@ -151,7 +180,9 @@ export const KINDS = [
   // to make his whole case needs 150-260 words, and 70-150 would cut it off
   // mid-argument. Nothing else here depends on it, and a question that misses
   // every pattern in this list must still get a good answer.
-  ['excellence', /\b(?:evidence of (?:excellence|impact|exceptional)|exceptional ability|extraordinary ability|accomplishments? that (?:highlight|demonstrate|show)|most impressive|proudest (?:accomplishment|achievement|work)|greatest (?:accomplishment|achievement)|what makes you (?:exceptional|outstanding|stand out)|why are you exceptional|highlight your (?:ability|abilities|achievements))\b|^\s*evidence of [\w\s]{2,30}$/i,
+  // …and "Please name 1-3 examples of outstanding work you've done." (Periodic
+  // Labs, 2026-09-26: matched nothing and was left blank).
+  ['excellence', /\b(?:examples? of (?:your )?(?:outstanding|exceptional|impressive|excellent|best|standout) work|(?:outstanding|exceptional|standout) work (?:you(?:'|’)ve|you have) (?:done|produced|built)|evidence of (?:excellence|impact|exceptional)|exceptional ability|extraordinary ability|accomplishments? that (?:highlight|demonstrate|show)|most impressive|proudest (?:accomplishment|achievement|work)|greatest (?:accomplishment|achievement)|what makes you (?:exceptional|outstanding|stand out)|why are you exceptional|highlight your (?:ability|abilities|achievements))\b|^\s*evidence of [\w\s]{2,30}$/i,
     'his case, made the way he would make it out loud: the claim first, then the work that proves it, each piece with what it produced'],
   ['other', /\b(?:tell us|describe|explain|share|elaborate|in your own words|anything else|additional (?:information|comments|context))\b/i,
     'a direct answer to exactly what was asked'],
@@ -329,7 +360,30 @@ export function isWrittenQuestion(field, { company = '' } = {}) {
   // answer-table rule that matches a text field has to keep matching one, so
   // the tag name travels beside the type rather than replacing it.
   const box = field?.multiline === true || type === 'textarea' || (type === 'text' && max >= 200);
-  if (!box) return false;
+  // "SECOND EXAMPLE:" IS PART OF A SERIES, WHATEVER BOX IT IS (2026-10-01).
+  // Neuralink asked "Please provide three examples … First example:" and gave
+  // "Second example:" and "Third example:" their own boxes; those two were not
+  // read as written questions, so the first box looked like the only one and
+  // got all three examples (3,331 characters) — he sent one there and wrote
+  // the other two himself.
+  if (/^(text|textarea)$/.test(type) && seriesIndex(String(field?.label || '')) > 1
+    && /\b(example|accomplishment|achievement|project|reason)s?\b/i.test(String(field?.label || ''))) return true;
+  // A ONE-LINE BOX ASKING "WHY US" IS STILL A WRITTEN QUESTION (2026-09-25).
+  // Mariana Minerals' Ashby form asks "Why are you interested in working for
+  // Mariana Minerals?" in a single-line input with no limit; it went back to
+  // him as "needs your own words" and he wrote it. Only the motivation kinds,
+  // and only a box with no small limit — a short answer (targetWords).
+  // Only the why-company / why-role kinds: "a one-line input is never an
+  // essay" (essay.test) still holds for every other question — HaloBraid's
+  // one-line "interesting engineering problem" stays his (2026-09-25).
+  if (!box) {
+    const kind = type === 'text' && !(max > 0 && max < 200) ? answerKind(String(field?.label || ''), { company })?.kind : null;
+    // …and the four kinds he answers in a sentence or a short paragraph
+    // wherever the box is: Standard Bots' one-line "briefly describe your
+    // experience deploying robotics" got 121 words from him (2026-09-25).
+    // A cover letter is written whatever box it is given (F-670).
+    if (!/^(why-(company|role|position|job)|why-looking|company-knowledge|experience|cover-letter)$/.test(String(kind || ''))) return false;
+  }
 
   const label = String(field?.label || '').trim();
   // Nothing to answer. A box with no label at all is not a question, it is a
@@ -398,16 +452,30 @@ export function targetWords(field, kind) {
   // default — fine there, wrong on the one that said 100.
   const stated = fieldLimits(field);
   if (stated.words) return { min: Math.floor(stated.words * 0.6), max: stated.words };
+  // A single-line box gets a short answer: two or three sentences.
+  const oneLine = String(field?.type || '').toLowerCase() === 'text' && field?.multiline !== true && !(max >= 200);
+  // …except the kinds he answers at length wherever the box is: Standard
+  // Bots' one-line experience question got 121 words from him (2026-09-25).
+  if (oneLine && !['experience', 'why-company', 'why-role'].includes(kind)) return { min: 25, max: 60 };
   if (stated.chars && stated.chars !== max) return { min: Math.floor(stated.chars / 12), max: Math.floor(stated.chars / 6.5) };
 
   // THE KIND'S BAND, WORKED OUT FIRST — because it is a cap, not a fallback.
   //
   // An excellence box is the one he asked to be answered "like a cover letter
   // ish where i flex my work comprehensively" — it holds more than one piece
-  // of work, so 150 words is a floor rather than a ceiling.
-  const band = kind === 'excellence' ? { min: 150, max: 260 }
+  // of work. HIS OWN LENGTHS, 2026-09-27 (TODO.md §H): he rewrote Tesla's to
+  // 355 words and Nudge's three examples to 527, from drafts of 232 and 261;
+  // why-company 112-143; Hyve's company question 76 and why-looking 80; his
+  // "anything else" 122; his experience answer 121.
+  // HIS LENGTHS SINCE, 2026-09-28 to 10-01: seven Tesla excellence answers sent
+  // at 1,284-1,629 characters (about 200-265 words), every one cut down from a
+  // draft of 1,800-1,980; Applied Intuition's and Kovari's "why" at about 95.
+  const band = kind === 'excellence' ? { min: 190, max: 290 }
     : kind === 'cover-letter' ? { min: 150, max: 250 }
     : (kind === 'project' || kind === 'challenge') ? { min: 110, max: 200 }
+    : (kind === 'why-company' || kind === 'why-role') ? { min: 85, max: 125 }
+    : (kind === 'company-knowledge' || kind === 'why-looking') ? { min: 60, max: 95 }
+    : (kind === 'anything-else' || kind === 'experience') ? { min: 90, max: 140 }
       : { min: 70, max: 150 };
 
   if (max > 0) {
@@ -524,10 +592,12 @@ export const CLOSER_SHAPES = [
     'a closing sentence that turns the examples into a method'],
   [/^\s*(?:overall|ultimately|in short|in summary|in both cases|in each case|what (?:ties|connects|links|these have)|the (?:common thread|through ?line|pattern here))\b/i,
     'a closing sentence that summarises instead of ending on the work'],
-  [/\bthe same (?:approach|method|way of working|instinct|habit|discipline|thinking|process)\b/i,
-    'a closing sentence naming "the same approach" behind the work'],
-  [/\bwhat (?:I learned|this taught me|these taught me|it taught me)\b/i,
-    'a closing sentence about what he learned'],
+  // "the same approach" and "what I learned" were refused here until
+  // 2026-10-01. His sent answers end "That is the same process-focused,
+  // data-driven approach I would bring to Tesla's Cell Assembly team" and
+  // "These experiences taught me to approach manufacturing problems by…", so
+  // both came out: the close he writes is a method plus the team he would
+  // bring it to.
   // THE STAND-ALONE TIE-BACK — BANNED 2026-09-16, ALLOWED AGAIN 2026-09-19.
   //
   // Two rules used to live here. They were added when the Tesla "Evidence of
@@ -852,7 +922,10 @@ export function checkAnswer(text, { cvText = '', jd = '', job = null, target = n
   // Applied Materials I …" as the first words is the shape of a bullet turned
   // into a sentence; the reader has not been told yet what they should believe.
   // Stories (a project, a problem) may open on where it happened.
-  if (kind && !STORY_KINDS.has(kind)) {
+  // RETIRED 2026-10-01: he opens on "At Applied Materials' Automation Technology
+  // Group, I worked on …" himself (three of his last seven Tesla answers), so a
+  // rule refusing that opening sent his own shape back for a rewrite.
+  if (false && kind && !STORY_KINDS.has(kind)) {
     const open = answer.match(RESUME_OPENING);
     const target = String(job?.company || '').toLowerCase();
     const opened = open ? open[1].toLowerCase() : '';
@@ -956,7 +1029,10 @@ export function checkAnswer(text, { cvText = '', jd = '', job = null, target = n
   const ADD_ON = /^(?:I also\b|Also,|In addition\b|Additionally\b|Outside (?:of )?(?:that|work|my internships?|class|school)\b|Beyond (?:that|work)\b|On top of that\b)/i;
   const addOns = answer.split(/\n\s*\n/).reduce((worst, para) => Math.max(worst,
     para.split(/(?<=[.!?])\s+/).filter((sent) => ADD_ON.test(sent.trim())).length), 0);
-  if (addOns >= 2) problems.push(`reads as a list of work (${addOns} sentences in one paragraph that just add another project) — keep the evidence that proves the point and cut the rest`);
+  // RETIRED 2026-10-01: breadth is his shape — "I also lead manufacturing
+  // work…", "On another project, I…" — and every answer he sent covers two or
+  // three pieces of work. Counted, never refused.
+  void addOns;
   const negated = sentences.filter((sent) => SELF_NEGATION.some(([re]) => re.test(sent)));
   const turns = (sent) => /,\s*(?:but|and)\b|;\s*(?:I|what)\b|\bbut I\b/i.test(sent)
     && /\bI (?:have|was|built|designed|ran|led|worked|learned|took|integrated|deployed|traced|measured|qualified|programmed)\b/i.test(sent);
@@ -977,6 +1053,10 @@ export function checkAnswer(text, { cvText = '', jd = '', job = null, target = n
     if (postingAsksLogistics && /travel, where he is based/.test(said)) continue;
     if (re.test(answer)) problems.push(`has ${said}`);
   }
+  // CLAIMS HE CANNOT MAKE — the resume's list, held here too. A term the
+  // posting uses may be named as the role's work (prose mode reads only his
+  // own clauses), but the posting never excuses one (F-723).
+  for (const what of forbiddenClaims(answer, cvText, { prose: true })) problems.push(`claims ${what}, which he does not have`);
   // THE FORM'S OWN LIMIT IS A CEILING, not a target with slack.
   if (limits?.words && count > limits.words) problems.push(`over the form's ${limits.words}-word limit (${count} words)`);
   if (limits?.chars && answer.length > limits.chars) problems.push(`over the form's ${limits.chars}-character limit (${answer.length} characters)`);
@@ -1036,6 +1116,20 @@ export function checkAnswer(text, { cvText = '', jd = '', job = null, target = n
   // Deliberately narrow: it needs a real description to read (a title alone
   // proves nothing), and one hit anywhere clears it. A false failure here
   // costs one redraft; a false pass costs nothing that was not already lost.
+  // A WHY-COMPANY ANSWER IN HIS SHAPE (2026-10-02, "the why this company
+  // question answers are so fuckin shit"). Of five he rewrote, every draft
+  // opened "What excites me about X is…" and carried project detail — a
+  // percentage, the 6-DOF arm, the CAD-to-release chain — and every one he
+  // sent opened "I want to join/work at X because" with one broad sentence
+  // about his background. Free to check, so checked.
+  if (kind === 'why-company' || kind === 'why-role') {
+    const first = String(answer).trim().split(/(?<=[.!?])\s+/)[0] || '';
+    if (/^\s*what\s+(excites|interests|draws|attracts)\s+me\b/i.test(first)) {
+      problems.push('opens "What excites me about…" — his answers open "I want to join/work at <company> because …" with two plain reasons');
+    }
+    const detail = String(answer).match(/\b\d+(?:\.\d+)?\s?%|\bapproximately\s+\d|\$\s?\d|\b6-?DOF\b|\bROS\s?2\b|\bMoveIt\b|\bTeamcenter\b|\bBOM\b|\btolerance analysis\b|\bweekends?\b|\bRoboDK\b/i);
+    if (detail) problems.push(`carries project detail ("${detail[0]}") — a why-company answer gives his background in one broad sentence, no numbers, tools or project names`);
+  }
   const jdWordList = wordsOf(jd);
   if (jdWordList.length >= 60) {
     const answerFolded = ` ${fold(answer)} `;
@@ -1083,7 +1177,7 @@ and say so in the READING.
  * Letter" box kept getting the four-call pipeline's answer after that pipeline
  * was gone, because a saved answer was trusted forever.
  */
-export const WRITER_VERSION = '2026-09-23-whole-cv';
+export const WRITER_VERSION = '2026-10-16-built-is-a-project';
 
 /**
  * THE PROMPT. One call, everything in front of it, answer straight back.
@@ -1101,10 +1195,82 @@ export const WRITER_VERSION = '2026-09-23-whole-cv';
  * good brief does not. The fact guard stays in code (`checkAnswer`), where it
  * costs nothing.
  */
+/**
+ * HIS SHAPE FOR EACH KIND, read off what he actually sent (2026-09-27, TODO.md
+ * §H). He asked for this in so many words: "its all prompt engineering and
+ * context and getting it to emulate a certain style… just try to extract the
+ * pattern from my writing style". Each shape is his own answer taken apart,
+ * with his sentences quoted as the model to follow — not a rule set, and
+ * nothing checks it afterwards.
+ */
+function kindShape(kind, company, title) {
+  const shapes = {
+    'company-knowledge': `WHAT DO YOU KNOW ABOUT ${company.toUpperCase()} - HIS SHAPE
+
+The answer is about the company, not about Alex. His Hyve answer, whole (76 words, one paragraph, the only "me" is "what stood out to me"):
+"Hyve Solutions is a U.S.-based design and manufacturing partner, and a subsidiary of TD SYNNEX, focused on AI, cloud, and hyperscale infrastructure. What stood out to me is that Hyve works across the full product lifecycle, from engineering and PCBA manufacturing through system integration, testing, and rack-scale deployment. It builds compute, storage, networking, and AI infrastructure for demanding data center applications, so mechanical and manufacturing engineering directly affect how complex hardware gets built reliably at scale."
+1. Who they are: what kind of company, parent company if there is one, what they focus on.
+2. "What stood out to me is that..." - the scope or stage of the work they do.
+3. What they build, concretely.
+4. Why mechanical and manufacturing engineering matters there.
+No internship, no project, no pitch. Only facts the posting or company brief states.
+
+`,
+    'why-looking': `WHY ARE YOU LOOKING - HIS SHAPE
+
+Short, general and forward. His answer, whole (80 words, one paragraph):
+"I graduate from Lakeside in May 2027 with a degree in mechanical engineering, and I am looking for my first full-time engineering role. Through my internships in manufacturing and semiconductor automation, I found that I enjoy working close to real hardware, especially where mechanical design, manufacturing, automation, and validation come together. I want to continue building products from initial design and prototyping through testing and production, while developing into an engineer who can take ownership of hardware throughout its lifecycle."
+Graduation and first full-time role; what the internships showed him he enjoys, in general terms; what he wants to keep doing and grow into. No project story, no single robot, not narrowed to this company's product.
+
+`,
+    'anything-else': `ANYTHING ELSE YOU WOULD LIKE US TO KNOW - HIS SHAPE
+
+A short personal note, not another project. Nothing already told on this form. His Nudge answer, whole (two paragraphs):
+"I'm graduating in May 2027 and I'm looking for a team where I can learn quickly, take on real responsibility, and keep building my technical depth as a mechanical engineer. I'm especially motivated by environments where engineers stay close to the hardware and learn through designing, building, testing, and troubleshooting real systems.
+
+I know I still have a lot to learn early in my career, but I'm eager to take on difficult problems, ask good questions, and improve quickly. I care a lot about mechanical design and robotics, and I'm willing to put in the work to become a stronger engineer. ${company} is especially exciting to me because that learning would be tied to hardware with a meaningful impact on people's lives."
+Where he is, how he wants to grow, the plain admission that he has a lot to learn, and why this company's work matters to him. Contractions are fine here; this is the one place he writes that casually.
+
+`,
+    experience: `DESCRIBE YOUR EXPERIENCE WITH ... - HIS SHAPE
+
+His Standard Bots answer to "briefly describe your experience deploying robotics and/or industrial automation machinery", whole (three short paragraphs):
+"At Applied Materials, I worked directly on deploying robotics and industrial automation in semiconductor manufacturing. I programmed and validated a Universal Robots cobot in RoboDK for an automated leak-testing cell, including reachability, collision-free motion, tooling access, and transition from simulation to physical hardware. I also designed supporting end-effector storage hardware and worked through the mechanical integration of the robot, tooling, and surrounding equipment.
+
+I also supported deployment and validation of Autonomous Mobile Robots for cleanroom material handling and integrated pressure-decay testers with Tulip Edge Devices and Node-RED to replace manual quality logging with automated data collection.
+
+My experience is hands-on and hardware-focused: integrating equipment, testing it on the physical system, troubleshooting failures, and getting automation working reliably in a manufacturing environment."
+1. One sentence placing the experience: where, and in what setting.
+2. The specific work, with its technical particulars ("including reachability, collision-free motion, tooling access...").
+3. "I also..." for the next piece of that experience.
+4. One closing sentence that characterises the experience ("My experience is hands-on and hardware-focused: ...").
+Only work that answers exactly what was asked.
+
+`,
+    excellence: `EVIDENCE OF EXCELLENCE / EXAMPLES OF EXCEPTIONAL ABILITY - HIS SHAPE
+
+His Tesla answer as he sent it on 2026-10-01, whole (the latest of ten he rewrote; every draft was cut by a quarter and the detail taken out):
+"I have consistently gravitated toward engineering problems where equipment has to work reliably in the real world, not just on paper. My strongest work has come from understanding why a system is failing, reducing the problem to something measurable, and then carrying the fix through implementation and validation.
+
+At Applied Materials' Automation Technology Group, I worked on manufacturing automation projects spanning robotic tooling, leak testing, machine vision, equipment integration, and production validation. I designed hardware for a UR cobot cell, developed collision-free robot paths in RoboDK, and helped integrate pressure-decay test equipment into a digital logging workflow. The experience taught me how mechanical design, automation, testing, and production constraints interact when equipment has to run repeatedly and reliably.
+
+At Acme Steel, I investigated an intermittent jam on a robotic production line that had resisted normal troubleshooting. By reproducing the failure outside normal runtime and isolating it to a tight section of the material-feeding system, I worked with maintenance on a targeted correction that reduced jams by approximately 70%. On another project, I analyzed dimensional data from more than 100 manufactured parts and built an Excel VBA tool to automate tolerance evaluation, contributing to approximately $57,000 in annual material savings.
+
+These experiences reflect how I approach equipment engineering: get close to the hardware, isolate the real failure mode, use data to guide the solution, and stay with the problem until the improvement is working in production."
+* A single box: opening thesis, a paragraph per employer (Applied Materials first), his numbers, the two-sentence close naming the team. 200 to 280 words.
+* When the question asks for several examples IN ONE BOX: number them, each with a short plain heading on its own line ("1. Machine-vision inspection system for semiconductor equipment"), each example two short paragraphs at summary level: what the system had to do, what he owned and the one constraint that shaped it, how far he carried it and the result.
+* When each example has ITS OWN BOX ("First example:", "Second example:"), this box holds ONE example only.
+* Lakeside's machine shop (Manufacturing Lead, training more than 50 students on CNC machining, welding, sheet metal and additive manufacturing) is evidence he uses when the role is about building hardware.
+
+`,
+  };
+  return shapes[kind] || '';
+}
+
 export function buildAnswerPrompt({
   question, kind = 'other', brief = '', job = null, jd = '', cvText = '', narrative = {},
   target = { min: 90, max: 160 }, request = '', context = '',
-  stem = '', seriesIndex = 0, seriesOf = 0, avoid = [],
+  stem = '', seriesIndex = 0, seriesOf = 0, avoid = [], allInOne = 0,
   alsoWritten = [], previous = '', feedback = [], companyBrief = '',
   // THE BOX AS THE PAGE SHOWS IT (2026-09-17): placeholder, the form's own
   // limits, and whatever is already typed in it.
@@ -1139,13 +1305,24 @@ export function buildAnswerPrompt({
   const instructions = cleanInstructions(context || field?.near || '', asked);
   const current = String(field?.value || '').trim();
   const isLetter = kind === 'cover-letter';
+  // HIS SENT ANSWERS AND STORIES ARE QUOTED BELOW as the worked examples. They
+  // never reach anyone else's prompt: another person gets the same method,
+  // from their own files and their field's preset (buildFieldAnswerPrompt).
+  if (!ownsExamples()) {
+    return buildFieldAnswerPrompt({
+      question, kind, brief, jd, cvText, target, request, seriesIndex, seriesOf, avoid, allInOne,
+      alsoWritten, previous, feedback, companyBrief, field, framing, exemplar, corpus, observations,
+      company, title, asked, q, who, limits, instructions, current, isLetter,
+    });
+  }
   return `Write Alex Rivera's answer to one question on his application to ${company} for "${title}". Write it as him, ready to paste into the box.
 
 CURRENT FIELD
 Question: ${q(asked)}
 ${instructions ? `Instructions: ${q(instructions, 800)}\n` : ''}${field?.placeholder ? `Placeholder: ${q(field.placeholder, 200)}\n` : ''}${limits.words ? `Word limit: ${limits.words}\n` : ''}${limits.chars ? `Character limit: ${limits.chars}\n` : ''}Length to write: ${target.min} to ${target.max} words${limits.words || limits.chars ? ' (the form limit is a hard ceiling)' : ''}
-${current ? `Already in the box: "${q(current, 600)}"\n` : ''}${String(request || '').trim() && !feedback.length ? `User request: "${q(request)}"\n` : ''}${kind && kind !== 'other' && brief ? `What this box wants: ${brief}.\n` : ''}${seriesIndex > 1 ? `This is box ${seriesIndex}${seriesOf ? ` of ${seriesOf}` : ''} ("${q(question, 60)}"): a separate, complete answer to that question using DIFFERENT work from the earlier boxes.\n` : ''}${avoid.length ? `Earlier boxes already used:\n${avoid.map((t, i) => `${i + 1}. ${String(t).slice(0, 300)}`).join('\n')}\n` : ''}${alsoWritten.length ? `Already answered on this application (do not repeat the same story):\n${alsoWritten.slice(0, 4).map((a) => `- "${q(a.question, 80)}": ${String(a.text || '').slice(0, 250)}`).join('\n')}\n` : ''}${revisionBlock(previous, feedback)}
-ABOUT ALEX. Mechanical engineering student at State University, graduating May 2027. His CV is the only source of facts about him: never add a tool, number, result, sequence of events or motive that is not in it.
+${current ? `Already in the box: "${q(current, 600)}"\n` : ''}${String(request || '').trim() && !feedback.length ? `User request: "${q(request)}"\n` : ''}${kind && kind !== 'other' && brief ? `What this box wants: ${brief}.\n` : ''}${allInOne > 1 ? `This one box asks for ${allInOne}: answer with a numbered list, "1. <short title>" on its own line and then that example, each a DIFFERENT piece of work; the word target covers all ${allInOne} together.
+` : ''}${seriesIndex > 1 ? `This is box ${seriesIndex}${seriesOf ? ` of ${seriesOf}` : ''} ("${q(question, 60)}"): a separate, complete answer to that question using DIFFERENT work from the earlier boxes.\n` : ''}${avoid.length ? `Earlier boxes already used:\n${avoid.map((t, i) => `${i + 1}. ${String(t).slice(0, 300)}`).join('\n')}\n` : ''}${alsoWritten.length ? `Already answered on this application (do not repeat the same story):\n${alsoWritten.slice(0, 4).map((a) => `- "${q(a.question, 80)}": ${String(a.text || '').slice(0, 250)}`).join('\n')}\n` : ''}${revisionBlock(previous, feedback)}
+ABOUT ALEX. Mechanical engineering student at Lakeside, graduating May 2027. His CV is the only source of facts about him: never add a tool, number, result, sequence of events or motive that is not in it.
 ${who ? `${who}\n` : ''}What he wants from a role: building and developing (new product introduction, process development, ramp, first builds), not sustaining or maintenance work.
 --- cv.md ---
 ${String(cvText || '').slice(0, CV_BUDGET)}
@@ -1170,60 +1347,58 @@ Before drafting, infer:
 
 Use experience as evidence for an argument. Do not concatenate relevant resume bullets.
 
-START BY DECIDING WHAT THE QUESTION IS EVALUATING. Questions that look similar are often evaluating different things, and that decision sets how much of the answer is his past work. A question about what draws him somewhere is evaluating whether he knows what he wants and has grounds for wanting it; his experience explains where the interest came from and must not take the answer over. A question about his experience in a field is evaluating the experience, so the experience dominates and the job is choosing the strongest of it. A question about a project is evaluating how he thinks and works. A question about what he would bring is evaluating judgement about their problem. Answer what is being evaluated, not the question you are used to.
+START BY DECIDING WHAT THE QUESTION IS EVALUATING. A question about what draws him somewhere is evaluating whether he knows what he wants; his experience explains where the interest came from and must not take the answer over. A question about his experience or his best work is evaluating the work, so the work dominates. A question about a project is evaluating how he thinks and works. A question about what was hard wants the obstacle, what made it hard, and how he got past it.
 
-EVERY DETAIL MUST EARN ITS PLACE. A fact belongs in the answer because of what it proves, not because it is true and related. Before keeping a detail, say what the reader now believes that they did not believe without it; if there is no answer, cut it, however impressive it sounds. Listing what a piece of work contained is not the same as showing what it demonstrates. A long box is not permission to include more - it is more room to explain the few things that matter.
+HOW HE ACTUALLY WRITES THESE (read off 24 answers he rewrote before sending, 2026-10-01; he called the drafts "talking like a dipshit"). His sent versions are the standard. Write the way they read:
 
-A TECHNICAL DETAIL EARNS ITS PLACE BY THE CONSTRAINT THAT FORCED IT. An engineer reading "dovetail interfaces, ball plungers, self-locking camera positioning, tolerance analysis" learns only that the thing had features. The same facts, each carrying what it was up against - the printer could not make it in one piece, so it was split and joined; adhesives were out because it runs in a cleanroom; the indexing had to repeat to the same position three times - become engineering rather than an inventory. So when a detail goes in, say what it solved. Where nothing in his files gives the reason, leave the detail out rather than inventing one: an unexplained feature and a made-up motive are both worse than the sentence that fits.
+* REGISTER. Polished, professional engineering prose. Full, well-formed sentences that read like an experienced engineer summarising his work, not a lab notebook. Standard hyphenation of compound modifiers: hands-on, collision-free, 6-DOF, machine-vision, pressure-decay, full-time, root-cause, real-world. Percentages and money as figures: "approximately 70%", "approximately $57,000 in annual material savings". No contractions (except in an "anything else" note).
 
-WHEN THE QUESTION ASKS WHAT WAS HARD, THE OBSTACLE IS THE ANSWER. "The hardest problem you hit", "a challenge you faced", "what went wrong" are asking what the work pushed back with and how he reasoned through it - not for a tour of what he built. Name the actual obstacle plainly, say what made it hard, and show the reasoning that got past it. A sophisticated component is not a hard problem; being unable to build it the obvious way is. And the hard problem is usually the SYSTEM problem - things that could not be optimised separately - rather than the most advanced piece of technology in the story.
+* SUMMARY LEVEL, NOT A PLAY-BY-PLAY. Each piece of work gets two to four sentences: what the system was and what it had to do; what he owned, as one span of verbs ("designed the fixture in Autodesk Inventor, performed tolerance analysis, iterated physical prototypes, and carried the design through engineering drawings, BOM creation, supplier ordering, and Teamcenter release"); at most ONE constraint that shaped the design, in a clause (too large for the printer and too expensive to outsource, so four mechanically joined components; no adhesives in a cleanroom); and the result with its number. NEVER component trivia or step-by-step narration: no part counts or fastener checks ("110 fasteners", "corrected two fastener lengths"), no mechanism parts ("ball plungers", "spur gears", "crank and passive link parallelograms"), no bus timing, board revisions, ERC/DRC, "fed foam through it by hand", "controlled pressure at the tight section", "came in on weekends", "nobody asked me to". A reader should understand the work without knowing the parts. No sentence whose job is to justify a step ("Because a bad path could damage tooling, equipment, or the part under test, I…"); no counts of things ("eight end effectors").
 
-WHAT YOU LEAVE OUT IS PART OF THE ANSWER. His strongest material is often not the most detailed material. Two pieces of evidence that prove the same thing are one piece of evidence and one distraction; a third example of the same quality is worth less than one sentence explaining what the first two have in common.
+* EACH EMPLOYER PARAGRAPH OPENS ON ITS RANGE, then the one or two pieces that matter most for this role: "At Applied Materials' Automation Technology Group, I worked on manufacturing automation projects spanning robotic tooling, leak testing, machine vision, equipment integration, and production validation. I designed hardware for a UR cobot cell, developed collision-free robot paths in RoboDK, and helped integrate pressure-decay test equipment into a digital logging workflow." Prefer work that carries one of his numbers (70%, $57,000, 36%) over procedures and guides.
 
-THE READER MUST UNDERSTAND THE PROBLEM BEFORE THE IMPLEMENTATION. Technical detail is not automatically persuasive. Someone who does not know the system cannot tell whether a mechanism was clever, so establish in plain language what needed to happen and why it was hard, then name what he built. Jargon ahead of its context makes work harder to appreciate, not more impressive.
+* BREADTH OVER ONE DEEP STORY. A long answer covers two or three experiences, Applied Materials first, named "Applied Materials' Automation Technology Group" the first time; then Acme Steel; then Lakeside (Manufacturing Lead, training more than 50 students) or the 6-DOF arm where the role is about building or robotics. Several projects at one employer can share one sentence ("I designed and prototyped a machine-vision inspection fixture, developed and validated collision-free paths for a UR cobot leak-testing cell, supported AMR deployment, and helped digitize pressure-decay test data"). Use his numbers where they fit: jams reduced by approximately 70%, approximately $57,000 in annual material savings, 36% packaging-lumber inventory reduction, a 110,000 sq. ft. plant layout, more than 50 students.
 
-SOMETIMES THE ARGUMENT IS THE PATTERN, NOT THE PROJECTS. When several experiences share a quality the reader cares about - entering unfamiliar systems and becoming useful in them, staying close to the hardware, turning a diagnosis into a measured improvement - that pattern can be the point, and the projects become evidence for it. A list of tools is usually the weakest form of this. Ask what the tools are evidence OF.
+* THE OPENING SENTENCE says what kind of engineering problem he goes after, or where his strongest work has come from. His openers: "I have consistently gravitated toward engineering problems where equipment has to work reliably in the real world, not just on paper." / "My strongest work has come from taking manufacturing problems from the production floor through analysis, design, implementation, and validation." / "I have consistently looked for manufacturing problems where data and hands-on observation can be turned into measurable process improvements." Or he opens straight on the work: "At Applied Materials' Automation Technology Group, I worked on electromechanical hardware where mechanical design, sensing, automation, manufacturing, and validation all had to work together." Write this answer's own version for this role.
 
-Explain technical work so an intelligent engineer unfamiliar with the exact project can follow it.
+* THE CLOSE of a long answer is two sentences: how these experiences taught him to approach the work ("These experiences taught me to approach manufacturing problems by understanding the process on the floor, collecting evidence, identifying the root cause, implementing practical changes, and verifying the result."), then what he would bring, naming the team: "That is the approach I would bring to Tesla's Cell Assembly team." Take the team or department name from the posting (title, department, the team the posting describes). NEVER close on a list of the company's products or a production line ("Megapack, Powerwall and Supercharger", "the Model 3 line", "the Power Conversion System line").
 
-The same question at different companies should often produce different framing.
+* NEVER WRITE THESE (each is a draft he rewrote): "My strongest evidence of excellence is that I have repeatedly been placed on/in unfamiliar …" (passive, sounds shuffled around); "<Company>'s <title> role stands out because …"; "That fits how I like to work." / "That lines up well with my background."; "The same plant gave me a data problem."; "That is still how I debug …"; any sentence that only restates the posting's duties back to them.
 
-Optimize for whether this specific reader would want to interview Alex, not primarily for keyword overlap.
-
-Never invent technical details. Relevance may be inferred; facts may not. An elaboration that sounds plausible for a piece of hardware he built - how a part was positioned, what it was mounted on, what it was made of - is an invented fact unless cv.md says it.
+Explain the work so an engineer who does not know the project can follow it. Never invent a fact: every number, tool, result and event comes from cv.md or the posting.
 
 BEFORE WRITING - DO THIS INTERNALLY
 
-Complete this sentence:
+Complete this sentence: "The reader should finish this answer believing that Alex __________." Then choose the experiences that prove it. Do not put this reasoning in the answer; write it only in the PLAN below, which is stripped before anyone sees the answer.
 
-"The reader should finish this answer believing that Alex __________."
-
-Choose the blank based on the exact question, active job, company/team, what the role actually requires, and Alex's strongest relevant evidence.
-
-Then select the smallest number of confirmed experiences necessary to prove that claim.
-
-Do not put this reasoning in the answer. Write it only in the PLAN below, which is stripped before anyone sees the answer.
-
-HOW TO BUILD IT
-
-Write a claim, then put the facts UNDER the claim. Not facts in a row hoping the reader adds them up.
-
-* THE FIRST SENTENCE IS A CLAIM ABOUT WHAT KIND OF ENGINEER HE IS, not the first fact in the story. "My strongest evidence is that I have repeatedly taken unfamiliar manufacturing problems and turned them into working hardware or measurable process improvements" tells the reader what to look for in everything that follows. "At Applied Materials I designed a fixture" makes them work it out alone. A characterization is allowed and wanted: the "What the work adds up to" section of cv.md holds the approved ones, each naming the bullets it rests on, and one of them is his own sentence. Open on one of those and then prove it. Never use one INSTEAD of evidence.
-
-* COMPRESSION IS PRIORITISATION. One sentence per fact makes every fact equally important, which means none of them is. Subordinate the supporting detail into the sentence that carries the claim: "carried it from CAD and tolerance analysis through prototyping, engineering drawings, BOM creation, supplier ordering, and Teamcenter release" puts six facts inside one clause, under the point they serve. Spend the sentences on what matters and compress the rest into clauses.
-
-* PARAGRAPHS ARE STRUCTURE. In a long box, give each paragraph one job — the claim and its strongest proof, then a different kind of proof, then what they have in common. A wall of sentences reads as a list however good the sentences are.
-
-* A LONG ANSWER MAY END BY SAYING WHAT THE EVIDENCE HAS IN COMMON, and what that means for this team. "Across these roles, I have learned unfamiliar equipment quickly, stayed close to the physical system, and moved from design or diagnosis to improvements that worked in production" is an argument, and so is naming the work he would do here. What is still banned is the EMPTY close: a generalisation into an "approach" or a "mindset", "overall" and "in short", a line about what he learned, anything that could follow any answer. Say something, or stop.
+PARAGRAPHS. Anything over about 130 words is two to four paragraphs separated by a blank line: the opening claim, a paragraph per employer or project, the close. A "why this company" answer of about 100 words is one paragraph.
 
 OPENING
 
-Choose the opening based on the persuasive argument, not just question type.
+* If motivation is part of the question, open on what genuinely interests him about this company or role.
+* For evidence, excellence and experience questions, open as described above.
 
-* If motivation is part of the question, establish why the company/role genuinely interests Alex.
-* For evidence/excellence/fit questions, open with the strongest claim or evidence depending on what reads naturally.
+${kindShape(kind, company, title) ? `${kindShape(kind, company, title)}Follow his shape and his register. His sentences above are the model, not text to reuse: write this answer's own sentences from his files and this posting.
 
-MOTIVATION QUESTIONS ARE NOT FIT QUESTIONS
+` : ''}${kind === 'why-company' || kind === 'why-role' ? `WHY THIS COMPANY / WHY THIS ROLE - HIS SHAPE
+
+2026-10-02, on the drafts: "the why this company question answers are so fuckin shit". His three latest rewrites, as he SENT them — the newest first:
+"I want to join Madrone because the problem is both technically interesting and important. Data centers are becoming increasingly power-constrained, and reducing the energy and water spent on cooling means more of that infrastructure can actually go toward useful compute. Madrone's approach of improving cooling without relying on mechanical chillers is especially interesting to me because it combines thermodynamics, fluids, mechanical design, manufacturing, and testing in one physical system. My background has been strongest when I can design something, build it, troubleshoot it, and improve it in the real world, so the chance to help take Madrone's technology from prototypes to deployed hardware is exactly the kind of work I want to do."
+"I want to work at Kovari because the role is very hands-on and the mission is meaningful. I like that Kovari is focused on improving physical industries and working directly alongside the businesses using its technology, rather than building robotics in isolation. At Applied Materials, I worked on robotic tooling, automation, and equipment validation, and at Acme Steel I troubleshot failures on a production line. I'd like to bring that experience to Kovari and help build systems that make real industrial work safer, more efficient, and more capable."
+"Nudge interests me because the role is centered on building precise mechanical hardware, fixtures, and test systems for a technically demanding product. … I am also drawn to Nudge's mission of developing technology that could meaningfully improve people's health and quality of life."
+What the writer's drafts did that he cut, every time:
+- opened "What excites me about X is that you are…" → he opens "I want to join/work at X because" and gives two plain reasons (the problem matters; the work is hands-on).
+- copied the posting's technical specifics ("reaches the dew point without mechanical chillers", "gigawatt scale", the name of their machine or cell, the site) → he says what the company does in words a non-specialist follows, and WHY IT MATTERS in the world ("more of that infrastructure can go toward useful compute", "make real industrial work safer").
+- stacked his projects with their details ("carried inspection hardware from CAD and tolerance analysis through prototyping, drawings, BOM, supplier ordering, and release", "reduced jams by approximately 70%", "a 6-DOF arm with ROS 2/MoveIt", the weekend 3D prints) → he gives ONE broad sentence: employers with a span of verbs, or "my background has been strongest when I can design something, build it, troubleshoot it, and improve it in the real world". NO numbers, NO project names, NO arm, NO tools in a why-company answer.
+Follow his shape:
+1. "I want to join {company} because …" — two plain reasons: why the problem is important, and why the work suits him (hands-on, close to the hardware, the full design-build-test cycle).
+2. Why the problem matters, in one sentence anyone could follow.
+3. What makes their approach interesting to an engineer: the mix of disciplines the problem needs ("combines thermodynamics, fluids, mechanical design, manufacturing, and testing in one physical system").
+4. One broad sentence about his background, as above.
+5. Close on what he wants to help them do, plainly ("help take X's technology from prototypes to deployed hardware", "help build systems that make … safer, more efficient, and more capable").
+One paragraph, 90 to 120 words unless the box says otherwise. If the question also asks "why this role" or "why now", one clause each inside that paragraph — graduating in May 2027 and wanting a first role close to the hardware.
+
+` : `MOTIVATION QUESTIONS ARE NOT FIT QUESTIONS
 
 Motivation questions are about desire and direction first, evidence second. Fit questions are about evidence first. Do not confuse the two.
 
@@ -1235,15 +1410,16 @@ A motivation question ("what motivates you to explore opportunities at X", "why 
 * Do not reach for keyword overlap, and do not force an achievement in. Phrases like "where process engineers deliver", "expanding capacity with speed and quality" or "data-driven analytics and systematic problem solving" are careers-page language, not his.
 * What this sounds like when it works: his Applied Materials time showed him he likes semiconductor manufacturing because the work sits where equipment, automation, process control, troubleshooting and high-precision production meet, and this company would let him go deeper into that at far greater scale. Direction, then the experience that makes the direction credible.
 * The reader should finish thinking "he actually knows why he wants to be here", not "he found some JD keywords and attached an internship bullet".
-* For project questions, establish the problem in plain language before technical details.
+`}* For project questions, establish the problem in plain language before technical details.
 * Do not mechanically begin with "At Applied Materials..." because the question is experience-related.
 ${isLetter ? '* This box is a cover letter: his letter register, no salutation and no sign-off, and no figures (his own letters carry none).\n' : ''}
 HOW IT READS
+- Paragraphs as PARAGRAPHS above says: a long answer is never one block; a short "why" answer is.
 - If the question or its instructions ask for several things, answer every one of them, in the order a reader would look for them.
-- Tie the work to this role inside the sentences that carry the evidence. Never a sentence whose only job is to assert that his work "is the same" as theirs or "matches" the role - that asserts the conclusion instead of earning it. A short box stops after the last fact. A long one may close on what the evidence has in common and what he would do with it here, as HOW TO BUILD IT describes.
+- Never a sentence whose only job is to assert that his work "is the same" as theirs or "matches" the role. A short box stops after the last fact. A long one closes the way HOW HE ACTUALLY WRITES THESE describes: how the experiences taught him to approach the work, then the approach he would bring to the named team.
 - Match the company: Tesla or SpaceX style roles want concise, technical, ownership-heavy writing; startups want range and building things himself; semiconductor companies want structured problem solving, qualification and reliability; design roles want tolerances, analysis and validation.
-- His voice: plain, even, first person, full sentences. No contractions, em dashes, exclamation marks, markdown or adjectives about himself. Compound modifiers stay open ("hands on", "root cause", "fast paced"). He may sound keen in his own words ("I am eager to", "I am excited about").
-- Never: a sentence that negates one framing and asserts another ("not X but Y", "rather than"), a list of three for rhythm, an "-ing" phrase that claims significance ("highlighting its importance"), inflated significance ("a pivotal step"), "serves as" or "stands as" where "is" works, aphorisms or morals.
+- His voice: polished, professional, first person, full sentences. No em dashes, exclamation marks, markdown or adjectives praising himself. Compound modifiers are hyphenated the standard way ("hands-on", "collision-free", "6-DOF", "root-cause"). He may sound keen in his own words ("I am eager to", "What excites me about").
+- He lists the range of what he did ("mechanical design, manufacturing, automation, and validation") and uses "rather than" in plain statements ("rather than treating each as a separate discipline"); both are his. Never: an "-ing" phrase that claims significance ("highlighting its importance"), inflated significance ("a pivotal step"), "serves as" or "stands as" where "is" works, aphorisms about engineering ("a fixture is finished only when…").
 - Name a gap only if the posting makes it central, and only in the same sentence as the work that answers it. Never end on a gap.
 ${exemplar ? `- Write the way he writes. One of his own cover letters, for his voice only (its facts are not new material):\n--- his letter ---\n${String(exemplar).slice(0, 4500)}\n--- end ---\n` : ''}${observations ? `- WHAT HE THROWS ANSWERS AWAY FOR. He wrote these himself after reading a batch of answers he rejected. They are about judgment, not grammar, and every answer he rejected was true and relevant:\n--- his notes ---\n${String(observations).slice(0, 3500)}\n--- end ---\n` : ''}${corpus ? `- HIS OWN ANSWERS. Where a rejected version is shown, it contains the same facts as the one he kept and he threw it away anyway. Study what is missing from the kept one, not only what is in it. Copy no sentence from these; they are a different question.\n${String(corpus).slice(0, 7000)}\n` : ''}- Before you answer, check it: could it go to fifty other applicants, or to another company with the name changed? Is it bullets restated? Would the reader know what Alex personally did and why it matters here? Is any detail missing from his CV? Is it inside the length? Fix anything that fails.
 
@@ -1272,6 +1448,86 @@ unsupported: quote any phrase in your answer that states a cause, comparison,
 the text for the box, and nothing else. Every fact in it traces to an evidence line above or to the posting.`;
 }
 
+/** The shape of each kind of question, said without anyone's sent answer. */
+const FIELD_SHAPES = {
+  'company-knowledge': 'WHAT DO YOU KNOW ABOUT THE COMPANY - THE SHAPE\nThe answer is about the company, not about the applicant; the only "me" is "what stood out to me". 1. Who they are: what kind of company, parent company if there is one, what they focus on. 2. "What stood out to me is that..." - the scope or stage of their work. 3. What they do, concretely. 4. Why this kind of role matters there. No internship, no project, no pitch. Only facts the posting or company brief states. About 80 words, one paragraph.',
+  'why-looking': 'WHY ARE YOU LOOKING - THE SHAPE\nShort, general and forward, one paragraph of about 80 words: where they are (graduation and the first full-time role), what their experience showed them they enjoy, in general terms, and what they want to keep doing and grow into. No project story, not narrowed to this company.',
+  'anything-else': 'ANYTHING ELSE YOU WOULD LIKE US TO KNOW - THE SHAPE\nA short personal note, not another project, and nothing already told on this form: where they are, how they want to grow, a plain admission that there is a lot to learn early on, and why this company\'s work matters to them. Contractions are fine here.',
+  experience: 'DESCRIBE YOUR EXPERIENCE WITH ... - THE SHAPE\n1. One sentence placing the experience: where, and in what setting. 2. The specific work, with its particulars. 3. "I also..." for the next piece of that experience. 4. One closing sentence that characterises the experience. Only work that answers exactly what was asked.',
+  excellence: 'EVIDENCE OF EXCELLENCE - THE SHAPE\nA single box: an opening sentence on the kind of problem they go after or where their strongest work has come from, a paragraph per employer or project with its numbers, then a two-sentence close: how these experiences taught them to approach the work, and the approach they would bring to the team the posting names. 200 to 280 words. When the box asks for several examples, number them, each with a short plain heading on its own line.',
+  'why-company': 'WHY THIS COMPANY / WHY THIS ROLE - THE SHAPE\n1. "I want to join <company> because …" — two plain reasons: why the problem matters, and why the work suits them. 2. Why the problem matters, in one sentence anyone could follow. 3. What makes their approach interesting. 4. One broad sentence about their background — no numbers, no project names, no tools. 5. Close on what they want to help the company do. One paragraph, 90 to 120 words unless the box says otherwise. Never copy the posting\'s technical specifics back to them.',
+};
+FIELD_SHAPES['why-role'] = FIELD_SHAPES['why-company'];
+
+/**
+ * The answer prompt for anyone who is not `writing.examplesOwner`. Same field
+ * block, same two-part reply, same fact rules; every example and every fact
+ * is the person's own (their cv.md, profile, corpus) or the preset's field
+ * wording — none of his.
+ */
+function buildFieldAnswerPrompt({
+  question, kind, brief, jd, cvText, target, request, seriesIndex, seriesOf, avoid, allInOne,
+  alsoWritten, previous, feedback, companyBrief, field, framing, exemplar, corpus, observations,
+  company, title, asked, q, who, limits, instructions, current, isLetter,
+}) {
+  const name = person.fullName;
+  const first = person.firstName;
+  const w = writing;
+  const shape = FIELD_SHAPES[kind] || '';
+  return `Write ${name}'s answer to one question on their application to ${company} for "${title}". Write it as them, in the first person, ready to paste into the box.
+
+CURRENT FIELD
+Question: ${q(asked)}
+${instructions ? `Instructions: ${q(instructions, 800)}\n` : ''}${field?.placeholder ? `Placeholder: ${q(field.placeholder, 200)}\n` : ''}${limits.words ? `Word limit: ${limits.words}\n` : ''}${limits.chars ? `Character limit: ${limits.chars}\n` : ''}Length to write: ${target.min} to ${target.max} words${limits.words || limits.chars ? ' (the form limit is a hard ceiling)' : ''}
+${current ? `Already in the box: "${q(current, 600)}"\n` : ''}${String(request || '').trim() && !feedback.length ? `User request: "${q(request)}"\n` : ''}${kind && kind !== 'other' && brief ? `What this box wants: ${brief}.\n` : ''}${allInOne > 1 ? `This one box asks for ${allInOne}: answer with a numbered list, "1. <short title>" on its own line and then that example, each a DIFFERENT piece of work; the word target covers all ${allInOne} together.
+` : ''}${seriesIndex > 1 ? `This is box ${seriesIndex}${seriesOf ? ` of ${seriesOf}` : ''} ("${q(question, 60)}"): a separate, complete answer to that question using DIFFERENT work from the earlier boxes.\n` : ''}${avoid.length ? `Earlier boxes already used:\n${avoid.map((t, i) => `${i + 1}. ${String(t).slice(0, 300)}`).join('\n')}\n` : ''}${alsoWritten.length ? `Already answered on this application (do not repeat the same story):\n${alsoWritten.slice(0, 4).map((a) => `- "${q(a.question, 80)}": ${String(a.text || '').slice(0, 250)}`).join('\n')}\n` : ''}${revisionBlock(previous, feedback)}
+ABOUT ${first.toUpperCase()}. ${personLine()} The CV below is the only source of facts about them: never add a tool, number, result, sequence of events or motive that is not in it.
+${who ? `${who}\n` : ''}--- cv.md ---
+${String(cvText || '').slice(0, CV_BUDGET)}
+--- end ---
+${framing ? `\nWHAT THEY EMPHASISE BY ROLE TYPE (their own notes; emphasis only, every fact still comes from cv.md):\n${String(framing).trim().slice(0, 3500)}\n` : ''}
+THE JOB
+Company: ${company}
+Title: ${title}
+${jd || '(no description available; answer to the title)'}
+${companyBrief ? `\nWHAT JARVIS KNOWS ABOUT ${String(company).toUpperCase()}\n${companyBrief}\n` : ''}
+APPLICATION STRATEGY
+
+Application answers are persuasive arguments, not resume summaries. Before drafting, infer who is reading, what they are evaluating, what the role actually needs someone to do, what they should believe about ${first} afterward, and which 1-3 confirmed experiences best prove it. Use experience as evidence for an argument; do not concatenate resume bullets.
+
+START BY DECIDING WHAT THE QUESTION IS EVALUATING. A question about what draws them somewhere is evaluating whether they know what they want; experience explains where the interest came from and must not take the answer over. A question about their experience or best work is evaluating the work, so the work dominates. A question about a project is evaluating how they think and work. A question about what was hard wants the obstacle, what made it hard, and how they got past it.
+
+HOW IT READS
+- ${w.answerRegister || 'Clear, professional prose in full sentences.'}
+- Summary level, not a play-by-play: each piece of work gets two to four sentences — what it was, what they owned, at most one constraint, and the result with its number where the CV has one.
+- A long answer covers two or three experiences; a "why this company" answer of about 100 words is one paragraph. Anything over about 130 words is two to four paragraphs separated by a blank line.
+- Motivation questions are about desire and direction first, evidence second. Never "the company does X, I did Y, therefore I want X". Do not restate what the company does back to them, and do not reach for keyword overlap.
+- First person, full sentences. No em dashes, exclamation marks, markdown, aphorisms, or adjectives praising themselves.
+- Name a gap only if the posting makes it central, and only in the same sentence as the work that answers it. Never end on a gap.
+${shape ? `\n${shape}\nThe shape is a guide, not text to reuse: write this answer's own sentences from their files and this posting.\n` : ''}${isLetter ? '- This box is a cover letter: letter register, no salutation and no sign-off, and no figures.\n' : ''}${exemplar ? `- Write the way they write. One of their own cover letters, for voice only (its facts are not new material):\n--- their letter ---\n${String(exemplar).slice(0, 4500)}\n--- end ---\n` : ''}${observations ? `- WHAT THEY THROW ANSWERS AWAY FOR, in their own notes:\n--- their notes ---\n${String(observations).slice(0, 3500)}\n--- end ---\n` : ''}${corpus ? `- THEIR OWN ANSWERS. Copy no sentence from these; they are a different question.\n${String(corpus).slice(0, 7000)}\n` : ''}- Before you answer, check it: could it go to fifty other applicants, or to another company with the name changed? Is it bullets restated? Would the reader know what ${first} personally did and why it matters here? Is any detail missing from the CV? Is it inside the length? Fix anything that fails.
+
+REPLY IN EXACTLY TWO PARTS:
+
+PLAN
+asking: what this question is evaluating, and therefore roughly how much of the
+  answer should be past work rather than what they want, how they think, or
+  what they would do here
+reader: who reads this and what they are evaluating
+believe: The reader should finish this answer believing that ${first} ...
+parts: every separate thing the question and its instructions ask for, and for a
+  box with more than one job, how much room each gets
+evidence: the cv.md lines this answer rests on, each copied exactly from cv.md (1 to 3 lines)
+why these: why this evidence beats their other work for THIS reader and role
+omit: name at least one strong, relevant thing you are leaving out, and why it
+  does not earn its place here. Write NONE only if the box is too short to have held anything else.
+opening: what the first sentence does for this reader
+unsupported: quote any phrase in your answer that states a cause, comparison,
+  number or detail you cannot point to in cv.md above. Write NONE
+  only if every such phrase is theirs. Anything you quote here will be sent back.
+===ANSWER===
+the text for the box, and nothing else. Every fact in it traces to an evidence line above or to the posting.`;
+}
+
 /**
  * Write one answer: ask, check, ask once more with the problems named, return
  * what there is — with its problems, never silently.
@@ -1283,7 +1539,7 @@ export async function writeAnswer(question, {
   job = null, jd = null, field = null, kind = null, request = '', context = '',
   // A box that is the Nth of a group: the stem carries the question, and
   // `avoid` carries what the earlier boxes already used.
-  stem = '', seriesIndex = 0, seriesOf = 0, avoid = [],
+  stem = '', seriesIndex = 0, seriesOf = 0, avoid = [], allInOne = 0,
   // The rest of this form, already answered. The reader sees every box at
   // once, so the writer has to as well.
   alsoWritten = [],
@@ -1314,7 +1570,12 @@ export async function writeAnswer(question, {
   // as `context` and never reach `targetWords`, so "no more than 200 words"
   // lost to the 150-250 default for its kind.
   const box = { ...(field || {}), label: field?.label || q, near: [field?.near, context].filter(Boolean).join(' ').slice(0, 1600) };
-  const target = targetWords(box, found.kind);
+  // A box holding several examples holds several answers' worth of words —
+  // unless the form itself set the limit.
+  let target = targetWords(box, found.kind);
+  if (allInOne > 1 && !fieldLimits(box).words && !fieldLimits(box).chars) {
+    target = { min: Math.max(target.min, 110 * allInOne), max: Math.max(target.max, 175 * allInOne) };
+  }
   const limits = fieldLimits(box);
   const src = sources || sourcesFor();
   // The whole posting where it fits: an answer is written towards the company,
@@ -1324,7 +1585,7 @@ export async function writeAnswer(question, {
     question: q, kind: found.kind, brief: found.brief, job, jd: condensed,
     cvText: src.cvText, narrative: src.narrative, voiceRules: src.voiceRules,
     framing: src.framing, target, request, context: context || field?.near || '', field: box,
-    stem, seriesIndex, seriesOf, avoid, alsoWritten, previous, feedback, companyBrief,
+    stem, seriesIndex, seriesOf, allInOne, avoid, alsoWritten, previous, feedback, companyBrief,
     // HIS OWN LETTERS ARE THE SPECIFICATION (F-408, and F-445 for missing it
     // here). `sourcesFor()` has loaded these all along — the cover-letter
     // writer feeds them in and this one did not, so every answer was written

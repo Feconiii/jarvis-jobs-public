@@ -77,7 +77,7 @@ test('THE POLISH LOOP MEASURES A REAL PAGE and the sheet check reads the PDF bac
     const spec = {
       name: 'Alex Rivera', contact: { location: 'Springfield, WA', phone: '+1 (555) 000-0000', email: 'v@example.test' },
       order: ['education', 'experience', 'projects', 'skills'],
-      education: [{ school: 'State University', degree: 'Bachelor of Science: Mechanical Engineering', location: 'Springfield, Washington', date: 'May 2027', bullets: [{ lead: 'GPA 3.85', text: 'an engineering honor society' }] }],
+      education: [{ school: 'Lakeside University', degree: 'Bachelor of Science: Mechanical Engineering', location: 'Springfield, Washington', date: 'May 2027', bullets: [{ lead: 'GPA 3.85', text: 'an engineering honor society' }] }],
       experience: [{ org: 'Applied Materials', orgKey: 'amat', title: 'Mechanical Engineer Intern', location: 'Austin, Texas', date: 'May 2026 – August 2026', bullets: bullets(6, long) },
         { org: 'Acme Steel Stud Company', orgKey: 'acme', title: 'Mechanical Engineer Intern', location: 'Springfield, Washington', date: 'May 2025 – August 2025', bullets: bullets(3, long).map((b, i) => ({ ...b, provenanceKey: `acme.b${i}` })) }],
       projects: [{ key: 'arm', lead: 'Robotic Arm', text: 'Designed and built a 4 DOF robotic arm using MG90S servo motors and 3D-printed casing, implementing inverse kinematics and Arduino based control for precise end effector positioning.' }],
@@ -100,7 +100,7 @@ test('THE POLISH LOOP MEASURES A REAL PAGE and the sheet check reads the PDF bac
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('A HYPHENATED COMPOUND NEVER BREAKS AT ITS HYPHEN on the page', async () => {
+test('A HYPHECHRISD COMPOUND NEVER BREAKS AT ITS HYPHEN on the page', async () => {
   const b = await chromium.launch();
   try {
     const page = await b.newPage({ viewport: { width: 816, height: PAGE_H + 400 } });

@@ -38,6 +38,23 @@ const BASES = ['http://localhost:4300', 'http://127.0.0.1:4300'];
 
 let cached = { base: null, token: null };
 
+/**
+ * WHOSE FILES THESE ARE. The dashboard says who it is running for on the
+ * token answer; the name goes on every fallback filename and is kept in
+ * chrome.storage.local (`jarvisPerson`) for the page and the panel. Until the
+ * dashboard has answered once, the name is the original user's.
+ */
+let PERSON = { fullName: 'Alex Rivera' };
+function rememberPerson(p) {
+  if (!p || typeof p.fullName !== 'string' || !p.fullName.trim()) return;
+  PERSON = { ...PERSON, ...p };
+  try { chrome.storage?.local?.set?.({ jarvisPerson: PERSON })?.catch?.(() => {}); } catch { /* memory still has it */ }
+}
+try {
+  chrome.storage?.local?.get?.('jarvisPerson')?.then?.((s) => { if (s?.jarvisPerson) rememberPerson(s.jarvisPerson); })?.catch?.(() => {});
+} catch { /* no storage: the default name stands */ }
+const resumeFallbackName = () => `${PERSON.fullName} Resume.pdf`;
+
 /** Find the dashboard and get a token from it. Cached until it stops answering. */
 async function connect() {
   if (cached.base && cached.token) return cached;
@@ -45,9 +62,10 @@ async function connect() {
     try {
       const r = await fetch(`${base}/api/apply-token`, { method: 'GET' });
       if (!r.ok) continue;
-      const { token } = await r.json();
+      const { token, person } = await r.json();
       if (!token) continue;
       cached = { base, token };
+      rememberPerson(person);
       return cached;
     } catch { /* try the next one */ }
   }
@@ -124,7 +142,7 @@ async function api(pathname, { method = 'GET', body = null, raw = false, withNam
   // panel produced "a bunch of random letters and numbers" (his words) instead
   // of "Alex Rivera Resume.pdf" — the one filename convention this project has.
   const named = /filename="?([^";]+)"?/i.exec(res.headers?.get?.('content-disposition') || '');
-  return withName ? { buf, filename: named ? named[1].trim() : 'Alex Rivera Resume.pdf' } : buf;
+  return withName ? { buf, filename: named ? named[1].trim() : resumeFallbackName() } : buf;
 }
 
 /** Badge text is the whole UI. Green = filled, red = something to read. */
@@ -247,6 +265,9 @@ const MAX_AUTO_RUNS_PER_TAB = 40;
  * enough that a page which navigated mid-injection does not strand the tab.
  */
 const INJECT_CAP_MS = 180000;
+// The two set-up injections before it are one-liners; a frame that has not
+// loaded in this long is not waited for (F-571).
+const SETUP_CAP_MS = 5000;
 /** Quiet follow-along runs on ONE url before the tab stops re-reading it. */
 const QUIET_RUNS_BEFORE_HOLD = 3;
 
@@ -346,6 +367,10 @@ async function rememberApplication(tabId, { id, company, title: jobTitle }, from
       console.log(`[jarvis] tab ${tabId}: now on ${company || id} (was ${st.company || st.id})`);
       st.started = false;
       st.acc = emptyAcc();
+      // The old job's name goes with it; a caller that knows only the new id
+      // must not leave the tab labelled with the previous employer (F-568).
+      st.company = null;
+      st.title = null;
       dropReport(tabId);
     }
   }
@@ -463,7 +488,26 @@ async function panelFor(tabId) {
   }
 }
 
+/**
+ * A CLOCK FOR A HIDDEN TAB (2026-09-25: "why is jarvis fill speed now painfully
+ * slow"). He fills in Opera GX while working in another tab. A hidden page's
+ * timers never fire sooner than once a second — F-464 stopped the one-a-minute
+ * case, not this one — and the fill waits in 120 ms steps, so hidden every step
+ * cost eight times its length: a skills search that gives up in under a second
+ * on screen took seven, and Samsung's My Experience step took 3.5 minutes. This
+ * worker's timers are not a page's and are not held back, so a hidden page asks
+ * here and is woken on time. Its own listener, answering nothing else.
+ */
+chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (msg?.type !== 'sleep') return undefined;
+  setTimeout(() => { try { reply({ ok: true }); } catch { /* the tab went away */ } }, Math.max(0, Math.min(Number(msg.ms) || 0, 10000)));
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  // The clock above answers these; an "unknown message" here would wake the
+  // sleeper at once.
+  if (msg?.type === 'sleep') return undefined;
   (async () => {
     // WHICH TAB IS ASKING. An armed tab carries its application id, and every
     // request from it is made on that application's behalf — the page URL is
@@ -594,6 +638,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           if (msg.inline) q.set('inline', '1');
           const which = msg.what === 'letter' ? '/api/cover-letter-pdf' : '/api/apply-resume';
           reply({ ok: true, url: `${base}${which}?${q}` });
+        } catch (e) { reply({ ok: false, error: String(e?.message || e) }); }
+        return;
+      }
+      if (msg?.type === 'resume-name' && msg.id && fromPanel) {
+        // His name for this posting's resume file; every attach uses it.
+        try {
+          const got = await api('/api/resume-name', { method: 'POST', body: { id: String(msg.id), name: String(msg.name ?? '') } });
+          reply({ ok: true, name: got?.name || '' });
         } catch (e) { reply({ ok: false, error: String(e?.message || e) }); }
         return;
       }
@@ -788,6 +840,8 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           // What the page calls the job, for a form whose URL does not say (F-330).
           heading: msg.heading || '',
           pageTitle: msg.pageTitle || '',
+          // The page mentions a cover letter: start writing it now (2026-10-03).
+          mentionsLetter: !!msg.mentionsLetter,
           // The dashboard compares this against what it expects. Loading an
           // unpacked extension does NOT auto-update it, so a stale copy behaves
           // like an old bug and there is no way to tell from the page — which is
@@ -800,7 +854,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         // applied to last when nothing matches (`matched: 'fallback'`), and
         // stamping THAT on the tab would make a guess into a trusted id — the
         // wrong-employer resume by another road.
-        if (tabId && plan?.id && !id && plan.matched === 'page') await rememberApplication(tabId, { id: plan.id }, msg.pageUrl);
+        // …and when the tab's id is STALE: the server replaced it because the
+        // page is another posting (F-492), and the tab's report must follow, or
+        // the run is recorded under the job the tab was on before (F-568).
+        if (tabId && plan?.id && plan.matched === 'page' && String(plan.id) !== String(id || '')) {
+          await rememberApplication(tabId, { id: plan.id, company: plan.company, title: plan.title }, msg.pageUrl);
+        }
         reply({ ok: true, plan });
       } else if (msg?.type === 'snapshot') {
         // The form as it stood when Next or Submit was pressed, compared with
@@ -810,6 +869,21 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           stage: msg.stage, button: msg.button, by: msg.by, fields: msg.fields,
         } }).catch(() => null);
         reply({ ok: true, logged: r?.logged ?? 0 });
+      } else if (msg?.type === 'capture') {
+        // The markup around a control that did not take (an upload that never
+        // showed, F-655), values stripped on the page. A record; never blocks.
+        const r = await api('/api/form-capture', { method: 'POST', body: {
+          id, pageUrl: msg.pageUrl, why: msg.why || '', label: msg.label || '', html: msg.html || '',
+        } }).catch(() => null);
+        reply({ ok: !!r?.ok });
+      } else if (msg?.type === 'page-errors') {
+        // What the form said back in red, in a banner, or beside a box marked
+        // invalid (2026-10-02). A record for troubleshooting; never blocks.
+        const r = await api('/api/page-errors', { method: 'POST', body: {
+          id, pageUrl: msg.pageUrl, heading: msg.heading || '', pageTitle: msg.pageTitle || '',
+          trigger: msg.trigger || '', errors: msg.errors || [],
+        } }).catch(() => null);
+        reply({ ok: !!r?.ok });
       } else if (msg?.type === 'filled') {
         // What a run did — every run, whoever started it. The worker cannot
         // wait for a run to end (one can outlast the five minutes Chrome gives
@@ -927,22 +1001,30 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
  */
 async function inject(tabId, ctx = {}) {
   note(`tab ${tabId}: injecting (${ctx.auto ? 'follow-along' : 'press'})`);
-  await chrome.scripting.executeScript({
+  // A FRAME THAT NEVER LOADS HOLDS AN allFrames INJECTION FOREVER (F-571).
+  // Measured 2026-09-24 on Lyft's careerpuck board: the Greenhouse form sits in
+  // an iframe that had not loaded, `executeScript` waited on it, and these two
+  // set-up calls — the only ones with no cap — never returned, so the fill
+  // never started and the press hung. Chrome still injects each frame as it
+  // becomes ready; only the waiting is capped.
+  const setupCap = (p) => Promise.race([p, new Promise((resolve) => setTimeout(() => resolve('capped'), self.__jarvisSetupCap || SETUP_CAP_MS))]);
+  const ctxDone = await setupCap(chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
     func: (c) => { globalThis.__jarvisRun = c; },
     args: [ctx],
-  }).catch((e) => note(`tab ${tabId}: context injection failed — ${String(e?.message || e).slice(0, 160)}`));
+  }).catch((e) => note(`tab ${tabId}: context injection failed — ${String(e?.message || e).slice(0, 160)}`)));
+  if (ctxDone === 'capped') note(`tab ${tabId}: a frame has not loaded — going on with the frames that have`);
 
   // netwatch.js goes into the PAGE's world, not ours. A content script has its
   // own fetch and its own XMLHttpRequest, so patching those here would watch
   // nothing — the application uses the page's. Extension-privileged injection
   // also gets past the page's own CSP, which Workday and Ashby both use to
   // forbid inline script. It is best-effort: a page that refuses it still fills.
-  await chrome.scripting.executeScript({
+  await setupCap(chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
     files: ['netwatch.js'],
     world: 'MAIN',
-  }).catch(() => {});
+  }).catch(() => {}));
 
   note(`tab ${tabId}: scripts going in`);
   // A NAVIGATION UNDER THE INJECTION CAN LEAVE THIS PROMISE UNSETTLED FOREVER
@@ -1114,8 +1196,13 @@ async function report(tabId, done, { id = undefined, topFrame = true } = {}) {
     stoppedBecause: done.stoppedBecause || '', pageUrl: '',
   };
   try {
+    // A TEST DRIVE IS NOT HIS WORK (2026-09-25). The drive harness marks its
+    // own throwaway profile; a fill it reports is not recorded as "prepared"
+    // on his row — its fill times had started to match his receipts.
+    const harness = await chrome.storage.local.get('jarvisHarness').then((s) => s?.jarvisHarness === true).catch(() => false);
     return await api('/api/filled', { method: 'POST', body: {
       id,
+      harness,
       pageUrl: body.pageUrl || done.pageUrl || page?.url || done.frame || '',
       // The page THIS run was on, apart from the tab's total: the server
       // only retires a posting on a verdict from the posting's own page.
@@ -1194,6 +1281,7 @@ async function runOnTab(tabId, { auto = false, reset = false } = {}) {
     const summaries = await inject(tabId, {
       armed: !!st, auto, reset, started: !!st?.started,
       id: st?.id || null, company: st?.company || null, title: st?.title || null,
+      gone: GONE_TABS.get(tabId) || null,
       loadId: await loadId(),
     });
     note(`tab ${tabId}: ran, ${summaries.length} frame(s) answered${summaries[0]?.error ? ` — ${summaries[0].error}` : ''}`);
@@ -1321,6 +1409,30 @@ chrome.tabs?.onUpdated?.addListener((tabId, info, tab) => {
   follow(tabId, 'the page loaded', tab?.url || '');
 });
 
+/**
+ * NEVER LET THE BROWSER THROW AN UNSENT LINKEDIN MESSAGE AWAY (2026-10-05).
+ *
+ * opera-fill.mjs leaves each message filled in a background tab for him to
+ * send. At 0.5 GB free, Opera discarded two of them (Benjamin, Riley); a
+ * click reloaded the compose page empty. The same fix as an armed application
+ * tab: a LinkedIn compose tab is kept in memory. LinkedIn's own pages are
+ * never armed, so nothing else ever hands these tabs back — closing one, or
+ * sending (the page leaves /compose), ends it.
+ */
+const LINKEDIN_COMPOSE = /^https:\/\/www\.linkedin\.com\/messaging\/(?:compose|thread\/new)\b/;
+function keepLinkedInCompose(tabId, url) {
+  if (LINKEDIN_COMPOSE.test(String(url || ''))) chrome.tabs?.update?.(tabId, { autoDiscardable: false })?.catch?.(() => {});
+}
+chrome.tabs?.onUpdated?.addListener((tabId, info, tab) => keepLinkedInCompose(tabId, info.url || tab?.url));
+// Tabs filled before the extension (re)loaded are protected the moment it does.
+async function keepOpenLinkedInComposes() {
+  const tabs = await chrome.tabs?.query?.({ url: 'https://www.linkedin.com/messaging/*' })?.catch?.(() => []) || [];
+  for (const t of tabs) keepLinkedInCompose(t.id, t.url);
+}
+chrome.runtime?.onInstalled?.addListener(keepOpenLinkedInComposes);
+chrome.runtime?.onStartup?.addListener(keepOpenLinkedInComposes);
+self.keepOpenLinkedInComposes = keepOpenLinkedInComposes;
+
 // The moment a new document is committed in the top frame: Chrome has just
 // cleared the badge, and the URL is known. Paint, and check the posting id.
 /**
@@ -1341,8 +1453,15 @@ function nudgePanel(tabId) {
   } catch { /* no panel open */ }
 }
 
+// A POSTING THE SITE REDIRECTED AS NOT FOUND (Rippling, Aalo Atomics,
+// 2026-09-25): the landing address carries ?rr_message=job_not_found, and the
+// board's router rewrites it away before the filler runs. Remembered per tab
+// until the tab commits another address, and handed to the next run.
+const GONE_TABS = new Map();
 chrome.webNavigation?.onCommitted?.addListener((d) => {
   if (d.frameId !== 0) return;
+  if (/[?&](rr_message|message|error)=job[_-]?not[_-]?found/i.test(d.url || '')) GONE_TABS.set(d.tabId, 'job not found');
+  else GONE_TABS.delete(d.tabId);
   noticeNavigation(d.tabId, d.url);
 });
 

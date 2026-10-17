@@ -24,22 +24,29 @@
  * These need a second fetch after the scan; that is what `jarvis:enrich` is.
  */
 export const DETAIL_SOURCES = [
+  'adp',
   'bamboohr',
   'breezy',
   'greenhouse',
   'icims',
   'oracle-orc',
+  'paylocity',
+  'phenom',
   'rippling',
   'sitemap-jobs',
   'smartrecruiters',
+  'ukg',
+  'workable',
   'workday',
 ];
 
 /**
  * Sources whose LIST api already ships the body, so their rows arrive read and
  * never need an enrichment pass at all. Measured on the store 2026-09-10 —
- * amazon-jobs, ashby, phenom, successfactors and extension sit at 100% read,
- * lever 97%, jibeapply 89%, recruitee 82%.
+ * amazon-jobs, ashby, successfactors and extension sit at 100% read,
+ * lever 97%, jibeapply 89%, recruitee 82%. Phenom also read 100% and was
+ * moved out on 2026-10-03 (F-673): its 'body' is a ~380-character teaser, and
+ * the full posting is read from the employer's Workday tenant.
  *
  * The stragglers are why this is a separate list rather than a footnote: a
  * lever row with no body is a posting that failed at scan time, not a posting
@@ -51,7 +58,6 @@ export const BODY_IN_LIST = [
   'extension',
   'jibeapply',
   'lever',
-  'phenom',
   'recruitee',
   'successfactors',
 ];

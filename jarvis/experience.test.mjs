@@ -93,7 +93,7 @@ const PROFILE = {
     },
     {
       title: 'Manufacturing Lead',
-      company: 'State University - Makerspace Manufacturing Technology Center',
+      company: 'Lakeside University - Makerspace Manufacturing Technology Center',
       location: 'Springfield, Washington',
       start: 'August 2024',
       end: '',
@@ -103,7 +103,7 @@ const PROFILE = {
   ],
   education_entries: [
     {
-      school: 'State University',
+      school: 'Lakeside University',
       degree: 'Bachelor of Science',
       field_of_study: 'Mechanical Engineering',
       gpa: '3.85',
@@ -117,7 +117,7 @@ const work = workEntries(PROFILE, { now: JUL_2026 });
 check('three work entries built', work.length, 3);
 check('order is preserved (newest first, as authored)',
   work.map((w) => w.company),
-  ['Applied Materials', 'Acme Steel Stud Company', 'State University - Makerspace Manufacturing Technology Center']);
+  ['Applied Materials', 'Acme Steel Stud Company', 'Lakeside University - Makerspace Manufacturing Technology Center']);
 
 // The AMAT internship ends August 2026 — in July 2026 it is genuinely current,
 // and Workday hides the end date once "I currently work here" is checked.
@@ -145,8 +145,11 @@ check('entries with neither title nor company are dropped',
 const edu = educationEntries(PROFILE);
 check('one education entry built', edu.length, 1);
 check('education fields map across', edu[0], {
-  school: 'State University',
+  school: 'Lakeside University',
   degree: 'Bachelor of Science',
+  // HP's menu reads "Bachelors (±16 years of education)" (2026-09-26).
+  // …and KION's reads "B. Sc." (2026-10-16).
+  degreeAlts: ["Bachelor's", 'Bachelors', "Bachelor's Degree", 'Bachelor', 'B. Sc.', 'B.Sc.', 'BSc', 'B.S.', 'BS'],
   fieldOfStudy: 'Mechanical Engineering',
   gpa: '3.85',
   firstYear: null,
@@ -157,16 +160,16 @@ check('education fields map across', edu[0], {
 ok('blank first_year stays null rather than being guessed', edu[0].firstYear === null);
 
 // A profile that states the months carries them; a bare year carries none (F-358).
-const dated = educationEntries({ education_entries: [{ school: 'State University', first_year: 'Aug 2023', last_year: 'May 2027' }] })[0];
+const dated = educationEntries({ education_entries: [{ school: 'Lakeside University', first_year: 'Aug 2023', last_year: 'May 2027' }] })[0];
 check('a stated start month is carried', [dated.firstYear, dated.firstMonth], [2023, 8]);
 check('a stated end month is carried', [dated.lastYear, dated.lastMonth], [2027, 5]);
-const bare = educationEntries({ education_entries: [{ school: 'State University', first_year: '2023', last_year: '2027' }] })[0];
+const bare = educationEntries({ education_entries: [{ school: 'Lakeside University', first_year: '2023', last_year: '2027' }] })[0];
 check('a bare year carries no month — never a guess', [bare.firstYear, bare.firstMonth, bare.lastMonth], [2023, null, null]);
 
 // A profile written before education_entries existed must still clear the step.
 const legacy = educationEntries({
   education: {
-    school: 'State University',
+    school: 'Lakeside University',
     degree: 'Bachelor of Science',
     discipline: 'Mechanical Engineering',
     gpa: '3.85',

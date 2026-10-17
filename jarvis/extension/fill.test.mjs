@@ -35,7 +35,7 @@ const PROFILE = {
     country: 'United States', postal_code: '00000', address_line1: '1 Test St',
     linkedin: 'https://linkedin.com/in/alex',
   },
-  education: { school: 'State University', discipline: 'Mechanical Engineering' },
+  education: { school: 'Lakeside University', discipline: 'Mechanical Engineering' },
   work_experience: [
     { title: 'Mechanical Engineer Intern', company: 'Acme Fab', location: 'Austin, Texas', start: 'May 2026', end: 'August 2026', description: 'Designed an inspection fixture.' },
     { title: 'Manufacturing Lead', company: 'Test University', location: 'Springfield, Washington', start: 'August 2024', description: 'Ran the shop floor.' },
@@ -57,6 +57,8 @@ let page;
 test.before(async () => {
   browser = await chromium.launch();
   page = await browser.newPage();
+  // JDEBUG=1 prints the page's own [jarvis] lines, for a failing fixture.
+  if (process.env.JDEBUG) page.on('console', (m) => { if (/jarvis/i.test(m.text())) console.log('  PAGE', m.text().slice(0, 240)); });
 
   // The server side, reachable from the page. Same planner the dashboard uses.
   await page.exposeFunction('__jarvisPlan', (fields, sections) => planForm(fields, PROFILE, { sections: sections || [] }));
@@ -68,12 +70,18 @@ test.before(async () => {
 test.after(async () => { await browser?.close(); });
 
 /** Load a fixture, then run discover.js + content.js exactly as shipped. */
-async function fill(html, { planError = '', editPlan = '', worker = null } = {}) {
+async function fill(html, { planError = '', editPlan = '', worker = null, url = '' } = {}) {
   // A FRESH DOCUMENT. `setContent` reuses the current one (document.write), so
   // an armed run's watcher, its timers and `__jarvisContent` would all survive
   // into the next fixture and race it.
-  await page.goto('about:blank');
-  await page.setContent(html);
+  // `url`: served from that address, for code that reads the host (F-706).
+  if (url) {
+    await page.route(url, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: html }));
+    await page.goto(url);
+  } else {
+    await page.goto('about:blank');
+    await page.setContent(html);
+  }
   await page.addScriptTag({ content: DISCOVER });
   // Stub only the extension messaging channel.
   await page.evaluate(({ planError, editPlan, worker }) => {
@@ -167,7 +175,7 @@ test('WORKDAY MY EXPERIENCE IS ADDED AND FILLED — reusing the blank panel, nev
   assert.equal(got.work[1].current, true, 'no end date → I currently work here');
   assert.equal(got.work[1].to, '/', 'and no end date is typed for an ongoing role');
   assert.equal(got.edu.length, 1);
-  assert.equal(got.edu[0].school, 'State University');
+  assert.equal(got.edu[0].school, 'Lakeside University');
   assert.equal(got.edu[0].field, 'Mechanical Engineering');
   assert.equal(got.websiteAdded, undefined, 'a section the profile has nothing for is never touched');
   assert.ok(result.filled >= 12, `counts what landed (${result.filled})`);
@@ -206,22 +214,22 @@ test('a My Experience section that already holds an entry is left exactly as it 
   assert.ok(result.filled >= 2);
 });
 
-test('THE COOKIE BANNER IS DECLINED, never accepted, before anything is filled', async () => {
+test('THE COOKIE BANNER IS ACCEPTED before anything is filled — "press consent on everything" (2026-10-03)', async () => {
   // Stryker's banner hid the posting on 2026-09-03 and had to be declined by
   // hand. The most private choice, always; "Manage" opens a pane and is never
   // the pick; a form that merely mentions cookies is not a banner.
   const result = await fill(`
     <div id="onetrust-banner-sdk" style="position:fixed;bottom:0;left:0;right:0;background:#eee;padding:12px">
       By clicking “Accept All Cookies”, you agree to the storing of cookies on your device.
-      <button onclick="window.__accepted = 1">Accept All Cookies</button>
+      <button onclick="window.__accepted = (window.__accepted || 0) + 1; document.getElementById('onetrust-banner-sdk').remove()">Accept All Cookies</button>
       <button onclick="window.__managed = 1">Manage Cookies</button>
-      <button onclick="window.__declined = (window.__declined || 0) + 1; document.getElementById('onetrust-banner-sdk').remove()">Decline All</button>
+      <button onclick="window.__declined = 1">Decline All</button>
     </div>
     <label for="a">First Name</label><input id="a">`);
   assert.equal(result.filled, 1, 'the form still fills');
   const flags = await page.evaluate(() => ({ a: window.__accepted, m: window.__managed, d: window.__declined }));
-  assert.equal(flags.d, 1, 'Decline All was pressed once');
-  assert.equal(flags.a, undefined, 'Accept was never touched');
+  assert.equal(flags.a, 1, 'Accept All was pressed once');
+  assert.equal(flags.d, undefined, 'Decline was never touched');
   assert.equal(flags.m, undefined, 'and neither was Manage');
 });
 
@@ -404,6 +412,29 @@ test('the run prints where its time went', async () => {
  * real `drop` on the zone makes it print the filename — which is the only
  * evidence a reader ever gets that the file landed.
  */
+test('HONDA\'S UPLOADER (Phenom, 2026-10-03): the file is taken when its hidden resumeName fills, and Additional Attachments gets nothing', async () => {
+  const result = await fill(`
+    <div class="resume-upload-wrapper"><div>* Make completing your job application easier by uploading your resume or CV.</div>
+      <input type="file" id="phenomResume" tabindex="-1" style="display: none;">
+      <button type="button" class="upload-resume-btn btn primary-button">Upload Resume</button></div>
+    <form class="rjsf">
+      <label class="file-label"><span class="title-text">Additional Attachments</span><input type="file" id="extra" style="display: none;"></label>
+      <label for="firstName">First Name</label><input id="firstName" type="text">
+      <label for="email">Email</label><input id="email" type="text">
+      <input type="hidden" id="resumeName" value=""><input type="hidden" id="resumePath" value="">
+    </form>
+    <script>
+      document.getElementById('phenomResume').addEventListener('change', (e) => setTimeout(() => {
+        const f = e.target.files[0];
+        document.getElementById('resumeName').value = f.name;
+        document.getElementById('resumePath').value = 'AHMAHMUS/resumes/' + f.name;
+      }, 600));
+    <\/script>`);
+  assert.equal(result.uploaded, true);
+  assert.equal((result.unanswered || []).some((u) => /never showed the file/.test(u)), false, 'Honda kept it, so nothing to warn about');
+  assert.equal(await page.evaluate(() => document.getElementById('extra').files.length), 0, 'no second copy in Additional Attachments');
+});
+
 test('a drop-zone uploader gets the file dropped on it, and says so', async () => {
   const result = await fill(`
     <form>
@@ -456,6 +487,75 @@ test('a hidden uploader that never shows the file is reported, not ticked off', 
     (result.unanswered || []).some((u) => /never showed the file/.test(u)),
     `he is told to check it, got: ${JSON.stringify(result.unanswered)}`,
   );
+  // …and the uploader's markup reaches his dashboard, without his values (F-655).
+  const caps = await page.evaluate(() => globalThis.__sentMsgs.filter((m) => m.type === 'capture'));
+  assert.ok(caps.some((c) => /did not show/.test(c.why)), `a capture after the failed upload: ${JSON.stringify(caps.map((c) => c.why))}`);
+  assert.ok(caps.every((c) => /id="resume"/.test(c.html) && !/alex|@/i.test(c.html)), 'the markup, no values');
+});
+
+/**
+ * A PRIVACY DIALOG THAT HOLDS THE FILE (Applied Materials' Eightfold form,
+ * 2026-09-27, F-623). Choosing the file raises "Data Privacy Agreement" —
+ * Cancel / Confirm, both type="submit", in a dialog outside the form — and the
+ * file goes nowhere until Confirm. A Confirm in a dialog about SUBMITTING is
+ * never pressed.
+ */
+const PRIVACY_DIALOG = (body) => `
+  <form>
+    <label for="first_name">First Name</label><input id="first_name" type="text">
+    <label for="email">Email</label><input id="email" type="text">
+    <div><h3>Resume</h3><label for="resume">Upload your resume</label><input id="resume" type="file" style="display:none"><div id="chip"></div></div>
+  </form>
+  <div id="dlg" role="dialog" aria-modal="true" style="display:none">
+    <span role="heading">Data Privacy Agreement</span>
+    <p>${body}</p>
+    <button type="submit" id="cancel">Cancel</button><button type="submit" id="confirm">Confirm</button>
+  </div>
+  <script>(() => {
+    let pending = null;
+    document.getElementById('resume').addEventListener('change', (e) => { pending = e.target.files[0]; document.getElementById('dlg').style.display = 'block'; });
+    document.getElementById('confirm').addEventListener('click', () => { window.__confirmed = 1; document.getElementById('dlg').style.display = 'none'; if (pending) document.getElementById('chip').textContent = pending.name; });
+    document.getElementById('cancel').addEventListener('click', () => { window.__cancelled = 1; document.getElementById('dlg').style.display = 'none'; });
+  })();<\/script>`;
+
+test('AMAT: a Data Privacy Agreement raised by the file is confirmed, and the file shows (F-623)', async () => {
+  const result = await fill(PRIVACY_DIALOG('When you upload your resume, we provide job recommendations to you. Please confirm that you agree to the Applied Materials Data Privacy Policy.'));
+  const st = await page.evaluate(() => ({ confirmed: !!window.__confirmed, cancelled: !!window.__cancelled, chip: document.getElementById('chip').textContent }));
+  assert.equal(st.confirmed, true, 'Confirm was pressed');
+  assert.equal(st.cancelled, false, 'never Cancel');
+  assert.equal(st.chip, 'Alex Rivera Resume.pdf');
+  assert.equal(result.uploaded, true);
+  assert.equal((result.unanswered || []).some((u) => /never showed the file/.test(u)), false);
+});
+
+test('a Confirm in a dialog about submitting is never pressed', async () => {
+  await fill(PRIVACY_DIALOG('Please confirm you agree to our privacy policy and want to submit your application now.'));
+  assert.equal(await page.evaluate(() => !!window.__confirmed), false);
+});
+
+test('Swisslog: an Apply that opens another tab leaves the posting page alone — no resume in its box (F-623)', async () => {
+  const result = await fill(`
+    <form action="/en-us/search-results-page"><input type="search" name="q" aria-label="q"></form>
+    <h1>Mechanical Engineer - Swisslog Global</h1>
+    <p>Job description text.</p>
+    <a href="about:blank" target="_blank" onclick="window.__applied = 1; return false;">APPLY HERE</a>
+    <form action="/en-us/careers/openings/mechanical-engineer-4142"><label for="f">Resume/CV</label><input id="f" type="file" name="file"></form>`);
+  assert.equal(await page.evaluate(() => !!window.__applied), true, 'Apply was followed');
+  assert.equal(result.followedApply, true, JSON.stringify(result));
+  assert.equal(await page.evaluate(() => document.getElementById('f').files.length), 0, 'nothing attached to the posting page');
+});
+
+test('Ashby, 2026-09-30: an Apply button above the form that changes nothing does not end the run — the form is filled', async () => {
+  const result = await fill(`
+    <h1>Mechanical Engineer</h1>
+    <a href="#" onclick="window.__applied = 1; return false;">Apply</a>
+    <form>
+      <label for="email">Email</label><input id="email" type="text">
+      <div><h3>Resume</h3><label for="resume">Attach</label><input id="resume" type="file" style="display:none"><div id="chip"></div></div>
+      <script>document.getElementById('resume').addEventListener('change', (e) => { document.getElementById('chip').textContent = e.target.files[0].name; });<\/script>
+    </form>`);
+  assert.notEqual(result.followedApply, true, JSON.stringify(result.stoppedBecause));
+  assert.equal(await page.evaluate(() => document.getElementById('email').value), 'v@example.test');
 });
 
 test('IT WALKS A MULTI-STEP WIZARD and stops before Submit', async () => {
@@ -572,6 +672,24 @@ test('A PAGE WITH NO FORM AT ALL SAYS SO — never "not an application" (F-360)'
   assert.equal(result.filled, 0);
 });
 
+test('A STATE LIST THAT LOADS ONLY ONCE COUNTRY IS CHOSEN is answered on the second pass (Honda, 2026-10-02)', async () => {
+  await fill(`
+    <form>
+      <label for="city">City</label><input id="city">
+      <label for="country">Country</label>
+      <select id="country"><option value="">Please Select</option><option value="5266"> United Kingdom </option><option value="5270"> United States </option></select>
+      <label for="region">State</label>
+      <select id="region"><option value="">Please Select</option><option>  </option></select>
+    </form>
+    <script>
+      document.getElementById('country').addEventListener('change', () => setTimeout(() => {
+        document.getElementById('region').innerHTML = '<option value="">Please Select</option><option value="OR">Oregon</option><option value="WA">Washington</option>';
+      }, 200));
+    <\/script>`);
+  assert.equal(await page.evaluate(() => document.getElementById('country').selectedOptions[0].textContent.trim()), 'United States');
+  assert.equal(await page.evaluate(() => document.getElementById('region').value), 'WA', 'the State filled once its list arrived');
+});
+
 test('a stalled step reports the FORM\'S OWN words', async () => {
   const result = await fill(`
     <div>
@@ -583,6 +701,21 @@ test('a stalled step reports the FORM\'S OWN words', async () => {
   assert.match(result.stoppedBecause, /would not move on/);
   assert.match(result.stoppedBecause, /required and must have a value/);
   assert.ok(!/VPS\|abc/.test(result.stoppedBecause), 'Workday\'s internal error code means nothing to him');
+});
+
+test('F-633: a success notice is never given as the reason a step stalled', async () => {
+  // Onto Innovation, 2026-10-01: "the form would not move on: Alex Rivera - Onto
+  // Innovation - Applications Engineer 3.pdf successfully uploaded".
+  const result = await fill(`
+    <div>
+      <h2>My Experience</h2>
+      <label for="a">Something</label><input id="a">
+      <div role="alert">Alex Rivera - Onto Innovation - Applications Engineer 3.pdf successfully uploaded</div>
+      <div role="alert">Error-The field Phone Number is required and must have a value.</div>
+      <button data-automation-id="pageFooterNextButton">Save and Continue</button>
+    </div>`);
+  assert.ok(!/successfully uploaded/.test(result.stoppedBecause), result.stoppedBecause);
+  assert.match(result.stoppedBecause, /Phone Number is required/);
 });
 
 test('A NEXT THAT DOES NOTHING IS ONE STEP, even when filling changed the page (F-357)', async () => {
@@ -1001,6 +1134,151 @@ test('a combobox with no matching option is reported unanswered, not claimed', a
     'and he must be told which question went unanswered');
 });
 
+/**
+ * Ashby's "Search schools..." box (Applied Intuition, 2026-09-30, read from
+ * Ashby's own bundle): nothing is listed until something is typed; the search
+ * waits 300 ms after the last keystroke, then asks the server
+ * (ApiSearchSchoolByCanonicalName, 120-300 ms measured). The fill typed
+ * "Lakeside", looked once 0.6 s later, saw no rows, and reported "nothing
+ * matched" with no list offered.
+ */
+function ashbySchoolFixture(results, delayMs) {
+  return `
+    <label id="s-label" for="s">School</label>
+    <div class="value"></div>
+    <input id="s" placeholder="Search schools..." role="combobox" aria-autocomplete="list"
+           aria-haspopup="listbox" aria-expanded="false" aria-labelledby="s-label">
+    <script>(() => {
+      const RESULTS = ${JSON.stringify(results)};
+      const input = document.getElementById('s');
+      const shown = document.querySelector('.value');
+      let pop = null, t = 0;
+      const close = () => { if (pop) pop.remove(); pop = null; input.setAttribute('aria-expanded', 'false'); };
+      input.addEventListener('input', () => {
+        close(); clearTimeout(t);
+        if (!input.value) return;
+        input.setAttribute('aria-expanded', 'true');
+        t = setTimeout(() => {
+          pop = document.createElement('div');
+          pop.setAttribute('role', 'listbox');
+          for (const [name, country, domain] of RESULTS) {
+            const row = document.createElement('div');
+            row.setAttribute('role', 'option');
+            row.innerHTML = '<div><div>' + name + '</div><div>' + country + '</div></div><div>' + domain + '</div>';
+            row.addEventListener('click', () => { shown.textContent = name; input.value = name; close(); });
+            pop.appendChild(row);
+          }
+          document.body.appendChild(pop);   // a portal at the end of the page, as Floating UI draws it
+        }, ${delayMs});
+      });
+    })();<\/script>`;
+}
+
+test('F-632: Ashby\'s school search is watched until it answers, and its stacked rows are read with spaces', async () => {
+  const result = await fill(ashbySchoolFixture([
+    ['Lakeside University', 'United States', 'lakeside.edu'],
+    ['Germantown Academy', 'United States', 'germantownacademy.net'],
+    ['Saint Aloysius Lakeside National University', 'Peru', 'unica.edu.pe'],
+  ], 1000));
+  const chosen = await page.evaluate(() => document.querySelector('.value').textContent);
+  assert.equal(chosen, 'Lakeside University');
+  assert.equal(result.filled, 1);
+});
+
+test('ORACLE RECRUITING CLOUD: a lookup whose rows are role=gridcell is read, and a ZIP is searched by its first three digits (Denso, F-695)', async () => {
+  // Oracle's cx-select: the input names its list by aria-controls, the list is
+  // a role="grid" of role="gridcell" rows, and the ZIP lookup only answers a
+  // search. Every Oracle dropdown read "0 rows" before this.
+  await fill(`
+    <label for="postalCode-32">ZIP Code</label>
+    <div class="cx-select-container"><input id="postalCode-32" name="postalCode" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="postalCode-32-listbox" aria-expanded="false" class="cx-select-input"></div>
+    <div id="postalCode-32-listbox" role="grid" class="cx-select__list"></div>
+    <script>(() => {
+      const input = document.getElementById('postalCode-32');
+      const grid = document.getElementById('postalCode-32-listbox');
+      const ZIPS = ['99201, Springfield, Springfield, WA', '12345, Springfield, Springfield, WA', '99203, Springfield, Springfield, WA'];
+      input.addEventListener('input', () => {
+        grid.innerHTML = '';
+        window.__searched = input.value;
+        if (input.value.length < 3) return;   // a lookup: nothing for one digit
+        for (const z of ZIPS.filter((x) => x.startsWith(input.value))) {
+          const row = document.createElement('div'); row.setAttribute('role', 'row');
+          const cell = document.createElement('div'); cell.setAttribute('role', 'gridcell'); cell.className = 'cx-select__list-item ';
+          cell.innerHTML = '<div class="cx-select__list-item-container"><span class="cx-select__list-item--content"><span>' + z + '</span></span></div>';
+          cell.addEventListener('click', () => { input.value = z; grid.innerHTML = ''; });
+          row.appendChild(cell); grid.appendChild(row);
+        }
+      });
+    })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/zip/i.test(a.label)) { a.action = 'prompt'; a.value = '12345'; a.promptKind = 'combo'; } return plan; }` });
+  const got = await page.evaluate(() => ({ value: document.getElementById('postalCode-32').value, searched: window.__searched }));
+  assert.equal(got.value, '12345, Springfield, Springfield, WA');
+});
+
+test('F-735: an Oracle date\'s MONTH and YEAR share one name, and each gets its own list (Nokia, 2026-10-16)', async () => {
+  const sel = (part, opts) => `
+    <span id="lab-${part}">${part === 'month' ? 'Month' : 'Year'}</span>
+    <div class="cx-select-container"><input id="${part}-startDate-42" name="startDate" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid"
+      aria-controls="${part}-startDate-42-listbox" aria-expanded="false" aria-labelledby="sd-l lab-${part}" class="cx-select-input"></div>
+    <div id="${part}-startDate-42-listbox" role="grid" class="cx-select__list" style="display:none">${opts.map((o) =>
+      `<div role="row"><div role="gridcell" class="cx-select__list-item "><div class="cx-select__list-item-container"><span class="cx-select__list-item--content">${o}</span></div></div></div>`).join('')}</div>`;
+  await fill(`<form><span id="sd-l">Start Date</span>
+    ${sel('month', ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August'])}
+    ${sel('year', ['2027', '2026', '2025', '2024', '2023'])}</form>
+    <script>(() => {
+      for (const part of ['month', 'year']) {
+        const box = document.getElementById(part + '-startDate-42'); const grid = document.getElementById(part + '-startDate-42-listbox');
+        const open = () => { grid.style.display = 'block'; box.setAttribute('aria-expanded', 'true'); };
+        box.addEventListener('mousedown', open); box.addEventListener('click', open); box.addEventListener('focus', open);
+        grid.addEventListener('click', (e) => { const c = e.target.closest('[role=gridcell]'); if (!c) return; box.value = c.textContent.trim(); grid.style.display = 'none'; box.setAttribute('aria-expanded', 'false'); });
+      }
+    })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) {
+      if (/Month/.test(a.label)) Object.assign(a, { action: 'prompt', value: 'May', promptKind: 'combo' });
+      else if (/Year/.test(a.label)) Object.assign(a, { action: 'prompt', value: '2026', promptKind: 'combo' }); } return plan; }` });
+  const got = await page.evaluate(() => [document.getElementById('month-startDate-42').value, document.getElementById('year-startDate-42').value]);
+  assert.deepEqual(got, ['May', '2026'], 'the year went into the YEAR box');
+});
+
+test('ANOTHER FIELD\'S OPEN LIST IS NEVER READ AS THIS ONE\'S (John Deere Eightfold, F-697)', async () => {
+  // Veteran's list (list-30) is still open; State names list-32, which opens
+  // only on a mousedown. State must open its own and take Washington.
+  await fill(`
+    <form>
+      <label id="st-l" for="input-34">State / Province</label>
+      <input id="input-34" role="combobox" aria-controls="list-32" aria-expanded="false" aria-labelledby="st-l" type="text">
+      <ul id="list-32" role="listbox" style="display:none"><li role="option">Oregon</li><li role="option">Washington</li></ul>
+      <ul id="list-30" role="listbox"><li role="option">I am not a Veteran</li><li role="option">I prefer not to answer</li></ul>
+      <input aria-controls="list-30" role="combobox" style="position:absolute;left:-9999px">
+    </form>
+    <script>(() => {
+      const box = document.getElementById('input-34'); const list = document.getElementById('list-32');
+      box.addEventListener('mousedown', () => { list.style.display = 'block'; box.setAttribute('aria-expanded', 'true'); });
+      list.addEventListener('click', (e) => { const r = e.target.closest('[role=option]'); if (!r) return; box.value = r.textContent; list.style.display = 'none'; });
+    })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/state/i.test(a.label)) { a.action = 'prompt'; a.value = 'Washington'; a.promptKind = 'combo'; } return plan; }` });
+  assert.equal(await page.evaluate(() => document.getElementById('input-34').value), 'Washington');
+});
+
+test('F-716: a dropdown that cannot open while the page redraws gets a second try once it settles (Lam, signed in)', async () => {
+  // Lam's signed-in form loads his saved profile after the page appears; until
+  // then this list ignores every open. The first pass finds no rows; the
+  // second try, after the page settles, must open it and CLICK Washington.
+  await fill(`
+    <form>
+      <label id="st-l" for="input-34">State / Province</label>
+      <input id="input-34" role="combobox" aria-controls="list-32" aria-expanded="false" aria-labelledby="st-l" type="text">
+      <ul id="list-32" role="listbox" style="display:none"><li role="option">Oregon</li><li role="option">Washington</li></ul>
+    </form>
+    <script>(() => {
+      const box = document.getElementById('input-34'); const list = document.getElementById('list-32');
+      const readyAt = Date.now() + 3500;
+      box.addEventListener('mousedown', () => { if (Date.now() < readyAt) return; list.style.display = 'block'; box.setAttribute('aria-expanded', 'true'); });
+      // Typed text is not an answer here: only a clicked row is.
+      box.addEventListener('input', () => { box.value = ''; });
+      list.addEventListener('click', (e) => { const r = e.target.closest('[role=option]'); if (!r) return; window.__clicked = r.textContent; box.value = r.textContent; list.style.display = 'none'; });
+    })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/state/i.test(a.label)) { a.action = 'prompt'; a.value = 'Washington'; a.promptKind = 'combo'; } return plan; }` });
+  assert.equal(await page.evaluate(() => window.__clicked || ''), 'Washington');
+  assert.equal(await page.evaluate(() => document.getElementById('input-34').value), 'Washington');
+});
+
 test('a combobox is never left with a stray value when the pick fails', async () => {
   // A dropdown that shows "Alex" in its search box reads, to the human opening
   // the application, as an answer nobody gave.
@@ -1039,6 +1317,23 @@ test('A REFORMATTED VALUE COUNTS AS FILLED', async () => {
   assert.notEqual(got, '+1 (555) 000-0000', 'and reformatted it, which is the point of this test');
   assert.equal(result.filled, 1, 'a reformat is not a rejection');
   assert.equal((result.unanswered || []).length, 0, 'and must not be reported as a failure');
+});
+
+test('a phone the page rewrites with or without its country code counts as filled (ADP, 2026-10-16)', async () => {
+  const result = await fill(`
+    <form>
+      <label for="phone">Phone</label>
+      <input id="phone" type="tel">
+      <script>(() => {
+        const el = document.getElementById('phone');
+        // ADP's box keeps the national number in its own spacing, country code elsewhere.
+        el.addEventListener('input', () => { const d = el.value.replace(/\\D/g, '').replace(/^1(?=\\d{10}$)/, ''); const t = d.length === 10 ? d.slice(0, 3) + ' ' + d.slice(3, 6) + ' ' + d.slice(6) : d; if (t !== el.value) el.value = t; });
+      })();<\/script>
+    </form>`);
+  const got = await page.evaluate(() => document.getElementById('phone').value);
+  assert.equal(got, '555 000 0000', 'the page reformatted it without the +1');
+  assert.equal(result.filled, 1, 'a reformat that drops the country code is not a rejection');
+  assert.equal((result.unanswered || []).length, 0);
 });
 
 test('a value the page DISCARDS is still reported', async () => {
@@ -1101,12 +1396,31 @@ test('THE SECOND PASS IS HANDED ONLY THE REVEALED FIELDS', () => {
     'it must be able to take a subset at all');
   assert.match(src, /const fields = only \|\| discover\(\)/,
     'and use that subset instead of re-reading the page');
-  assert.match(src, /await fillCurrentStep\(revealed, \{ keepExisting: auto, entries: false \}\)/,
+  assert.match(src, /await fillCurrentStep\(revealed, \{ keepExisting: auto, entries: false, readBack: true \}\)/,
     'the second pass must pass the revealed fields, not re-plan everything — under the same follow-along rule as the first');
 
   // The guard: `revealed` has to be what its name says.
-  assert.match(src, /const revealed = discover\(\)\.filter\(\(f\) => !seen\.has\(/,
-    'revealed means "not seen on the first pass"');
+  // …counted, not a set (F-611): a row the pass added repeats the labels of
+  // the row before it, and those fields are new all the same.
+  assert.match(src, /const revealed = discover\(\)\.filter\(\(f\) => \{/,
+    'revealed means "more of this label than the first pass saw"');
+  assert.match(src, /if \(n > \(seenCount\.get\(k\) \|\| 0\)\) return true;/);
+  // …plus a list that was empty on the first pass and still unanswered (Honda's
+  // State, 2026-10-02) — and nothing else that was already there.
+  assert.match(src, /return starved\.has\(k\) && el\?\.tagName === 'SELECT' && el\.options\.length > 2 && !el\.value;/);
+});
+
+test('A REVEALED FIELD WITH A LABEL ALREADY ON THE PAGE IS STILL ANSWERED (HP, F-611)', async () => {
+  // Answering the first row's Overall adds a second row with its own Overall —
+  // the shape of HP's language rows, where the second stayed empty and
+  // Workday refused the step.
+  await fill(`
+    <label for="o1">Overall</label>
+    <select id="o1"><option>Select One</option><option>3 - Intermediate</option><option>4 - Fluent</option></select>
+    <div id="more"></div>
+    <script>document.getElementById('o1').addEventListener('change', () => { if (!document.getElementById('o2')) document.getElementById('more').innerHTML = '<label for="o2">Overall</label><select id="o2"><option>Select One</option><option>3 - Intermediate</option><option>4 - Fluent</option></select>'; });<\/script>`);
+  assert.equal(await page.evaluate(() => document.getElementById('o1').value), '4 - Fluent');
+  assert.equal(await page.evaluate(() => document.getElementById('o2')?.value), '4 - Fluent', 'the second row\'s Overall is answered too');
 });
 
 // ── the button-only Workday dropdown, driven for real (F-297) ─────────
@@ -1194,6 +1508,156 @@ test('A LANGUAGE DROPDOWN TAKES ITS TOP RUNG, AND A MISS SAYS WHAT WAS ON OFFER 
   assert.equal(got.read, 'Select One', 'a list with no ladder in it is not guessed at');
   const miss = result.unanswered.find((u) => /Reading/.test(u)) || '';
   assert.match(miss, /the list offered: Two \| Three/, 'the report names what the list held');
+});
+
+test('THE SECOND LANGUAGE ROW\'S LADDERS ARE ANSWERED, THOUGH THEY SHARE ROW 1\'S KEYS (Flowserve, F-670)', async () => {
+  // Workday repeats a field's formField- key in every added row; only the
+  // trigger's id ("language-396--…", "language-397--…") differs. Row 2's
+  // Reading/Speaking/Writing were skipped as already seen, and the step was
+  // refused on all three.
+  const ladder = ['1 - Beginner', '3 - Intermediate', '5 - Fluent'];
+  const row = (n, field) => `
+    <div data-automation-id="formField-6f7f${field}">
+      <label>${field[0].toUpperCase()}${field.slice(1)} *</label>
+      <button id="language-${n}--6f7f${field}" aria-haspopup="listbox" aria-controls="lb-${n}-${field}" aria-expanded="false">Select One</button>
+      <input type="text" style="display:none">
+    </div>
+    <ul id="lb-${n}-${field}" role="listbox" style="display:none">${ladder.map((o) => `<li role="option">${o}</li>`).join('')}</ul>`;
+  const fields = ['reading', 'speaking', 'writing'];
+  await fill(`
+    <form>
+      <h3>Languages 1</h3>${fields.map((f) => row(396, f)).join('')}
+      <h3>Languages 2</h3>${fields.map((f) => row(397, f)).join('')}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>
+    <script>
+      for (const t of document.querySelectorAll('button[aria-haspopup]')) {
+        const lb = document.getElementById(t.getAttribute('aria-controls'));
+        t.addEventListener('click', () => { lb.style.display = lb.style.display === 'none' ? 'block' : 'none'; });
+        lb.addEventListener('click', (e) => { const r = e.target.closest('[role="option"]'); if (!r) return; t.textContent = r.textContent; lb.style.display = 'none'; });
+      }
+    <\/script>`);
+  const got = await page.evaluate(() => [...document.querySelectorAll('button[aria-haspopup]')].map((b) => `${b.id.split('--')[0]} ${b.textContent.trim()}`));
+  assert.deepEqual(got, [
+    'language-396 5 - Fluent', 'language-396 5 - Fluent', 'language-396 5 - Fluent',
+    'language-397 5 - Fluent', 'language-397 5 - Fluent', 'language-397 5 - Fluent',
+  ]);
+});
+
+// ── F-618: a menu opened from a button, 2026-09-27 ────────────────────────
+//
+// HP's Degree menu spells a bachelor's "Bachelors (±16 years of education)",
+// and the button path looked only for "Bachelor of Science" — every HP and
+// HPE fill said "could not set". Hyve's "How Did You Hear About Us?" took 25 s
+// because each spelling reopened the menu and waited out its cap. And a click
+// was reported as a commit: Samsung's Reading went out empty, unreported.
+
+/** A Workday prompt whose rows ignore the first `ignore` clicks (Infinity: every click). */
+const wdPromptStubborn = (id, question, options, ignore) => `
+  <div data-automation-id="formField-${id}">
+    <label>${question} *</label>
+    <button id="trigger-${id}" aria-haspopup="listbox" aria-controls="lb-${id}" aria-expanded="false">Select One</button>
+  </div>
+  <ul id="lb-${id}" role="listbox" style="display:none">
+    ${options.map((o) => `<li role="option">${o}</li>`).join('')}
+  </ul>
+  <script>
+    (() => {
+      const t = document.getElementById('trigger-${id}');
+      const lb = document.getElementById('lb-${id}');
+      let clicks = 0;
+      t.addEventListener('click', () => { lb.style.display = lb.style.display === 'none' ? 'block' : 'none'; });
+      lb.addEventListener('click', (e) => {
+        const row = e.target.closest('[role="option"]');
+        if (!row) return;
+        clicks += 1;
+        lb.style.display = 'none';
+        if (clicks > ${ignore === Infinity ? 'Infinity' : ignore}) t.textContent = row.textContent;
+      });
+    })();
+  </script>`;
+
+test('F-735: a degree menu of abbreviations takes "B. Sc." for a Bachelor of Science (KION, 2026-10-16)', async () => {
+  const kion = ['Secondary School', 'HS', 'Apprenticeship', 'B. A.', 'B. Eng.', 'B. Sc.', 'LL. B.', 'M. A.', 'M. Eng.', 'M. Sc.', 'MBA', 'PhD'];
+  const result = await fill(`
+    <form>
+      ${wdPrompt('degree', 'Degree', kion)}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>`, {
+    editPlan: `(plan) => { for (const a of plan.actions) if (a.label === 'Degree') Object.assign(a, { action: 'prompt', value: 'Bachelor of Science', values: ['Bachelor of Science', "Bachelor's", 'Bachelors', "Bachelor's Degree", 'Bachelor', 'B. Sc.', 'B.Sc.', 'BSc', 'B.S.', 'BS'] }); return plan; }`,
+  });
+  const got = await page.evaluate(() => document.getElementById('trigger-degree').textContent.trim());
+  assert.equal(got, 'B. Sc.');
+  assert.deepEqual(result.unanswered.filter((u) => /Degree/.test(u)), []);
+});
+
+test('F-618: a button menu takes the form\'s own spelling of his degree, in one opening', async () => {
+  const hp = ['Other (other type of degree or diploma)', 'High School or GED (±11 years of education)', 'Technical Diploma (±12 years of education)', 'Associates (±14 years of education)', 'Bachelors (±16 years of education)', 'Masters (±18 years of education)'];
+  const began = Date.now();
+  const result = await fill(`
+    <form>
+      ${wdPrompt('degree', 'Degree', hp)}
+      ${wdPrompt('source', 'How Did You Hear About Us?', ['Company Career Site', 'Employee Referral', 'Recruiter', 'Other'])}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>`, {
+    // The plan HP's Degree got on 2026-09-27, word for word.
+    editPlan: `(plan) => { for (const a of plan.actions) if (a.label === 'Degree') Object.assign(a, { action: 'prompt', value: 'Bachelor of Science', values: ['Bachelor of Science', "Bachelor's", 'Bachelors', "Bachelor's Degree", 'Bachelor'] }); return plan; }`,
+  });
+  const took = Date.now() - began;
+  const got = await page.evaluate(() => ({
+    degree: document.getElementById('trigger-degree').textContent.trim(),
+    source: document.getElementById('trigger-source').textContent.trim(),
+  }));
+  assert.equal(got.degree, 'Bachelors (±16 years of education)');
+  assert.equal(got.source, 'Company Career Site', 'a tenant without LinkedIn lands on its career site');
+  assert.deepEqual(result.unanswered.filter((u) => /Degree|Hear/.test(u)), []);
+  assert.ok(took < 12000, `two menus, not two dozen openings: ${took} ms`);
+});
+
+test('F-618: "No" is never found inside "NOT" — HP\'s veteran menu', async () => {
+  const vets = ['I DO NOT WISH TO SELF-IDENTIFY', 'I IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN', 'I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERANS LISTED ABOVE', 'I am not a Veteran.'];
+  await fill(`
+    <form>
+      ${wdPrompt('vet1', 'Are you a protected U.S. Military Veteran?', vets)}
+      ${wdPrompt('vet2', 'Veteran status', vets)}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>`, {
+    // 2026-09-26: the export rule's "No"; 2026-09-27: two answers joined by a comma.
+    editPlan: `(plan) => { for (const a of plan.actions) { if (a.label.startsWith('Are you')) Object.assign(a, { action: 'prompt', value: 'No', values: undefined }); if (a.label === 'Veteran status') Object.assign(a, { action: 'prompt', value: 'I am not a Veteran.', values: ['I am not a Veteran.', 'I IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN'] }); } return plan; }`,
+  });
+  const got = await page.evaluate(() => [document.getElementById('trigger-vet1').textContent.trim(), document.getElementById('trigger-vet2').textContent.trim()]);
+  assert.ok(!/I IDENTIFY AS/.test(got[0]), `"No" must not claim veteran status: ${got[0]}`);
+  assert.equal(got[1], 'I am not a Veteran.');
+});
+
+test('KLA, 2026-09-24: an answer that is none of a Yes/No menu\'s rows never commits "Yes" (F-623)', async () => {
+  await fill(`
+    <form>
+      ${wdPrompt('hisp', 'Are you Hispanic or Latino - A person of Cuban, Mexican, Puerto Rican, South or Central American, or other Spanish culture or origin regardless of race.', ['Yes', 'No'])}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>`, {
+    // The plan that day: his race, given to the Hispanic question.
+    editPlan: `(plan) => { for (const a of plan.actions) if (/Hispanic/.test(a.label)) Object.assign(a, { action: 'prompt', value: 'Asian', values: undefined }); return plan; }`,
+  });
+  const got = await page.evaluate(() => document.getElementById('trigger-hisp').textContent.trim());
+  assert.notEqual(got, 'Yes', 'never a claim he did not make');
+});
+
+test('F-618: a pick the menu did not keep is tried again, and one it never keeps is reported', async () => {
+  const result = await fill(`
+    <form>
+      ${wdPromptStubborn('read', 'Reading', ['1 - Low', '2 - Medium', '3 - High'], 1)}
+      ${wdPromptStubborn('speak', 'Speaking', ['1 - Low', '2 - Medium', '3 - High'], Infinity)}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>`);
+  const got = await page.evaluate(() => ({
+    read: document.getElementById('trigger-read').textContent.trim(),
+    speak: document.getElementById('trigger-speak').textContent.trim(),
+  }));
+  assert.equal(got.read, '3 - High', 'the second opening lands it');
+  assert.equal(got.speak, 'Select One');
+  assert.ok(result.unanswered.some((u) => /Speaking/.test(u)), `an empty ladder is never counted as filled: ${JSON.stringify(result.unanswered)}`);
+  assert.ok(!result.unanswered.some((u) => /Reading/.test(u)), 'the one that landed is not reported');
 });
 
 test('F-550: A BOX WORKDAY LOST IS RE-ENTERED THE WAY HE DOES IT BY HAND', async () => {
@@ -1297,6 +1761,34 @@ const FOUR = `
     <label for="last_name">Last Name</label><input id="last_name">
     <label for="email">Email</label><input id="email">
     <label for="phone">Phone</label><input id="phone">`;
+
+test('F-573: a NEW step under the same heading is filled; the step he comes Back to is not', async () => {
+  // Wayve's firststage flow (2026-09-24): "Upload CV" and then its questions,
+  // on one path under one heading. The follow-along run called the questions
+  // "a step Jarvis already filled" when only the CV had gone in. And the other
+  // way (F-562, Western Digital): Back to a filled step, redrawn with one more
+  // copy of a box, must still read as the step he is reviewing.
+  const A = `<h2>Apply</h2>${FOUR}`;
+  await fillAs(A, { armed: true, auto: false });
+  const plans = async () => (await sent()).filter((m) => m.type === 'plan').length;
+  const before = await plans();
+  await page.evaluate(() => {
+    document.body.innerHTML = '<h2>Apply</h2><label for="q1">Why this role?</label><textarea id="q1"></textarea>'
+      + '<label for="q2">Portfolio link</label><input id="q2"><label for="q3">Notice period</label><input id="q3">'
+      + '<label for="q4">Desired salary</label><input id="q4">';
+    globalThis.__jarvisRun = { armed: true, auto: true };
+  });
+  const next = await page.evaluate(CONTENT);
+  assert.doesNotMatch(String(next?.stoppedBecause || ''), /already filled/, 'a different step is not the one filled');
+  assert.ok(await plans() > before, 'the new step was planned');
+
+  await page.evaluate((html) => {
+    document.body.innerHTML = `${html}<label for="email2">Email</label><input id="email2">`;
+    globalThis.__jarvisRun = { armed: true, auto: true };
+  }, A);
+  const back = await page.evaluate(CONTENT);
+  assert.match(String(back?.stoppedBecause || ''), /already filled/, 'the step he came back to is his to review');
+});
 
 test('A RUN HE DID NOT START NEVER WRITES OVER WHAT IS ON THE FORM', async () => {
   // After the first pass, everything on the form is either what we wrote or
@@ -1402,7 +1894,7 @@ test('THE WATCHER FILLS THE NEXT STEP AFTER HE PRESSES SAVE AND CONTINUE HIMSELF
   assert.equal(after.onScreen, 'Review', `having filled step two, the walk carried on to the last one: ${JSON.stringify(after)}`);
   const stepTwo = after.left[1];
   assert.equal(stepTwo.email, 'v@example.test', 'step two was filled without a click');
-  assert.equal(stepTwo.school, 'State University');
+  assert.equal(stepTwo.school, 'Lakeside University');
   assert.equal(after.submitted, false, 'SUBMIT IS HIS, on a follow-along run as on any other');
 
   const msgs = await sent();
@@ -1567,6 +2059,72 @@ test('"THANK YOU FOR APPLYING" IS REPORTED AS DONE, structured', async () => {
     <p>We have received your application and will be in touch.</p>`, { armed: true, auto: true });
   assert.ok(result.submitted, 'the worker disarms on this, so it must be a field and not prose');
   assert.equal(result.filled, 0);
+});
+
+test('HIS SUBMIT, THEN A THANK-YOU THAT ARRIVES LATE, on the same URL — reported as sent (Ashby, Capable 2026-10-02)', async () => {
+  await fillAs(`
+    <form id="f" onsubmit="return false"><label for="first_name">First Name</label><input id="first_name">
+    <label for="email">Email</label><input id="email">
+    <button type="submit" id="go">Submit Application</button></form>`, { armed: false, auto: false });
+  // The listeners hang on a reachable worker; the harness's stand-in has no id.
+  await page.evaluate(() => { globalThis.chrome.runtime.id = 'test'; delete globalThis.__jarvisContent; });
+  await page.evaluate(CONTENT);
+  // His press (Playwright's click is trusted). The upload takes a while; the
+  // form is replaced by the thank-you three seconds later.
+  await page.click('#go');
+  await page.evaluate(() => setTimeout(() => {
+    document.getElementById('f').outerHTML = '<h2>Thank you for applying</h2><p>Your application was successfully submitted.</p>';
+  }, 3000));
+  await wait(6000);
+  const msgs = await sent();
+  const done = msgs.find((m) => m.type === 'filled' && m.result?.submitted);
+  assert.ok(done, `the confirmation reaches the worker: ${JSON.stringify(msgs.map((m) => m.type))}`);
+  assert.match(done.result.submitted, /thank you for applying/i);
+});
+
+test('…and a Submit the page refuses (the form stays) reports nothing as sent', async () => {
+  await fillAs(`
+    <form id="f2" onsubmit="return false"><label for="email2">Email</label><input id="email2">
+    <button type="submit" id="go2">Submit Application</button></form>`, { armed: false, auto: false });
+  await page.evaluate(() => { globalThis.chrome.runtime.id = 'test'; delete globalThis.__jarvisContent; });
+  await page.evaluate(CONTENT);
+  await page.click('#go2');
+  await wait(4000);
+  assert.equal((await sent()).some((m) => m.type === 'filled' && m.result?.submitted), false);
+});
+
+test('A REFUSED STEP SENDS THE PAGE\'S RED WORDS to the log, with the box they sit under (his ask, 2026-10-02)', async () => {
+  await fillAs(`
+    <style>.err{color:#c62828}</style>
+    <form id="f3" onsubmit="return false">
+      <div><label for="city">City</label><input id="city"><div id="city-err"></div></div>
+      <div><label for="phone3">Phone</label><input id="phone3"></div>
+      <button type="button" id="next3">Save and Continue</button></form>`, { armed: false, auto: false });
+  await page.evaluate(() => { globalThis.chrome.runtime.id = 'test'; delete globalThis.__jarvisContent; });
+  await page.evaluate(CONTENT);
+  await page.evaluate(() => document.getElementById('next3').addEventListener('click', () => {
+    document.getElementById('city-err').innerHTML = '<span class="err">Please select a city from the list</span>';
+  }));
+  await page.click('#next3');
+  await wait(2200);
+  const reports = (await sent()).filter((m) => m.type === 'page-errors');
+  const hit = reports.flatMap((r) => r.errors.map((e) => ({ ...e, trigger: r.trigger }))).find((e) => /select a city/.test(e.text));
+  assert.ok(hit, `the red line reaches the worker: ${JSON.stringify(reports)}`);
+  assert.equal(hit.how, 'red');
+  assert.match(hit.field, /City/);
+  // The run's own walk may press it first; either way the press is named.
+  assert.match(hit.trigger, /^after (your|Jarvis's) press of "Save and Continue"$/);
+  // …and once only: the 4 s read finds the same line and sends nothing new.
+  await wait(2500);
+  const again = (await sent()).filter((m) => m.type === 'page-errors').flatMap((r) => r.errors).filter((e) => /select a city/.test(e.text));
+  assert.equal(again.length, 1);
+
+  // A message drawn with no press at all (validation on blur) is caught as it appears.
+  await page.evaluate(() => { document.querySelector('#phone3').insertAdjacentHTML('afterend', '<p class="err">Enter a valid phone number</p>'); });
+  await wait(3500);
+  const blur = (await sent()).filter((m) => m.type === 'page-errors' && m.errors.some((e) => /valid phone number/.test(e.text)));
+  assert.equal(blur.length, 1, 'a message that appears on its own is logged too');
+  assert.match(blur[0].trigger, /appeared/);
 });
 
 test('a follow-along run that finds nothing to do leaves the last panel alone', async () => {
@@ -1901,7 +2459,7 @@ test('A COMPONENT FORM\'S EXPERIENCE AND EDUCATION ARE ENTERED BY THEIR LABELS A
   assert.match(got.work[0], /^Mechanical Engineer Intern \| Acme Fab \| Austin, Texas \| 05\/2026 – 08\/2026 \| Designed an inspection fixture\./);
   assert.match(got.work[1], /^Manufacturing Lead \| Test University \| Springfield, Washington \| 08\/2024 – Present \| Ran the shop floor\./);
   assert.equal(got.edu.length, 1, 'the education entry saved');
-  assert.match(got.edu[0], /^State University \| /);
+  assert.match(got.edu[0], /^Lakeside University \| /);
   assert.equal(got.panelOpen, 0, 'no sub-form left open');
   assert.ok(!result.unanswered.some((u) => /Add did not open|Save did not close|could not set/.test(u)), JSON.stringify(result.unanswered));
 
@@ -2138,9 +2696,12 @@ test('F-381: an email-only gate says so, and a real sign-in still says sign in',
         <button type="submit">Next</button>
       </form>
     </main>`);
-  assert.equal(email.signInRequired, true, 'it is still a wall — an account here is his call');
-  assert.match(email.stoppedBecause || '', /asks for your email first/);
+  assert.equal(email.signInRequired, true, 'it is still a wall — Next, and any human check, are his');
+  // FILLED, NOT JUST NAMED (2026-09-24, "icims sucks too"): his email goes in;
+  // pressing Next — the step that starts anything at this employer — is his.
+  assert.match(email.stoppedBecause || '', /your email .*press Next yourself/);
   assert.doesNotMatch(email.stoppedBecause || '', /sign in/i);
+  assert.ok(await page.evaluate(() => document.getElementById('e').value.includes('@')), 'his email is in the box');
   // …AND HIS RESIDENCY IS NOT A CONSENT. The standing yes-to-consent rule must
   // not tick a question of fact.
   const ticked = await page.evaluate(() => document.getElementById('eu').checked);
@@ -2494,4 +3055,373 @@ test('PRESSING NEXT OR SUBMIT SENDS THE FORM AS IT STANDS — read only', async 
   const all = await mine();
   assert.equal(all[all.length - 1].stage, 'submit');
   assert.equal(await page.inputValue('#zip'), '12345', 'reading the form changed nothing on it');
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// F-581 (2026-09-24). Workday's skills search runs on ENTER, and its date
+// boxes keep only what their own model took. Both left fields empty on his
+// forms after F-550/F-552 shipped: skills "nothing matched" on Viavi, ABB and
+// Novanta; the self-identify Date "required" while it showed on screen.
+// These models behave the way the live widgets do — the old code fails them.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Workday's "Type to Add Skills": the lookup runs on Enter (keyCode 13), nothing else. */
+const wdSkillsOnEnter = (taxonomy) => `
+  <div data-automation-id="formField-skills">
+    <label>Type to Add Skills</label>
+    <div data-automation-id="multiSelectContainer">
+      <div data-automation-id="selectedItemList" id="chips"></div>
+      <input data-automation-id="searchBox" id="search" type="text" aria-controls="lb" placeholder="Search">
+    </div>
+  </div>
+  <ul id="lb" role="listbox" style="display:none"></ul>
+  <script>
+    (() => {
+      const TAX = ${JSON.stringify(taxonomy)};
+      const box = document.getElementById('search');
+      const lb = document.getElementById('lb');
+      const chips = document.getElementById('chips');
+      window.__picked = [];
+      box.addEventListener('keydown', (e) => {
+        if (e.keyCode !== 13) return;
+        const q = box.value.trim().toLowerCase();
+        setTimeout(() => {
+          const hits = q ? TAX.filter((t) => t.toLowerCase().includes(q)) : [];
+          lb.innerHTML = hits.length ? hits.map((t) => '<li role="option">' + t + '</li>').join('') : '<li role="option">No Items.</li>';
+          lb.style.display = 'block';
+        }, 150);
+      });
+      lb.addEventListener('click', (e) => {
+        const row = e.target.closest('[role="option"]');
+        if (!row || /No Items/.test(row.textContent)) return;
+        window.__picked.push(row.textContent);
+        const chip = document.createElement('span'); chip.textContent = row.textContent; chips.append(chip);
+        box.value = ''; lb.style.display = 'none';
+      });
+    })();
+  </script>`;
+
+test('F-581: a Workday skills box that searches on Enter gets 10-15 skills, quickly', async () => {
+  const mine = ['SolidWorks', 'Autodesk Inventor', 'Creo', 'AutoCAD', 'GD&T', 'FEA', 'DFM', 'DFA', 'CNC machining', '3-axis milling',
+    'MIG welding', 'TIG welding', 'rapid prototyping', '3D printing', 'robotics integration', 'machine vision', 'PLC', 'metrology', 'Python', 'MATLAB'];
+  const taxonomy = ['SolidWorks', 'Autodesk Inventor', 'PTC Creo', 'AutoCAD', 'Geometric Dimensioning And Tolerancing (GD&T)', 'DFM', 'CNC Machining',
+    'MIG Welding', 'TIG Welding', 'Rapid Prototyping', '3D Printing', 'Machine Vision', 'PLC Programming', 'Metrology', 'Python (Programming Language)', 'MATLAB'];
+  const began = Date.now();
+  const result = await fill(`
+    <form>
+      ${wdSkillsOnEnter(taxonomy)}
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/Skills/.test(a.label)) { a.action = 'prompt'; a.promptKind = 'multi'; a.skills = true; a.values = ${JSON.stringify(mine)}; a.value = 'SolidWorks'; } return plan; }` });
+  const took = Date.now() - began;
+  const picked = await page.evaluate(() => window.__picked);
+  assert.ok(picked.length >= 10 && picked.length <= 15, `10-15 skills, got ${picked.length}: ${picked.join(', ')}`);
+  assert.ok(picked.includes('SolidWorks') && picked.includes('AutoCAD'), picked.join(', '));
+  assert.ok(took < 45000, `the box costs seconds per skill, not minutes: ${took} ms`);
+  assert.equal(result.unanswered.some((u) => /Skills/.test(u)), false);
+});
+
+/**
+ * A Workday date segment: its own model holds the digits. A digit key (with
+ * its keyCode) or text inserted as typing inserts it updates the model; a
+ * value set from outside is shown until the box is left, then redrawn from
+ * the model — the "required" field with a date on screen.
+ */
+const wdDateSegment = (part, { keysOnly = false } = {}) => {
+  const id = part === 'month' ? 'dateSectionMonth-input' : part === 'day' ? 'dateSectionDay-input' : 'dateSectionYear-input';
+  const max = part === 'year' ? 4 : 2;
+  return `<input data-automation-id="${id}" role="spinbutton" data-part="${part}" data-max="${max}" data-keys-only="${keysOnly ? 1 : 0}" placeholder="${part === 'year' ? 'YYYY' : part === 'month' ? 'MM' : 'DD'}">`;
+};
+const WD_DATE_MODEL = `<script>
+  for (const box of document.querySelectorAll('input[data-part]')) {
+    const max = Number(box.dataset.max); box.dataset.model = '';
+    // A select-all then a digit starts the segment over, as on Workday.
+    box.addEventListener('focus', () => { box.dataset.fresh = '1'; });
+    box.addEventListener('keydown', (e) => {
+      if (e.keyCode >= 48 && e.keyCode <= 57) {
+        e.preventDefault();
+        const was = box.dataset.fresh === '1' ? '' : box.dataset.model;
+        box.dataset.fresh = '0';
+        box.dataset.model = (was + String.fromCharCode(e.keyCode)).slice(-max); box.value = box.dataset.model;
+      }
+    });
+    box.addEventListener('input', (e) => {
+      if (box.dataset.keysOnly === '1') return;
+      if (e.inputType === 'insertText') box.dataset.model = box.value.replace(/[^0-9]/g, '').slice(-max);
+    });
+    box.addEventListener('blur', () => { box.value = box.dataset.model; });
+  }
+</script>`;
+
+const dateField = (id, opts) => `
+  <div data-automation-id="formField-${id}">
+    <label>Date</label>
+    <div data-automation-id="dateInputWrapper">${['month', 'day', 'year'].map((p) => wdDateSegment(p, opts)).join('')}</div>
+  </div>`;
+
+const todayParts = () => { const d = new Date(); return { month: String(d.getMonth() + 1).padStart(2, '0'), day: String(d.getDate()).padStart(2, '0'), year: String(d.getFullYear()) }; };
+const planToday = `(plan) => { const d = new Date(); const t = { month: String(d.getMonth() + 1).padStart(2, '0'), day: String(d.getDate()).padStart(2, '0'), year: String(d.getFullYear()) };
+  for (const a of plan.actions) if (/^Date/.test(a.label) && a.datePart) { a.action = 'fill'; a.value = t[a.datePart]; } return plan; }`;
+
+test('F-581: a Workday date keeps its digits after the box is left (typed as typing inserts them)', async () => {
+  const result = await fill(`<form>${dateField('dateSignedOn')}<button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>${WD_DATE_MODEL}`, { editPlan: planToday });
+  const model = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => b.dataset.model || b.value));
+  const t = todayParts();
+  assert.deepEqual(model.map(Number), [t.month, t.day, t.year].map(Number), `Workday's model holds the date: ${model.join('/')}`);
+  assert.equal(result.unanswered.some((u) => /Date/.test(u)), false, result.unanswered.join(' · '));
+});
+
+test('F-581: …and a box that takes only KEYS gets digits with their key codes', async () => {
+  const result = await fill(`<form>${dateField('dateSignedOn', { keysOnly: true })}<button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>${WD_DATE_MODEL}`, { editPlan: planToday });
+  const model = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => b.dataset.model || b.value));
+  const t = todayParts();
+  assert.deepEqual(model.map(Number), [t.month, t.day, t.year].map(Number), `keys only: ${model.join('/')}`);
+  assert.equal(result.unanswered.some((u) => /Date/.test(u)), false, result.unanswered.join(' · '));
+});
+
+test('F-618: a date part the page turns into something else is named with both values', async () => {
+  // HP, 2026-09-27: 06 / 01 / 2027 typed, the form held 6 / 1 / 2006, and the
+  // report said only "the page did not keep the value".
+  const result = await fill(`<form>${dateField('availableFrom')}<button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>${WD_DATE_MODEL}
+    <script>
+      const y = document.querySelector('input[data-part="year"]');
+      y.addEventListener('blur', () => { y.value = '2006'; y.dataset.model = '2006'; });
+    </script>`, { editPlan: `(plan) => { const v = { month: '06', day: '01', year: '2027' }; for (const a of plan.actions) if (a.datePart) { a.action = 'fill'; a.value = v[a.datePart]; } return plan; }` });
+  const model = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => b.dataset.model || b.value));
+  assert.deepEqual(model.slice(0, 2).map(Number), [6, 1], `the month and day hold: ${model.join("/")} · ${result.unanswered.join(" · ")}`);
+  assert.ok(result.unanswered.some((u) => /year box reads "2006" — it should be 2027/.test(u)), result.unanswered.join(' · '));
+});
+
+test('F-633: a box that holds "6" for "06", or "90000" for "$90000/year", kept the answer', async () => {
+  // Onto Innovation's Workday, 2026-10-01: three "fix it before you submit"
+  // lines over a step that held exactly the answer.
+  const result = await fill(`<form>${dateField('availableFrom')}
+      <label for="pay">What is your desired annual salary?</label><input id="pay" type="text">
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>${WD_DATE_MODEL}
+    <script>
+      for (const b of document.querySelectorAll('input[data-part="month"], input[data-part="day"]')) {
+        b.addEventListener('blur', () => { if (/^\\d+$/.test(b.value)) { b.value = String(Number(b.value)); b.dataset.model = b.value; } });
+      }
+      const pay = document.getElementById('pay');
+      pay.addEventListener('blur', () => { pay.value = pay.value.replace(/\\D/g, ''); });
+    </script>`, { editPlan: `(plan) => { const v = { month: '06', day: '01', year: '2027' }; for (const a of plan.actions) { if (a.datePart) { a.action = 'fill'; a.value = v[a.datePart]; } if (/salary/i.test(a.label)) { a.action = 'fill'; a.value = '$90000/year'; } } return plan; }` });
+  const held = await page.evaluate(() => [document.querySelector('input[data-part="month"]').value, document.querySelector('input[data-part="day"]').value, document.getElementById('pay').value]);
+  assert.deepEqual(held, ['6', '1', '90000'], 'the fixture behaves as Onto\'s page did');
+  assert.ok(!result.unanswered.some((u) => /box reads|did not keep/.test(u)), result.unanswered.join(' · '));
+});
+
+test('F-581: a signature date is taken from the calendar\'s Today button when there is one', async () => {
+  await fill(`<form>
+      <div data-automation-id="formField-dateSignedOn">
+        <label>Date</label>
+        <div data-automation-id="dateInputWrapper">${['month', 'day', 'year'].map((p) => wdDateSegment(p, { keysOnly: true })).join('')}</div>
+        <div data-automation-id="dateIcon" role="button" id="icon" onclick="document.getElementById('picker').style.display='block'"></div>
+      </div>
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>
+    <div data-automation-id="datePicker" id="picker" style="display:none">
+      <button type="button" data-automation-id="datePickerSelectedToday" id="today">Today</button>
+    </div>
+    ${WD_DATE_MODEL}
+    <script>
+      document.getElementById('today').addEventListener('click', () => {
+        const d = new Date(); const t = { month: String(d.getMonth() + 1).padStart(2, '0'), day: String(d.getDate()).padStart(2, '0'), year: String(d.getFullYear()) };
+        for (const b of document.querySelectorAll('input[data-part]')) { b.value = t[b.dataset.part]; b.dataset.model = t[b.dataset.part]; }
+        document.getElementById('picker').style.display = 'none';
+        window.__pickedToday = (window.__pickedToday || 0) + 1;
+      });
+    </script>`, { editPlan: planToday });
+  const got = await page.evaluate(() => ({ n: window.__pickedToday || 0, model: [...document.querySelectorAll('input[data-part]')].map((b) => b.dataset.model) }));
+  const t = todayParts();
+  assert.equal(got.n, 1, 'the calendar was used once for the whole date');
+  assert.deepEqual(got.model.map(Number), [t.month, t.day, t.year].map(Number));
+});
+
+test('F-690: the calendar\'s Today is kept when Workday\'s day is already tomorrow (Flowserve, 5 PM Pacific)', async () => {
+  // Workday's today is not his clock's: at 17:10 in Springfield its calendar set
+  // 10/4, the check wanted 10/3, and typing 10/03 over it got "Enter today's date".
+  await fill(`<form>
+      <div data-automation-id="formField-dateSignedOn">
+        <label>Date</label>
+        <div data-automation-id="dateInputWrapper">${['month', 'day', 'year'].map((p) => wdDateSegment(p, { keysOnly: true })).join('')}</div>
+        <div data-automation-id="dateIcon" role="button" id="icon" onclick="document.getElementById('picker').style.display='block'"></div>
+      </div>
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>
+    <div data-automation-id="datePicker" id="picker" style="display:none">
+      <button type="button" data-automation-id="datePickerSelectedToday" id="today">Today</button>
+    </div>
+    ${WD_DATE_MODEL}
+    <script>
+      document.getElementById('today').addEventListener('click', () => {
+        const d = new Date(Date.now() + 24 * 3600 * 1000);
+        const t = { month: String(d.getMonth() + 1).padStart(2, '0'), day: String(d.getDate()).padStart(2, '0'), year: String(d.getFullYear()) };
+        for (const b of document.querySelectorAll('input[data-part]')) { b.value = t[b.dataset.part]; b.dataset.model = t[b.dataset.part]; }
+        document.getElementById('picker').style.display = 'none';
+      });
+    </script>`, { editPlan: planToday });
+  const model = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => Number(b.dataset.model)));
+  const d = new Date(Date.now() + 24 * 3600 * 1000);
+  assert.deepEqual(model, [d.getMonth() + 1, d.getDate(), d.getFullYear()], 'Workday\'s date stands; his day is not typed over it');
+});
+
+test('F-581: "How Did You Hear About Us?" lands on LinkedIn under Social Media, past another field\'s list left open', async () => {
+  // Wolfspeed, 2026-09-24: the list read for this field held "United States
+  // of America (+1)" — the phone-code prompt's rows, still open in Workday's
+  // shared portal — and LinkedIn never landed. His rule: LinkedIn first.
+  const result = await fill(`
+    <main id="mainContent">
+      <form>
+        <div data-automation-id="formField-source">
+          <label>How Did You Hear About Us? *</label>
+          <div data-automation-id="multiSelectContainer">
+            <div data-automation-id="selectedItemList" id="chips"></div>
+            <input data-automation-id="searchBox" id="src" type="text">
+          </div>
+        </div>
+        <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+      </form>
+    </main>
+    <div id="stale" data-automation-id="activeListContainer">
+      <div data-automation-id="promptOption" role="option">United States of America (+1)</div>
+      <div data-automation-id="promptOption" role="option">Canada (+1)</div>
+    </div>
+    <div id="lb" style="display:none"></div>
+    <script>
+      (() => {
+        const TOP = ['Campus Campaign', 'Career Websites', 'Company Career Site', 'Social Media', 'Employee Referral'];
+        const SUB = { 'Career Websites': ['Glassdoor', 'Indeed', 'ZipRecruiter'], 'Social Media': ['Facebook', 'Instagram', 'LinkedIn', 'Twitter'] };
+        const lb = document.getElementById('lb');
+        // Workday closes an open list on a press anywhere outside it.
+        document.addEventListener('mousedown', (e) => { const s = document.getElementById('stale'); if (s && !s.contains(e.target)) s.remove(); }, true);
+        const paint = (rows) => {
+          lb.innerHTML = '';
+          for (const t of rows) {
+            const d = document.createElement('div');
+            d.setAttribute('data-automation-id', 'promptOption'); d.setAttribute('role', 'option'); d.textContent = t;
+            d.onclick = () => {
+              if (SUB[t]) { paint(SUB[t]); return; }
+              if (TOP.includes(t) && t !== 'Company Career Site') return;
+              document.getElementById('chips').textContent = t; lb.style.display = 'none';
+            };
+            lb.append(d);
+          }
+          lb.style.display = 'block';
+        };
+        document.getElementById('src').addEventListener('click', () => paint(TOP));
+      })();
+    <\/script>`);
+  const chips = await page.evaluate(() => document.getElementById('chips').textContent.trim());
+  assert.equal(chips, 'LinkedIn', `LinkedIn first, found one level down; the field holds "${chips}"`);
+  assert.deepEqual(result.unanswered, [], result.unanswered.join(' · '));
+});
+
+test('READ BACK: an answer the page drops after it was filled is filled again, and one that will not hold is named', async () => {
+  // The first time the phone number is typed, the page re-renders and empties
+  // the first name — a later field undoing an earlier one, as a re-render does.
+  const result = await fill(`
+    <form>
+      <label for="fn">First Name *</label><input id="fn" name="firstName" required>
+      <label for="ph">Phone *</label><input id="ph" name="phone" type="tel" required>
+      <label for="city">City *</label><input id="city" name="city" required>
+      <button type="submit">Submit</button>
+    </form>
+    <script>
+      let once = false;
+      document.getElementById('ph').addEventListener('input', () => { if (!once) { once = true; setTimeout(() => { document.getElementById('fn').value = ''; }, 0); } });
+      // City never keeps anything: the model behind it refuses every value.
+      document.getElementById('city').addEventListener('blur', () => { setTimeout(() => { document.getElementById('city').value = ''; }, 0); });
+    </script>`);
+  const got = await page.evaluate(() => ({ fn: document.getElementById('fn').value, city: document.getElementById('city').value }));
+  assert.ok(got.fn.trim(), `the dropped first name was filled again: "${got.fn}"`);
+  assert.ok(result.unanswered.some((u) => /City/.test(u)), `the box that would not hold is named: ${result.unanswered.join(' · ')}`);
+});
+
+test('WERFEN (iCIMS): email in, the CA box for a CA job, then the privacy "I accept" it reveals — captcha and Next untouched', async () => {
+  // Live, careers-werfen.icims.com/jobs/10977/…/login (San Diego), 2026-09-24,
+  // laid out as the page lays it out: Email; "If you are a California (CA)
+  // resident, or applying for a position in CA, please check this box."; and a
+  // #gdpr_container, display:none until that box is ticked, holding the
+  // privacy-notice links and "I accept". "icims sucks too."
+  const r = await fill(`
+    <div class="modal-body">
+      <h1>Enter Your Information</h1>
+      <form id="enterEmailForm" class="iCIMS_SignIn" action="/jobs/10977/associate-systems-engineer/login" method="post">
+        <label for="email">Email</label><input id="email" class="form-control" name="css_loginName" type="email">
+        <div class="checkbox"><label><input type="checkbox" id="eu_resident" name="eu_resident"> If you are a California (CA) resident, or applying for a position in CA, please check this box.</label>
+          <p>Indicate whether or not you are a California (CA) resident.</p></div>
+        <div id="gdpr_container" style="display:none">
+          <p><a href="#n1">Click here</a> if you are an external candidate applying to a position based in California with Werfen.</p>
+          <p><a href="#n2">Click here</a> if you are an employee of Werfen applying to a position in California.</p>
+          <div class="checkbox gdpr_wrapper"><label><input type="checkbox" id="accept_gdpr" name="accept_gdpr"> I accept</label>
+            <p>You must indicate that you have read the privacy notice and consent to the processing of your personal data before you can continue.</p></div>
+        </div>
+        <textarea name="h-captcha-response" id="hc" style="display:none"></textarea>
+        <button type="submit" id="next" onclick="window.__pressed = 1">Next</button>
+      </form>
+    </div>
+    <script>
+      document.getElementById('eu_resident').addEventListener('change', (e) => { document.getElementById('gdpr_container').style.display = e.target.checked ? 'block' : 'none'; });
+    </script>`, {
+    // The posting's location comes from the store on a real run; the harness
+    // plans without one, so the San Diego answer is given here.
+    editPlan: `(plan) => { for (const a of plan.actions) if (/California \\(CA\\) resident/.test(a.label)) { a.action = 'check'; a.value = 'checked'; } return plan; }`,
+  });
+  const got = await page.evaluate(() => ({
+    email: document.getElementById('email').value,
+    ca: document.getElementById('eu_resident').checked,
+    gdpr: document.getElementById('accept_gdpr').checked,
+    captcha: document.getElementById('hc').value,
+    pressed: !!window.__pressed,
+  }));
+  assert.ok(got.email.includes('@'), 'his email');
+  assert.equal(got.ca, true, 'the job is in California');
+  assert.equal(got.gdpr, true, 'the privacy consent it revealed is ticked — his standing yes');
+  assert.equal(got.captcha, '', 'the human check is never touched');
+  assert.equal(got.pressed, false, 'Next is his');
+  assert.equal(r.signInRequired, true);
+});
+
+// LAST IN THE FILE ON PURPOSE: it freezes the page clock, which would skew any
+// later test that compares the page's date with the test's own.
+test('F-706: a Workday signature date with no Today button is typed from the UTC clock — Workday\'s today', async () => {
+  // 17:30 on Oct 3 in Springfield is already Oct 4 to Workday (Flowserve, F-690).
+  await page.clock.setFixedTime(new Date('2026-10-04T00:30:00Z'));
+  await fill(`<form>${dateField('dateSignedOn', { keysOnly: true })}<button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>${WD_DATE_MODEL}`,
+    { editPlan: planToday, url: 'https://acme.wd5.myworkdayjobs.com/en-US/External/job/x/apply' });
+  const got = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => Number(b.dataset.model)));
+  assert.deepEqual(got, [10, 4, 2026], 'the UTC date, whatever his clock says');
+});
+
+test('F-732: a signature date Workday refuses is retyped once as the other today, and the step moves on', async () => {
+  // Crown, Generac and Samsung took his LOCAL date after 5 PM Pacific; Flowserve
+  // and GlobalFoundries wanted the UTC one. This tenant wants local: the UTC
+  // date typed first is refused ("The field Date is required"), the retry
+  // types his date, the same press is made again, and the step advances.
+  await page.clock.setFixedTime(new Date('2026-10-16T06:01:00Z'));
+  const local = await page.evaluate(() => { const d = new Date(); return [d.getMonth() + 1, d.getDate(), d.getFullYear()]; });
+  const utc = [10, 16, 2026];
+  if (local.join('/') === utc.join('/')) return;   // a UTC machine has no second today to try
+  const result = await fill(`<form onsubmit="return false">${dateField('dateSignedOn', { keysOnly: true })}
+    <button data-automation-id="pageFooterNextButton" type="button">Save and Continue</button></form>${WD_DATE_MODEL}
+    <script>
+      window.__presses = 0;
+      document.querySelector('[data-automation-id="pageFooterNextButton"]').addEventListener('click', () => {
+        window.__presses += 1;
+        const got = [...document.querySelectorAll('input[data-part]')].map((b) => Number(b.dataset.model));
+        if (got.join('/') !== ${JSON.stringify(local.join('/'))}) {
+          document.querySelector('[role="alert"]')?.remove();
+          const e = document.createElement('div'); e.setAttribute('role', 'alert');
+          e.textContent = 'Errors Found Error-Date The field Date is required and must have a value.';
+          document.body.prepend(e);
+          return;
+        }
+        window.__accepted = got.join('/');
+        document.body.innerHTML = '<h2>Review</h2><p>Check your application.</p>';
+      });
+    <\/script>`,
+    { editPlan: planToday, url: 'https://acme.wd5.myworkdayjobs.com/en-US/External/job/x/apply' });
+  const seen = await page.evaluate(() => ({ presses: window.__presses, accepted: window.__accepted || null }));
+  assert.equal(seen.accepted, local.join('/'), `the step took his date after the retry (presses ${seen.presses}; ${result.stoppedBecause})`);
+  assert.equal(seen.presses, 2, 'one refused press, one retry — never a loop');
+  assert.doesNotMatch(String(result.stoppedBecause || ''), /would not move on/);
 });

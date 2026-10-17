@@ -19,6 +19,7 @@
 //   - An empty incoming field never erases a stored one.
 
 import { createHash } from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'path';
 // triage.mjs is pure (no store import), so this dependency is one-directional.
 import { triage } from './triage.mjs';
@@ -241,17 +242,35 @@ export function jobId(url) {
  * @template T @param {() => T | Promise<T>} fn @returns {Promise<T>}
  */
 export async function withStoreLock(fn) {
-  const handle = db();
-  await beginImmediate(handle);
-  try {
-    const out = await fn();
-    handle.exec('COMMIT');
-    return out;
-  } catch (err) {
-    try { handle.exec('ROLLBACK'); } catch { /* transaction already resolved */ }
-    throw err;
-  }
+  // Already inside one (a helper that locks, called from a locked span): join
+  // it. Queuing behind ourselves would wait forever.
+  if (IN_TRANSACTION.getStore()) return fn();
+  const turn = LOCAL_QUEUE.then(() => IN_TRANSACTION.run(true, async () => {
+    const handle = db();
+    await beginImmediate(handle);
+    try {
+      const out = await fn();
+      handle.exec('COMMIT');
+      return out;
+    } catch (err) {
+      try { handle.exec('ROLLBACK'); } catch { /* transaction already resolved */ }
+      throw err;
+    }
+  }));
+  LOCAL_QUEUE = turn.catch(() => {});
+  return turn;
 }
+
+// ONE TRANSACTION AT A TIME IN THIS PROCESS (2026-09-26, F-607).
+//
+// Every caller in a process shares one connection, and SQLite keeps one
+// transaction per connection. The dashboard server serves requests
+// concurrently, so a second `withStoreLock` arriving while the first one's
+// body awaited ran `BEGIN` inside an open transaction: "cannot start a
+// transaction within a transaction", not a lock error, so never retried.
+// Other PROCESSES are SQLite's to serialise; this queue does it in-process.
+let LOCAL_QUEUE = Promise.resolve();
+const IN_TRANSACTION = new AsyncLocalStorage();
 
 /**
  * Take the write lock, waiting for it rather than dying on it (F-430).
@@ -268,21 +287,41 @@ export async function withStoreLock(fn) {
  * is obviously right: nothing about the work has gone wrong, another writer is
  * simply mid-transaction.
  */
-const LOCK_ATTEMPTS = 5;
-const LOCK_BACKOFF_MS = [1_000, 3_000, 8_000, 15_000];
+// THE WAIT IS HERE, ASYNCHRONOUSLY — NEVER INSIDE `BEGIN` (2026-09-26).
+//
+// `BEGIN IMMEDIATE` is a synchronous call, and with the connection's 30 s
+// busy_timeout it WAITED for another writer's lock inside that call — which,
+// in the dashboard server, froze the whole process: every request, the panel,
+// his fills. Measured with the freeze tracer while he applied: "server blocked
+// for 10.1s — no request in flight", one background write queued behind an
+// enrichment child. So each attempt is made with busy_timeout 0 (fail at once
+// when locked) and the patience lives in these async back-offs instead, about
+// the same thirty seconds in all, while the event loop keeps serving.
+const LOCK_BACKOFF_MS = [50, 150, 400, 1_000, 2_000, 4_000, 8_000, 15_000];
+const LOCK_ATTEMPTS = LOCK_BACKOFF_MS.length + 1;
 
 async function beginImmediate(handle) {
   let lastErr;
+  let prev = 30000;
+  try { prev = Number(handle.prepare('PRAGMA busy_timeout').get()?.timeout) || 30000; } catch { /* keep the default */ }
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
-    try { handle.exec('BEGIN IMMEDIATE'); return; } catch (err) {
+    // Zero only for the attempt itself: the connection is shared, and any
+    // other write made during a back-off must keep its usual patience.
+    try {
+      handle.exec('PRAGMA busy_timeout = 0');
+      handle.exec('BEGIN IMMEDIATE');
+      return;
+    } catch (err) {
       lastErr = err;
       // SQLITE_BUSY (5) and SQLITE_LOCKED (6) mean "someone else is writing";
       // anything else is a real error and must not be retried into a loop.
       const code = err?.errcode;
       if (code !== 5 && code !== 6) throw err;
       if (attempt === LOCK_ATTEMPTS - 1) break;
-      await new Promise(r => setTimeout(r, LOCK_BACKOFF_MS[attempt]));
+    } finally {
+      try { handle.exec(`PRAGMA busy_timeout = ${prev}`); } catch { /* connection closing */ }
     }
+    await new Promise(r => setTimeout(r, LOCK_BACKOFF_MS[attempt]));
   }
   throw lastErr;
 }
@@ -299,6 +338,18 @@ export function getJob(id, opts = {}) {
   const job = fullJob(db(), row);
   if (opts.description) job.description = readDescription(db(), id);
   return job;
+}
+
+/**
+ * How many OTHER postings at this company he has applied to (F-621). "Have
+ * you applied on any previous occasions … with Micron?" was answered from a
+ * standing No while the store held sixteen Micron applications.
+ */
+export function appliedElsewhereAt(company, exceptId = null) {
+  const co = String(company || '').trim();
+  if (!co) return 0;
+  const row = db().prepare('SELECT COUNT(*) AS n FROM jobs WHERE applied_at IS NOT NULL AND lower(company) = lower(?) AND id != ?').get(co, String(exceptId ?? ''));
+  return Number(row?.n || 0);
 }
 
 /** One job WITHOUT its detail blob — the shape a list row has. */
@@ -489,19 +540,63 @@ export function findByHeading(prefix, headings) {
   const want = [...new Set((Array.isArray(headings) ? headings : [headings]).map(normTitle).filter(Boolean))];
   if (!prefix || !want.length) return null;
   const like = `${String(prefix).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-  const rows = db().prepare("SELECT id, title FROM jobs WHERE url LIKE ? ESCAPE '\\' AND gone_at IS NULL ORDER BY last_seen DESC LIMIT 600").all(like);
-  const exact = rows.find((r) => want.includes(normTitle(r.title)));
-  if (exact) return getJob(exact.id);
+  const rows = db().prepare("SELECT id, title FROM jobs WHERE url LIKE ? ESCAPE '\\' AND gone_at IS NULL AND superseded_by IS NULL ORDER BY last_seen DESC LIMIT 600").all(like);
+  // A TITLE SEVERAL POSTINGS SHARE NAMES NONE OF THEM (Intel, 2026-09-26).
+  // "Module Engineer" is on Intel's board in Phoenix AND Penang; his Phoenix
+  // form was matched to the Penang row — the newest — and the panel said
+  // "Blocked — never Malaysia" on the job he was applying to. The resume and
+  // answers followed the wrong posting. One title, one posting, or nothing.
+  const exact = rows.filter((r) => want.includes(normTitle(r.title)));
+  if (exact.length === 1) return getJob(exact[0].id);
+  if (exact.length > 1) return null;
   // Whole words only: "…Engineer I" is not inside "…Engineer II".
-  const within = rows.find((r) => {
+  // …AND ONE POSTING, IN A HEADING THAT IS ABOUT IT (2026-09-25). A careers
+  // LISTING — lucidmotors.com/careers/search, many titles on one page — gave
+  // a fill report to "Staff Machine Learning Engineer", the first stored
+  // Lucid title found inside it, and a resume could have been built for a job
+  // nobody opened. A heading far longer than the title is a list, and two
+  // titles inside one heading name no posting.
+  const within = rows.filter((r) => {
     const t = normTitle(r.title);
     if (t.length <= 8) return false;
     const re = new RegExp(`(?:^| )${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: |$)`);
-    return want.some((w) => re.test(w));
+    return want.some((w) => re.test(w) && w.length <= t.length + 60);
   });
-  return within ? getJob(within.id) : null;
+  const ids = [...new Set(within.map((r) => r.id))];
+  return ids.length === 1 ? getJob(ids[0]) : null;
 }
 const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * THE POSTING BEHIND A SUCCESSFACTORS APPLICATION PORTAL.
+ *
+ * TSMC's form lives at career10.successfactors.com/portalcareer?_s.crb=<token>
+ * — a session token that changes on every visit and appears nowhere in the
+ * store, on a host the scanner never reads (it reads ro.careers.tsmc.com). The
+ * one thing the form carries is the title, with the requisition number on the
+ * end: "Intelligent AMHS Engineer (Phoenix, AZ On-site) (6230)".
+ *
+ * With nothing to match, the page was recorded as a NEW job on 2026-09-19 —
+ * no company, no location, a 582-character scrap for a description — and
+ * every later visit found that scrap by heading. The resume, the essays and
+ * "have you worked at TSMC before?" were all decided without the posting.
+ *
+ * Matched on title across the scanner's SuccessFactors rows, with the trailing
+ * requisition number dropped from either side, and ONLY when exactly one live
+ * posting carries it. Two TSMC rows called "AMHS Technician" in different
+ * cities name no posting, and a wrong one is worse than none: the id decides
+ * which resume attaches.
+ */
+export function findSuccessFactorsPosting(headings) {
+  const strip = (s) => normTitle(String(s || '').replace(/\s*\(\s*\d{3,7}\s*\)\s*$/, ''));
+  const want = [...new Set((Array.isArray(headings) ? headings : [headings]).flatMap((h) => [normTitle(h), strip(h)]).filter((t) => t.length > 8))];
+  if (!want.length) return null;
+  const rows = db().prepare(
+    "SELECT id, title, url FROM jobs WHERE source = 'successfactors' AND gone_at IS NULL AND superseded_by IS NULL",
+  ).all();
+  const hits = rows.filter((r) => want.includes(normTitle(r.title)) || want.includes(strip(r.title)));
+  return hits.length === 1 ? getJob(hits[0].id) : null;
+}
 
 export function findByUrl(url, normalize) {
   const exact = getJob(jobId(url));
@@ -509,6 +604,18 @@ export function findByUrl(url, normalize) {
   const norm = normalize
     || ((u) => String(u || '').trim().replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase());
   const want = norm(url);
+  // THE DEFAULT NORMALISATION ONLY DROPS A TAIL AND LOWERS CASE, so a row can
+  // match only if its URL begins with `want`, ignoring case — which is what
+  // the NOCASE url index answers in a millisecond (2026-09-25). The walk over
+  // every row cost 0.7 s on a 390,000-row store, on every fill report from a
+  // form page, and blocked the server while it ran.
+  if (!normalize && want) {
+    const esc = want.replace(/[\\%_]/g, (c) => `\\${c}`);
+    for (const row of db().prepare("SELECT id, url FROM jobs WHERE url LIKE ? ESCAPE '\\'").iterate(`${esc}%`)) {
+      if (norm(row.url) === want) return getJob(row.id);
+    }
+    return null;
+  }
   for (const row of db().prepare('SELECT id, url FROM jobs').iterate()) {
     if (norm(row.url) === want) return getJob(row.id);
   }
@@ -662,6 +769,10 @@ export function upsertJobs(jobs, nowIso = new Date().toISOString()) {
         salary: j.salary || null,
         postedAt: j.postedAt ?? null,
         source: j.source || '',
+        // Where enrichment reads the body (Oracle). The update path above kept
+        // it; this one dropped it, so every posting first seen on an Oracle
+        // board stayed blank — 1,199 at Cummins, 0 read (2026-10-02).
+        ...(j.detailApi ? { detailApi: j.detailApi } : {}),
         triage: j.triage || null,
         company_meta: j.company_meta || null,
         status: 'new',

@@ -216,7 +216,7 @@ const DIFF_PROFILE = {
   identity: { first_name: 'Alex', last_name: 'Rivera', email: 'a@b.c', phone: '+1 555',
     address_line1: '1 Test Street', city: 'Springfield', state: 'Washington',
     location: 'Springfield, Washington', country: 'United States of America' },
-  education: { gpa: '3.9', school: 'State University', graduation: 'May 2027', degree_level: "Bachelor's" },
+  education: { gpa: '3.9', school: 'Lakeside University', graduation: 'May 2027', degree_level: "Bachelor's" },
   answers: { authorized_to_work_us: 'Yes', require_sponsorship: 'Yes', earliest_start: 'June 2027',
     willing_to_relocate: 'Yes', how_heard: 'LinkedIn', salary_expectation: 'Open' },
   eeo: { gender: 'Male', hispanic: 'No', race: 'Asian', veteran: 'I am not a Veteran.', disability: 'No, I do not have a disability' },
@@ -545,7 +545,7 @@ console.log('\n🧪 common phrasings for facts the profile already holds');
   // Answered — these were the six gaps.
   ok('Given Name', ans('Given Name'), 'Alex');
   ok('Contact Number', ans('Contact Number'), '+1 555');
-  ok('Where did you study?', ans('Where did you study?'), 'State University');
+  ok('Where did you study?', ans('Where did you study?'), 'Lakeside University');
   ok('Level of education', ans('Level of education') !== null, true);
   ok('What degree are you pursuing?', ans('What degree are you pursuing?') !== null, true);
   ok('Availability to start', ans('Availability to start'), 'June 2027');
@@ -554,7 +554,7 @@ console.log('\n🧪 common phrasings for facts the profile already holds');
   ok('an emergency contact number is not his', ans('Emergency Contact Number'), null);
   ok('nor an emergency contact name', ans('Emergency contact name'), null);
   ok('"where did you hear about us" is not his school',
-    ans('Where did you hear about us?') === 'State University', false);
+    ans('Where did you hear about us?') === 'Lakeside University', false);
   ok('a PREFERRED given name still beats the plain one',
     ans('Preferred Given Name'), 'Alex');
 }
@@ -604,7 +604,8 @@ console.log('\n🧪 questions with no rule and no key');
   // still reach the answer it had before.
   const val = (label) => {
     const r = resolveLabel(label, DIFF_PROFILE);
-    return r.kind === 'answer' ? r.value : r.kind;
+    // A rule's alternatives: the first is what a text box gets (2026-09-24).
+    return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind;
   };
   ok('relocate is not travel', val('Are you willing to relocate?'), DIFF_PROFILE.answers.willing_to_relocate);
   ok('accommodations still left alone', resolveLabel('Describe any accommodations you need', DIFF_PROFILE).kind, 'unknown');
@@ -751,7 +752,7 @@ console.log('\n🧪 the control has to be able to hold the answer');
 // never change one that already worked.
 console.log('\n🧪 the label as the form actually writes it');
 {
-  const val = (l) => { const r = resolveLabel(l, DIFF_PROFILE); return r.kind === 'answer' ? r.value : null; };
+  const val = (l) => { const r = resolveLabel(l, DIFF_PROFILE); return r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : null; };
   const city = DIFF_PROFILE.identity.location.split(',')[0];
 
   ok('tidy strips the required marker', tidyLabel('First Name *'), 'First Name');
@@ -809,7 +810,8 @@ console.log('\n🧪 the employer reaches the rule table in BOTH engines');
   ok('the rule answers Yes for the driver too', asDriver.value, 'Yes');
   ok('…and is flagged for his eye', asDriver.review, true);
   ok('an employer he has not worked for keeps the standing answer',
-    resolveLabel(Q, { ...P, applyingTo: 'Micron Technology' }).value, 'No');
+    // First alternative: a No is also offered as "Never worked at…" (F-575).
+    [].concat(resolveLabel(Q, { ...P, applyingTo: 'Micron Technology' }).value)[0], 'No');
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

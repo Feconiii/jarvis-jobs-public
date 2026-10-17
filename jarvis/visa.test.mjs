@@ -309,6 +309,15 @@ check('a hedge is not a promise',
 check('a refusal in the same posting still wins',
   blockKey('Sponsorship is not guaranteed. This role is not eligible for visa sponsorship.'), 'no_sponsorship');
 
+// F-733: Emerson's corporate block, 2026-10-16. The relative clause after its
+// preposition belongs to the noun; the "not" reaches it.
+check('"not a position for which sponsorship will be provided" is a refusal',
+  blockKey('This is not a position for which sponsorship will be provided.'), 'no_sponsorship');
+check('…and never the green badge',
+  keys('This is not a position for which sponsorship will be provided.').includes('sponsorship_positive'), false);
+check('…while "a role for which we offer sponsorship" stays an offer',
+  keys('This is a role for which we offer visa sponsorship.').includes('sponsorship_positive'), true);
+
 // 73 postings, 68 of them GE Aerospace, on ERISA benefits boilerplate.
 check('the benefits-plan "Sponsor" is not an immigration sponsor',
   blockKey("No individual has a vested right to any benefit under a Sponsor's welfare benefit plan or program."), null);
@@ -324,6 +333,14 @@ check('…and a refusal to sponsor survives a travel requirement',
   blockKey('This role requires travel abroad. We are unable to sponsor work visas.'), 'no_sponsorship');
 check('…as does one naming immigration in the travel sentence',
   blockKey('Frequent travel is required and we do not provide immigration sponsorship.'), 'no_sponsorship');
+
+// F-639, The Toro Company 2026-10-01: "regardless of" read as EEO boilerplate.
+check('a refusal that says "regardless of expiration date" still blocks',
+  blockKey('We are unable to sponsor or take over sponsorship of a school/employment or any other visa, regardless of expiration date, now or in the future.'), 'no_sponsorship');
+check('…but "regardless of race, color, religion" is still EEO text',
+  blockKey('All qualified applicants will receive consideration regardless of race, color, religion, national origin, citizenship or immigration status.'), null);
+check('…and "regardless of sexual orientation" too',
+  blockKey('We hire regardless of sexual orientation, gender identity, or visa status.'), null);
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

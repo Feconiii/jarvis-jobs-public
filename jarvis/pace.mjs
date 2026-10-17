@@ -41,6 +41,9 @@ export const DAILY_BUDGET = {
   'eightfold.ai': 300,
   'appliedmaterials.com': 200,
   'recruitee.com': 400,
+  // Workable throttles an IP after a few hundred requests (F-445); its posting
+  // JSON became a detail source on 2026-10-08.
+  'workable.com': 300,
   default: 5000,
 };
 

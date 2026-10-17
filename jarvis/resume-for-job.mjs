@@ -38,6 +38,8 @@ import { polish } from './resume-polish.mjs';
 import { qaReport } from './resume-qa.mjs';
 import { coverageLine } from './jd-terms.mjs';
 import { keepReport } from './earns-its-keep.mjs';
+import { syncToOneDrive } from './onedrive-resumes.mjs';
+import { person } from './targeting.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -86,7 +88,7 @@ export const personFile = (name, job = null) => {
  * rather than inventing a second convention beside it — this folder is something
  * he reads down, and two naming schemes in one listing is friction for no gain.
  */
-export function auditName({ family, job, name = 'Alex Rivera' }) {
+export function auditName({ family, job, name = person.fullName }) {
   const bit = (s) => String(s || '').replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60);
   return `${[`${bit(name)} Resume`, bit(family), bit(job?.company), bit(job?.title)].filter(Boolean).join(' - ')}.pdf`;
 }
@@ -274,6 +276,9 @@ export async function resumeForJob(job, {
     } catch {
       // A missing sidecar must never cost him the resume itself.
     }
+    // His phone gets it too, in its own folder (after the sidecar: the folder
+    // is named from it). Never throws.
+    syncToOneDrive({ from: sent });
   }
 
   // `jd` travels with the result so the report can measure coverage against the

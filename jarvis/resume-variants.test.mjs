@@ -89,7 +89,7 @@ for (const key of KEYS) {
   const amatBullets = spec.experience.find(e => e.org === 'Applied Materials').bullets.length;
   ok(`${key}: keeps ${amatBullets}/6 Applied Materials bullets`, amatBullets >= 5, `only ${amatBullets} — cut elsewhere before cutting AMAT`);
   {
-    const org = 'State University – Makerspace Manufacturing Technology Center';
+    const org = 'Lakeside University – Makerspace Manufacturing Technology Center';
     const n = spec.experience.find(e => e.org === org).bullets.length;
     ok(`${key}: ${org.split('–').pop().trim()} trimmed to ${n} line(s)`, n === 1, `got ${n} — that space belongs to Applied Materials`);
   }
@@ -178,9 +178,10 @@ const amrForms = formsOf(pool.orgs.amat.bullets.amr);
 const hasAmr = (key) => specs.get(key).experience.flatMap(e => e.bullets).some(b => amrForms.includes(b.text));
 for (const key of KEYS) ok(`${key}: keeps the AMR deployment bullet`, hasAmr(key));
 
-// The UR cobot cell must be described ONCE. cobot-install and robodk are the
-// same work; printing both read as padding and is the thing Alex caught.
-const cobotForms = formsOf(pool.orgs.amat.bullets['cobot-install']);
+// The UR cobot cell must be described ONCE. cobot-cell is robodk and the rack
+// said as one (2026-09-29); printing it beside robodk read as padding, the
+// thing Alex caught on 2026-08-09.
+const cobotForms = formsOf(pool.orgs.amat.bullets['cobot-cell']);
 for (const [key, spec] of specs) {
   const printed = spec.experience.flatMap(e => e.bullets).map(b => b.text);
   const both = printed.some(t => cobotForms.includes(t)) && printed.some(t => formsOf(pool.orgs.amat.bullets.robodk).includes(t));
@@ -229,7 +230,9 @@ const sample = {
 };
 const synced = applyFamilyTitles(sample, 'automation', pool);
 check('form title synced for Applied Materials', synced.profile.work_experience[0].title, 'Automation Engineer Intern');
-check('form title synced for Acme Steel', synced.profile.work_experience[1].title, 'Automation Engineer Intern');
+// No automation title for Acme Steel (his words, 2026-09-27): the automation
+// family presents it as manufacturing.
+check('form title synced for Acme Steel', synced.profile.work_experience[1].title, 'Manufacturing Engineer Intern');
 check('a company outside the pool is untouched', synced.profile.work_experience[2].title, 'Barista');
 check('the change list is reported', synced.changed.length, 2);
 ok('the original profile is not mutated', sample.work_experience[0].title === 'Manufacturing Engineer Intern (Automation)');
@@ -241,7 +244,7 @@ try {
   const profile = yaml.load(readFileSync(path.join(ROOT, 'data', 'jarvis', 'apply-profile.yml'), 'utf-8')) || {};
   const titles = new Set([...titlesForFamily('mechanical', pool).keys()].map(companyKey));
   for (const e of profile.work_experience || []) {
-    if (/state university|society/i.test(e.company || '')) continue;   // clubs/campus roles keep real titles
+    if (/lakeside|society/i.test(e.company || '')) continue;   // clubs/campus roles keep real titles
     ok(`apply-profile company "${e.company}" is known to the pool`, titles.has(companyKey(e.company)));
   }
 } catch (e) {

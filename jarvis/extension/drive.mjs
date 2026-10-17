@@ -20,7 +20,7 @@
  * This is the harness that found F-317 to F-325 in one evening. Every "the
  * batch showed…" fault before it was found by hand.
  */
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir, freemem } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -33,10 +33,12 @@ const USAGE = `
     --minutes <n>     how long to wait for the run to go quiet (default 6)
     --twice           press again after the first run and diff every field
     --panel           open the side panel beside the tab at the end, print its text and screenshot it
+    --dump            save every page's text, controls (shown or hidden), HTML and a screenshot beside the profile dir
+    --click <css>     after the run, click the first element matching <css> (a date picker, a menu) before the dump, so what it opens is captured
     --keep-profile    leave the throwaway Chrome profile on disk
     --show            put the window on screen instead of off it
 `;
-guardArgs({ usage: USAGE, flags: ['--minutes', '--twice', '--keep-profile', '--show', '--panel'], valued: ['--minutes'] });
+guardArgs({ usage: USAGE, flags: ['--minutes', '--twice', '--keep-profile', '--show', '--panel', '--dump', '--click'], valued: ['--minutes', '--click'] });
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => !a.startsWith('-'));
@@ -45,8 +47,9 @@ const url = argv.find((a) => !a.startsWith('-'));
 // report read "runs 0, filled 0" on a form that fills fine (Dexterity,
 // 2026-09-05). Say so and stop instead.
 const freeGb = freemem() / 1024 ** 3;
-if (freeGb < 1.2) {
-  console.error(`not enough free memory to drive a browser (${freeGb.toFixed(1)} GB free; needs about 1.2 GB) — close some apps and try again`);
+const minGb = Number(process.env.JARVIS_DRIVE_MIN_GB || 1.2);
+if (freeGb < minGb) {
+  console.error(`not enough free memory to drive a browser (${freeGb.toFixed(1)} GB free; needs about ${minGb} GB) — close some apps and try again`);
   process.exit(2);
 }
 if (!url) { console.error(USAGE); process.exit(2); }
@@ -56,6 +59,8 @@ const twice = argv.includes('--twice');
 const keep = argv.includes('--keep-profile');
 const show = argv.includes('--show');
 const wantPanel = argv.includes('--panel');
+const clickSel = get('--click');
+const wantDump = argv.includes('--dump') || !!clickSel;
 
 const EXT = path.dirname(fileURLToPath(import.meta.url));
 const profileDir = mkdtempSync(path.join(tmpdir(), 'jarvis-drive-'));
@@ -65,6 +70,9 @@ const ctx = await chromium.launchPersistentContext(profileDir, {
   args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, ...(show ? [] : ['--window-position=2000,2000'])],
 });
 const worker = ctx.serviceWorkers()[0] || await ctx.waitForEvent('serviceworker', { timeout: 30000 });
+// This profile is the harness's own: its fills are not his work, and the
+// dashboard does not record them as "prepared" on his rows (2026-09-25).
+await worker.evaluate(() => chrome.storage.local.set({ jarvisHarness: true })).catch(() => {});
 const page = ctx.pages()[0] || await ctx.newPage();
 const logs = [];
 const NOISE = /step 1: filled 0, ticked 0$|done: 0 filled, 0 ticked|stopped because: this page is not a multi-step|Submit is yours/;
@@ -74,7 +82,34 @@ const hook = (p) => {
 };
 hook(page); ctx.on('page', hook);
 
+// HIS BROWSER IS SLOWER THAN THIS ONE (F-716). Opera GX limits its own CPU
+// and he games on this machine: his Lam fill took 71 s where this harness took
+// 22, and every fixed wait in the filler ran out. JARVIS_DRIVE_CPU=4 slows the
+// page's CPU four times, so a timing fault reproduces here.
+const cpuRate = Number(process.env.JARVIS_DRIVE_CPU || 0);
+if (cpuRate > 1) {
+  const throttle = async (p) => { try { const s = await ctx.newCDPSession(p); await s.send('Emulation.setCPUThrottlingRate', { rate: cpuRate }); } catch { /* not a page */ } };
+  await throttle(page); ctx.on('page', throttle);
+  console.log(`CPU slowed ${cpuRate}×`);
+}
 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => console.log('goto:', e.message));
+// HIS PAGE DOES NOT HAVE FOCUS (F-716). He presses Fill in Opera's docked
+// panel, so the keyboard focus is there and not in the form; a Playwright page
+// is always focused (reference: Playwright blind spots). JARVIS_DRIVE_NOFOCUS=1
+// turns the emulation off and puts another window in front, so the form stays
+// on screen without focus, as it is in his browser.
+if (process.env.JARVIS_DRIVE_NOFOCUS === '1') {
+  const s = await ctx.newCDPSession(page);
+  await s.send('Emulation.setFocusEmulationEnabled', { enabled: false }).catch(() => {});
+  // A popup is its own WINDOW: the form's tab stays visible, only unfocused.
+  const popup = ctx.waitForEvent('page', { timeout: 10000 }).catch(() => null);
+  await page.evaluate(() => { window.open('about:blank', 'jarvis-focus-thief', 'popup,width=420,height=300'); }).catch(() => {});
+  const other = await popup;
+  await other?.bringToFront().catch(() => {});
+  await other?.evaluate(() => window.focus()).catch(() => {});
+  await page.waitForTimeout(500);
+  console.log(`form has focus: ${await page.evaluate(() => document.hasFocus()).catch(() => '?')}`);
+}
 await page.waitForTimeout(2500);
 const tab = await worker.evaluate(async (u) => {
   const ts = await chrome.tabs.query({});
@@ -117,6 +152,21 @@ const snapshot = async () => applyPage().evaluate(() => {
   return out;
 }).catch(() => ({}));
 
+// A FILL WAITING FOR ITS RESUME IS NOT QUIET (2026-09-27): the first AMAT
+// drive ended at +65 s while the chip said "still writing the resume … it
+// attaches when ready", and reported an empty run. The build takes minutes.
+const writingResume = async () => {
+  for (const p of ctx.pages()) {
+    const t = await p.evaluate(() => {
+      const host = document.getElementById('jarvis-overlay');
+      const root = host?.shadowRoot || host;
+      return (root?.querySelector('#jarvis-panel') || root?.querySelector('#jarvis-chip'))?.innerText || '';
+    }).catch(() => '');
+    if (/still writing the resume/i.test(t)) return true;
+  }
+  return false;
+};
+
 async function waitQuiet(mins) {
   const deadline = Date.now() + mins * 60000;
   let last = ''; let lastChange = Date.now();
@@ -124,7 +174,10 @@ async function waitQuiet(mins) {
     await new Promise((r) => setTimeout(r, 5000));
     const cur = JSON.stringify(await state());
     if (cur !== last) { last = cur; lastChange = Date.now(); console.log(`  +${Math.round((Date.now() - (deadline - mins * 60000)) / 1000)}s ${cur.slice(0, 400)}`); }
-    else if (Date.now() - lastChange > 60000) break;
+    else if (Date.now() - lastChange > 60000) {
+      if (await writingResume()) { lastChange = Date.now(); console.log('  (the resume is still being written — waiting)'); continue; }
+      break;
+    }
   }
 }
 
@@ -151,6 +204,47 @@ for (const p of ctx.pages()) {
   if (panel) console.log(`\nPANEL on ${p.url()}\n${panel}`);
 }
 console.log('\nLOGS\n' + logs.slice(-40).join('\n'));
+// THE WHOLE PAGE, for "it didn't see all of the questions" (AMAT, 2026-10-03):
+// its text, every control (shadow roots and iframes too) with whether it is
+// drawn, the HTML and a full-page screenshot — what discover() missed is read
+// off this, not guessed.
+if (wantDump) {
+  for (const [i, p] of ctx.pages().entries()) {
+    if (/^chrome-extension:|^about:blank/.test(p.url())) continue;
+    // WHAT A CONTROL OPENS (2026-10-16, Micron's Eightfold date picker): the
+    // dialog exists only after a click, so the dump would never show it.
+    if (clickSel) {
+      const hit = p.locator(clickSel).first();
+      if (await hit.count().catch(() => 0)) {
+        await hit.scrollIntoViewIfNeeded().catch(() => {});
+        await hit.click({ timeout: 5000 }).catch((e) => console.log(`--click: ${String(e.message).split(/\r?\n/)[0]}`));
+        await p.waitForTimeout(900);
+        console.log(`CLICKED ${clickSel} on ${p.url().slice(0, 80)}`);
+      }
+    }
+    const base = `${profileDir}-page${i}`;
+    for (const f of p.frames()) {
+      const dump = await f.evaluate(() => {
+        const deep = (root, out = []) => { for (const e of root.querySelectorAll('*')) { out.push(e); if (e.shadowRoot) deep(e.shadowRoot, out); } return out; };
+        const els = deep(document);
+        const controls = els.filter((e) => e.matches('input:not([type=hidden]), select, textarea, [role=combobox], [role=radio], [role=checkbox], [role=listbox], [contenteditable=true]'))
+          .map((e) => {
+            const r = e.getBoundingClientRect();
+            let lab = e.labels?.[0]?.textContent || e.getAttribute('aria-label') || '';
+            if (!lab) { let n = e.parentElement; for (let k = 0; k < 5 && n && !lab; k += 1, n = n.parentElement) lab = (n.querySelector('label, legend')?.textContent || ''); }
+            return `${r.width && r.height ? 'shown ' : 'HIDDEN'} ${e.tagName.toLowerCase()}${e.type ? `[${e.type}]` : ''}${e.getAttribute('role') ? `[role=${e.getAttribute('role')}]` : ''} #${e.id || e.name || ''} y=${Math.round(r.top + scrollY)} | ${lab.replace(/\s+/g, ' ').trim().slice(0, 120)}`;
+          });
+        return { text: document.body?.innerText || '', html: document.documentElement.outerHTML, controls };
+      }).catch(() => null);
+      if (!dump || (!dump.controls.length && dump.text.length < 50)) continue;
+      const tag = f === p.mainFrame() ? '' : `-frame${p.frames().indexOf(f)}`;
+      writeFileSync(`${base}${tag}.txt`, `URL ${f.url()}\n\nCONTROLS (${dump.controls.length})\n${dump.controls.join('\n')}\n\nTEXT\n${dump.text}`);
+      writeFileSync(`${base}${tag}.html`, dump.html);
+      console.log(`DUMP ${f.url().slice(0, 100)} — ${dump.controls.length} controls → ${base}${tag}.txt`);
+    }
+    await p.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
+  }
+}
 // THE SIDE PANEL, on a real posting, in a visible Chromium: the page it shows
 // for the driven tab, its text, and a screenshot to look at.
 if (wantPanel) {
@@ -165,5 +259,9 @@ if (wantPanel) {
   await panelPage.screenshot({ path: shot, fullPage: true });
   console.log(`\nSIDE PANEL for tab ${tab.id}\n${text}\n  screenshot: ${shot}`);
 }
-await ctx.close();
-if (keep) console.log(`profile kept at ${profileDir}`); else rmSync(profileDir, { recursive: true, force: true });
+// A CLOSE THAT NEVER RETURNS (2026-09-26): under memory pressure Chromium
+// did not answer `close`, the drive sat for ten minutes after printing its
+// result, and every drive queued behind it waited. Bounded, then out.
+await Promise.race([ctx.close().catch(() => {}), new Promise((r) => setTimeout(r, 20000))]);
+try { if (keep) console.log(`profile kept at ${profileDir}`); else rmSync(profileDir, { recursive: true, force: true }); } catch { /* a locked profile dir is the OS's to clean */ }
+process.exit(0);

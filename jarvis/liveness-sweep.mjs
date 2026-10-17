@@ -52,7 +52,8 @@
 // is minutes per hundred. Run it periodically rather than waiting on it; the
 // sweep is idempotent and resumes where it left off.
 
-import { query, updateJob } from './store.mjs';
+import { query, updateJob, getJob, db as storeDb } from './store.mjs';
+import { readPicksAndBoards, readDeckAndBoards, unlistedPicks, UNLISTED_DAYS } from './unlisted.mjs';
 import { checkLivenessViaApi, isAtsPosting } from '../liveness-api.mjs';
 import { chromium } from 'playwright';
 import { checkUrlLiveness, newLivenessPage } from '../liveness-browser.mjs';
@@ -183,11 +184,17 @@ async function main() {
   // The definitive-evidence rule is unchanged and matters more here, not less:
   // a false "expired" on a job he shortlisted is the expensive error.
   const filters = opts.picks ? {} : { browsable: true };
-  if (opts.company) filters.company = opts.company;
+  // Partial and case-blind ("--company kla" is the documented use): the store's
+  // `company` filter is exact, so a lowercased name matched nothing (F-710).
+  if (opts.company) filters.companyLike = opts.company;
   // `source` targets one discovery channel — used to finish off the sources the
   // API rung cannot reach, e.g. --source smartrecruiters --browser.
   if (opts.source) filters.source = opts.source;
-  let { rows } = query(filters, { limit: 20000 });
+  // STALEST FIRST (2026-10-16). The default order is fit, so the daily 1,500
+  // were the same top-fit postings every day — listed on their boards that
+  // morning, live, checked again — and the rows least recently listed, the ones
+  // most likely dead, never came up.
+  let { rows } = query(filters, { limit: 40000, sort: 'stalest' });
   if (opts.picks) {
     // Three separate queries rather than one, because `status` takes a single
     // value. Applied is included deliberately: knowing a posting he applied to
@@ -197,7 +204,10 @@ async function main() {
     const mine = ['inbox', 'queued', 'interested', 'applied']
       .flatMap((status) => query({ ...filters, status }, { limit: 2000 }).rows);
     const seen = new Set();
-    rows = mine.filter((j) => !seen.has(j.id) && seen.add(j.id));
+    // ALREADY RETIRED IS NOT NEWS (2026-09-24): every sweep re-checked the picks
+    // it had marked gone before and listed them as "retired" again, so the same
+    // fourteen names came back run after run and read like a resurrection.
+    rows = mine.filter((j) => !seen.has(j.id) && seen.add(j.id) && !getJob(j.id)?.goneAt);
   }
 
   // Only postings the API can answer for. `goneAt` is not carried on list rows,
@@ -305,9 +315,40 @@ async function main() {
     console.log('');
   }
 
+  // THE BOARD STOPPED LISTING IT (jarvis/unlisted.mjs, 2026-09-24): for the
+  // picks no API can answer for, absence from a freshly read board is the
+  // evidence that is left. The deck too since 2026-10-16 (see unlisted.mjs).
+  if (!opts.company && !opts.source) {
+    try {
+      const { picks, boards } = (opts.picks ? readPicksAndBoards : readDeckAndBoards)(storeDb());
+      const byId = new Map(picks.map((p) => [p.id, p]));
+      const already = new Set(toWrite.map((j) => j.id));
+      const gone = unlistedPicks(picks, boards).filter((u) => !already.has(u.id));
+      if (gone.length) {
+        console.log(`${gone.length} ${opts.picks ? 'pick(s)' : 'deck posting(s)'} their own board has not listed for ${UNLISTED_DAYS}+ days:`);
+        gone.forEach((u, i) => {
+          const p = byId.get(u.id);
+          if (opts.picks || i < 40) console.log(`  · ${p.company} — ${String(p.title).slice(0, 60)} (${u.days} days)`);
+          toWrite.push(p);
+        });
+        if (!opts.picks && gone.length > 40) console.log(`  … and ${gone.length - 40} more`);
+        console.log('');
+      }
+    } catch (e) { console.log(`(board-listing check skipped: ${e.message})`); }
+  }
+
   if (!opts.dryRun) {
     const at = new Date().toISOString();
-    for (const j of toWrite) updateJob(j.id, { goneAt: at }, { rederive: true });
+    // A scan or enrich holding the store past the 30 s busy timeout killed the
+    // first deck run 1,348 rows into 1,889 (2026-10-16). Wait it out instead.
+    for (const j of toWrite) {
+      for (let tries = 0; ; tries += 1) {
+        try { updateJob(j.id, { goneAt: at }, { rederive: true }); break; } catch (e) {
+          if (e?.errcode !== 5 || tries >= 20) throw e;
+          await new Promise((r) => setTimeout(r, 15000));
+        }
+      }
+    }
   }
   gone = toWrite.length;
   retired.length = 0;

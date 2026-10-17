@@ -22,6 +22,62 @@
  */
 import { coverage as termCoverage } from './jd-terms.mjs';
 import { spawn } from 'child_process';
+import { mkdtempSync, readFileSync, rmSync, existsSync } from 'fs';
+import { tmpdir } from 'os';
+import path from 'path';
+import { person, writing, PRESETS, WORK_AUTH } from './targeting.mjs';
+
+// ── who the writers are writing for ─────────────────────────────────
+//
+// Every writer (resume tailor, cover letter, application answers, outreach,
+// lead research) imports from here, so the identity helpers live here too.
+// The rule they serve: one person's facts never reach another person's prompt.
+
+/**
+ * True when the installed person is the one whose sent answers, letters and
+ * stories the prompts quote as worked examples (`writing.examplesOwner`). Only
+ * then do those examples appear; for anyone else the prompt is built from the
+ * field wording in their preset and their own files.
+ */
+export function ownsExamples(p = person) {
+  const w = PRESETS[p?.preset]?.writing || writing;
+  return !!(w?.examplesOwner && p?.fullName === w.examplesOwner);
+}
+
+/** The writing preset for a person (their own preset, not the installed one). */
+export const writingFor = (p = person) => PRESETS[p?.preset]?.writing || writing;
+
+/**
+ * Graduation, said truthfully on any date: "graduating May 2027" while it is
+ * ahead, "graduated May 2026" once that month has passed.
+ */
+export function graduation(p = person, now = new Date()) {
+  const g = p?.gradDate || {};
+  const done = (Number(g.year) * 12 + Number(g.month)) < (now.getFullYear() * 12 + now.getMonth() + 1);
+  const label = p?.gradLabel || '';
+  return { done, label, says: label ? `${done ? 'graduated' : 'graduating'} ${label}` : '' };
+}
+
+/** "Lakeside University" → "Lakeside". */
+export function schoolShort(p = person) {
+  const s = String(p?.school || '').trim();
+  return s.replace(/\s+(university|college)$/i, '').replace(/^(the\s+)?university\s+of\s+/i, '').trim() || s;
+}
+
+/**
+ * One sentence of who the person is, from their profile alone:
+ * "Test Analyst is a Finance student at Example State University, graduated May 2026."
+ */
+export function personLine(p = person, now = new Date()) {
+  const g = graduation(p, now);
+  const study = p?.major ? `${p.major} ${g.done ? 'graduate' : 'student'}` : (g.done ? 'recent graduate' : 'student');
+  const school = p?.school ? ` ${g.done ? 'of' : 'at'} ${p.school}` : '';
+  const when = !g.label ? '' : g.done ? ` (${g.label})` : `, ${g.says}`;
+  return `${p?.fullName || 'The applicant'} is a ${study}${school}${when}.`;
+}
+
+/** Work authorization in plain words, for a prompt that needs it. */
+export const authLine = (p = person) => WORK_AUTH[p?.workAuth]?.label || '';
 
 /** Long enough to be a real posting, short enough not to blow the prompt. */
 export const MAX_JD_CHARS = 7000;
@@ -58,15 +114,9 @@ export function condenseJd(description, limit = MAX_JD_CHARS) {
 /**
  * Role-specific emphasis, from his skill (§19). Handed to the model whole so it
  * can decide which applies; the plan checker does not care which it picked.
+ * Per field: `writing.roleEmphasis` in the preset.
  */
-export const ROLE_EMPHASIS = {
-  mechanical: 'mechanical design, CAD (Inventor, SolidWorks, Siemens NX), GD&T, tolerance analysis, fixtures, mechanical assembly, FEA, DFM/DFA, CNC and fabrication, test validation',
-  manufacturing: 'process improvement, manufacturing readiness, DFM/DFA, CNC, time studies, root cause analysis, layout optimization, quality, inspection, cost reduction, production troubleshooting, automation',
-  automation: 'AMR deployment, Universal Robots, RoboDK, machine vision, end effectors, robot integration, qualification, hardware integration, troubleshooting, Node-RED, the 6-DOF robotic arm project (ROS 2/MoveIt), the Mars rover pneumatic gripper',
-  process: 'Etch, Dielectric Deposition, Metal Deposition, process data, quality data, root cause analysis, qualification, dimensional analysis, continuous improvement, troubleshooting, Excel and Python, semiconductor manufacturing',
-  npi: 'DFM/DFA, fixtures, build readiness, qualification testing, CAD, manufacturing validation, troubleshooting, process documentation, CNC, rapid prototyping, cross-functional support',
-  equipment: 'troubleshooting, robotics, leak testing, equipment qualification, maintenance-adjacent work, hardware integration, diagnostic documentation, cleanroom deployment, automation',
-};
+export const ROLE_EMPHASIS = writing.roleEmphasis || {};
 
 /** The menu: everything the resume may contain, keyed the way the answer must be keyed. */
 export function menuFor(pool) {
@@ -162,6 +212,12 @@ export function buildTailorPrompt({ spec, job, jd, familyLabel = null, pool = nu
     : '(This posting names no concrete tools or methods, so there is nothing to measure — '
       + 'choose on the work it describes instead.)';
 
+  // Everything below names HIS organisations, bullets and history. Anyone else
+  // gets the same method with none of it (see buildFieldTailorPrompt).
+  if (!ownsExamples()) {
+    return buildFieldTailorPrompt({ job, jd, request, framing, menu, bullets, base, termBrief, familyLabel: familyLabel || spec?.familyLabel || 'standing' });
+  }
+
   return `You are tailoring Alex Rivera's one-page engineering resume to ONE job posting: what goes on
 the page, in what order, under which titles, and how each bullet is worded.
 
@@ -247,7 +303,9 @@ YOUR JOB
 3. EXPERIENCE. For each org choose WHICH bullet keys appear and in WHAT ORDER, by INCREMENTAL
    VALUE: a bullet earns its line by proving something the page does not already prove. Lead each
    org with the bullet closest to the job. Rules: amat.vision-fixture is on every resume (the
-   mechanical-design staple); never both amat.robodk and amat.cobot-install (one cell); amat,
+   mechanical-design staple); the UR cobot cell is amat.robodk and amat.cobot-rack as two
+   bullets, or amat.cobot-cell (the same two said as one, for a tight page), never cobot-cell
+   beside either; amat,
    acme and makerspace each keep at least one line; makerspace, rover and sae at most two, or three for an org
    you name in "emphasise"; 10 to 13 lines in total.
    - PRECEDENCE, his order: amat, then acme, then makerspace, then rover, sae and the projects,
@@ -274,7 +332,7 @@ YOUR JOB
      requirement. Give it two, put "sae" in "emphasise", and consider moving it above makerspace.
      Redundant evidence is not relevance; neither is under-answering a requirement the posting
      put in its own list.
-   - rover (State University Robotics Club – Mars Rover Team, added 2026-09-15) is his build-team
+   - rover (Lakeside Robotics Club – Mars Rover Team, added 2026-09-15) is his build-team
      evidence of choice, and it is on every family base in Baja's old place: a pneumatic gripper
      for the rover manipulator (gripping geometry, actuator integration, mounting interface) and
      suspension plates designed in CAD and plasma-cut in-house. For robotics, mechatronics,
@@ -410,6 +468,118 @@ plan you would defend.`;
 }
 
 /**
+ * The tailoring prompt for anyone who is not `writing.examplesOwner`: the same
+ * method and the same answer shape, worded from the person's profile and the
+ * field's preset, with no organisation, bullet, figure or rule of his in it.
+ */
+function buildFieldTailorPrompt({ job, jd, request, framing, menu, bullets, base, termBrief, familyLabel }) {
+  const w = writing;
+  const name = person.fullName;
+  const first = person.firstName;
+  const orgKeys = Object.keys(menu?.orgs || base.experience || {});
+  const emphasis = Object.entries(w.roleEmphasis || {}).map(([k, v]) => `- ${k}: ${v}`).join('\n');
+  return `You are tailoring ${name}'s one-page ${w.resumeKind || 'professional'} resume to ONE job posting: what goes on
+the page, in what order, under which titles, and how each bullet is worded.
+
+${personLine()} The family base is the
+${familyLabel} variant; the DEFAULT PLAN below is that base. Improve on it.
+
+THE STANDARD. Tailoring is evidence selection, not keyword substitution. Ask "what are the most
+impressive TRUE pieces of this person's work, and how are they selected and phrased so they
+naturally prove this posting?" The page must pass two tests at once: (1) JD FIT — it proves the
+core requirements of the job; (2) IMPRESSION — read for twenty seconds by someone who never saw
+the posting, it says "${w.impression || 'this person has done real, measurable work'}". Optimise in this order:
+truthfulness, substance, JD relevance, quantified impact, distinctiveness, ATS terminology, space.
+${w.substance || ''}
+
+EVERY LINE MUST ADD one of: new evidence, a meaningful quantified result, a highly relevant tool or
+skill, evidence of ownership, or evidence of hands-on capability. A line that adds none of those
+does not belong, however "relevant" its topic.
+
+THE JOB
+Company: ${job?.company || 'unknown'}
+Title: ${job?.title || 'unknown'}
+${String(request || '').trim() ? `
+${first.toUpperCase()}'S NOTE FOR THIS RESUME — their own words, typed beside the form:
+"${String(request).trim().replace(/"/g, "'").slice(0, 600)}"
+Honour it wherever the rules below allow. It can never add a fact, a tool, a number, a claim or a
+word that is not in the menu and the approved wordings — if it asks for one, leave that part out
+and say so in "notes".
+` : ''}
+${jd || '(no description available — return the default plan with an empty rewrites object)'}
+
+THE MENU — everything the resume may contain. Keys are what you return. Nothing outside it exists.
+${menu ? JSON.stringify(menu, null, 1) : '(pool not supplied — reword only)'}
+
+THE BULLETS AS THEY STAND — each with its key and every approved wording.
+${JSON.stringify(bullets, null, 1)}
+
+DEFAULT PLAN (the family base)
+${JSON.stringify(base, null, 1)}
+
+YOUR JOB
+1. Read the whole posting. Extract its core responsibilities, required and preferred tools, the
+   industry's terminology, and the main function. Decide the role type:
+   ${w.roleTypes || 'other'}.
+1b. COVERAGE — before choosing a single bullet. List every REQUIREMENT the posting states, must-have
+   and nice-to-have, in its own words. Against each, name the ONE thing on your page that proves it —
+   a bullet key, "coursework: <course>", "skills: <item>", "project: <key>", or "none".
+   - A requirement the posting names and the menu has evidence for must be covered.
+   - A requirement with no evidence stays "none". Never bridge to it or imply it; say so in "notes".
+   - Where the evidence is only in a bullet's FULL wording, put that exact phrase in "mustKeep".
+1c. COVERAGE FIRST, THEN THE NEXT MOST RELEVANT THING.
+   ${termBrief}
+   Once the posting is covered, spare room goes to the next most relevant evidence for this kind of
+   role. What gives way when room is short is the weakest line.
+2. TITLES. For each experience entry pick ONE clean title from that org's "titles" list — the one
+   that best matches the job, no hybrids.
+3. EXPERIENCE. For each org (${orgKeys.join(', ') || 'see the menu'}) choose WHICH bullet keys appear and
+   in WHAT ORDER, by incremental value: a bullet earns its line by proving something the page does
+   not already prove. Lead each org with the bullet closest to the job. Every org in the default
+   plan keeps at least one line; 10 to 13 lines in total. Never choose a bullet about assumed
+   parts of the work (attended, participated, supported) over one with a concrete result.
+4. PROJECTS. One or two keys, by incremental value.
+5. COURSEWORK. Five to seven courses from the menu, most relevant to the role first.
+6. SKILLS. Three to five categories from the menu, ordered by relevance, each category's items
+   reordered so the ones this posting names come first; drop items that do not help. Never add a
+   skill the menu does not hold. A skill is a recognised tool, method, language or platform
+   (${w.skillExamples || 'as the menu lists them'}).
+7. REWRITES. For bullets you keep, reword toward the posting's vocabulary where it genuinely
+   describes the same work. Shape: action + method + context + outcome. Strong verbs. Where a
+   bullet already speaks the posting's language, leave it as it is. Never simplify a bullet below
+   its approved wording, never drop a tool, a method or a figure to save words. Full grammar, the
+   serial comma, every bullet ends with a period.
+8. RESERVE. Two to four unused bullet keys in the order to add them if the page has room.
+9. MUSTKEEP. Exact phrases, copied character-for-character from the approved wordings, that this
+   posting asked for BY NAME. Three to eight.
+10. EMPHASISE. Zero to two org keys this posting leans on hard enough to be worth a third line.
+
+REWRITE RULES — enforced by a checker after you answer; a rewrite that breaks one is thrown away.
+1. Reword only. Never add a fact. Every number, tool, software package, standard, company and job
+   title in a rewrite must already appear in that bullet's approved wording.
+2. Truthful stretching is allowed — the strongest reasonable reading of work actually performed —
+   but never introduce a word that does not appear somewhere in the CV. Approved framing
+   vocabulary: ${framing || 'see cv.md § Approved framing vocabulary'}.
+3. Keep it near the same length or shorter — at most a third longer.
+4. Keep the figures.
+5. Do not change what was done. Match the posting's vocabulary only where it describes the same work.
+6. NEVER claim a certification, a license, software or languages not in the menu, responsibilities
+   not performed, ownership not held, or projects that do not exist.
+7. Never weaker than the approved wording. No "helped with", "assisted", "responsible for",
+   "worked on", "participated in".
+
+ROLE-SPECIFIC EMPHASIS (what to lead with, per role type)
+${emphasis}
+
+BEFORE YOU ANSWER, run the two tests on your plan. If JD FIT passes and IMPRESSION fails, change it.
+
+ANSWER
+Return ONLY a JSON object, no prose, no code fence, of this exact shape:
+{"roleType":"...","coverage":[{"req":"the posting's words","need":"must|nice","proof":"<bullet key>|coursework: <course>|skills: <item>|project: <key>|none"}],"titles":{"<org key>":"..."},"experience":{"<org key>":["key",...]},"emphasise":["<org key>"],"projects":["key"],"coursework":["..."],"skills":[{"key":"<skill key>","items":["..."]}],"rewrites":{"<bullet key>":"sentence"},"mustKeep":["..."],"reserve":["<bullet key>"],"notes":["an uncovered requirement, or what of the note could not be honoured"]}
+Every key must come from the menu. An empty rewrites object is a valid answer.`;
+}
+
+/**
  * The second ask, when the guard threw rewrites out.
  *
  * This exists because of what the first pass actually does wrong. Measured on a
@@ -437,7 +607,7 @@ export function buildRetryPrompt({ refusals, job }) {
 ${JSON.stringify(cases, null, 2)}
 
 Read each "rejectedBecause" literally. Almost always it names a word you used
-that does not appear anywhere in Alex's CV, or an opener weaker than his own
+that does not appear anywhere in ${person.firstName}'s CV, or an opener weaker than his own
 wording. The checker has no opinion about whether the word is reasonable — only
 about whether it is HIS.
 
@@ -501,12 +671,12 @@ ${JSON.stringify(cases, null, 2)}
 
 Compress the WRITING, not the content: keep every technical fact, tool, figure and mechanism
 that is in the approved wording; cut filler, connectives, restatement and process language.
-Example of the standard — one sentence, three lines, every detail kept:
+${ownsExamples() ? `Example of the standard — one sentence, three lines, every detail kept:
 "Designed and validated an Autodesk Inventor machine vision fixture for three Metal Deposition
 chamber variants, integrating controlled lighting, repeatable camera positioning, 120-degree
 indexing with ball plungers, dovetail interfaces, and tolerance analysis; created drawings/BOMs
 and released the design through Teamcenter."
-The usual rules hold: only words from his CV, no new figures or tools, never weaker than his own
+` : ''}The usual rules hold: only words from his CV, no new figures or tools, never weaker than his own
 wording, keep what he did. A detail may be dropped only if it is the least technical one.
 
 Return ONLY a JSON object mapping key to the rewritten sentence. Omit any key you cannot fit
@@ -643,12 +813,87 @@ export const LIMIT_MESSAGE = /reached your .{0,40}limit|usage limit|manage usage
 
 const isClaudeCli = (bin) => /^claude(\.cmd|\.exe|\.ps1)?$/i.test(String(bin).split(/[\\/]/).pop() || '');
 
+// ── the Codex path ──────────────────────────────────────────────────
+//
+// A second user runs OpenAI's Codex CLI instead of Claude Code. Every writer
+// calls `run('claude', ['-p', …], { input })`; on such a machine that call is
+// translated here, so no writer has to know which CLI is installed.
+//
+//   codex [--search] exec --ephemeral --skip-git-repo-check -s read-only
+//         --color never -C <tmp> [-m <model>] -o <tmp>/last.txt -
+//
+// The prompt goes on stdin (`-`), as it does for claude. The answer is the
+// agent's LAST MESSAGE, which `-o` writes to a file — stdout also carries the
+// session log, which must never be mistaken for the answer. The sandbox is
+// read-only on every call: Codex may never write a file in this project (the
+// claude side's `--permission-mode dontAsk` maps to the same thing). It runs
+// in an empty temporary directory, so it reads no AGENTS.md or project file
+// that the prompt did not hand it. `--search` is a top-level flag in Codex
+// 0.155 (`codex exec --search` is refused), and it is added only when the
+// claude call asked for WebSearch/WebFetch — the lead research.
+//
+// Claude model names (the ladder) mean nothing to Codex and are dropped;
+// JARVIS_CODEX_MODEL picks a Codex model. JARVIS_CODEX_BIN overrides the
+// binary (a .mjs/.js path is run with node — that is how the tests stub it).
+
+/** Which CLI the writers use: env JARVIS_LLM wins, then the person's profile. */
+export function llmProvider() {
+  const env = String(process.env.JARVIS_LLM || '').trim().toLowerCase();
+  if (env === 'codex' || env === 'claude') return env;
+  return person.llm === 'codex' ? 'codex' : 'claude';
+}
+
+/** Codex's own words for a spent plan, and for a missing login. */
+export const CODEX_LIMIT_MESSAGE = /hit your usage limit|usage[_\s]limit[_\s]reached|usage limit has been reached|insufficient_quota|exceeded your current quota|rate[_\s]limit[_\s]exceeded/i;
+export const CODEX_AUTH_MESSAGE = /401 Unauthorized|Missing bearer|not logged in|please (?:log|sign) in|codex login|invalid[_\s]api[_\s]key|token (?:has )?expired/i;
+
+/** The argv for one claude call, said to Codex. Pure; exported for the tests. */
+export function codexArgs(claudeArgs = [], { outFile, cwd, model = process.env.JARVIS_CODEX_MODEL || '' } = {}) {
+  const wantsWeb = claudeArgs.some((a) => /\bWeb(?:Search|Fetch)\b/.test(String(a)));
+  return [
+    ...(wantsWeb ? ['--search'] : []),
+    'exec', '--ephemeral', '--skip-git-repo-check',
+    '-s', 'read-only', '--color', 'never',
+    ...(cwd ? ['-C', cwd] : []),
+    ...(model ? ['-m', model] : []),
+    '-o', outFile,
+    '-',
+  ];
+}
+
+async function runCodex(claudeArgs, opts = {}) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'jarvis-codex-'));
+  const outFile = path.join(dir, 'last-message.txt');
+  const args = codexArgs(claudeArgs, { outFile, cwd: dir });
+  const override = String(process.env.JARVIS_CODEX_BIN || '').trim();
+  const [bin, argv] = /\.m?js$/i.test(override) ? [process.execPath, [override, ...args]] : [override || 'codex', args];
+  const tag = (e) => { if (e && typeof e === 'object') e.provider = 'codex'; return e; };
+  try {
+    let out;
+    try { out = await runOnce(bin, argv, opts); } catch (e) { throw tag(e); }
+    const last = existsSync(outFile) ? readFileSync(outFile, 'utf8') : '';
+    const stdout = last.trim() ? last : '';
+    // A refusal is never the answer: an empty last message, or one that is
+    // Codex saying the plan is spent, fails the call instead of reaching a box.
+    if (!stdout || CODEX_LIMIT_MESSAGE.test(stdout)) {
+      const e = new Error(stdout ? 'codex is out of usage' : 'codex returned no answer');
+      e.code = 1; e.stdout = out.stdout; e.stderr = `${out.stderr || ''}${stdout ? `\n${stdout}` : ''}`;
+      throw tag(e);
+    }
+    return { stdout, stderr: out.stderr, model: 'codex', requested: 'codex', fellBack: false, fallbacks: [] };
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* a temp dir left behind costs nothing */ }
+  }
+}
+
 /**
  * Run the CLI, and when the model it used is spent, run it again on the next
  * one. Anything that is not the claude CLI (the tests drive node through this)
  * passes straight through untouched.
  */
 export function run(bin, args, opts = {}) {
+  // A machine with Codex instead of Claude Code: the same call, asked of Codex.
+  if (isClaudeCli(bin) && llmProvider() === 'codex') return runCodex(args, opts);
   if (!isClaudeCli(bin) || args.includes('--model')) return runOnce(bin, args, opts);
   // THE LADDER IS THE CALLER'S CHOICE, not one global setting.
   //
@@ -772,6 +1017,7 @@ async function askClaude(prompt, { timeoutMs, bin, what, wantPlan = false }) {
  * one live run could not be diagnosed at all.
  */
 export function describeFailure(e, bin, what, timeoutMs) {
+  if (e?.provider === 'codex') return describeCodexFailure(e, what, timeoutMs);
   if (e?.code === 'ENOENT') return `the "${bin}" CLI is not on PATH — resume ships untailored`;
   if (e?.killed || e?.signal === 'SIGTERM') {
     return `${what} timed out after ${Math.round((timeoutMs || 0) / 1000)}s — resume ships in his own words`;
@@ -786,4 +1032,22 @@ export function describeFailure(e, bin, what, timeoutMs) {
   }
   const exit = e?.code != null ? ` (exit ${e.code})` : '';
   return `${what} call failed${exit}${tail ? `: ${tail.slice(0, 300)}` : ''}`;
+}
+
+/**
+ * The same, for a call that went to Codex. Its stderr is the whole session log
+ * (prompt included), so only the error lines are quoted, never the prompt.
+ */
+function describeCodexFailure(e, what, timeoutMs) {
+  const login = 'is the codex CLI installed and logged in? run `codex login`';
+  if (e?.code === 'ENOENT') return `the "codex" CLI is not on PATH — ${login}`;
+  if (e?.killed || e?.signal === 'SIGTERM') return `${what} timed out after ${Math.round((timeoutMs || 0) / 1000)}s (Codex)`;
+  const said = `${e?.stderr || ''}\n${e?.stdout || ''}`;
+  const lines = said.split('\n').map((l) => l.trim()).filter(Boolean);
+  const errs = lines.filter((l) => /\b(error|warning|unauthori[sz]ed|limit|quota)\b/i.test(l));
+  const tail = [...new Set(errs.length ? errs : lines)].slice(-2).join(' / ').slice(0, 300);
+  if (CODEX_AUTH_MESSAGE.test(said)) return `Codex is not logged in — run \`codex login\`${tail ? ` (${tail.slice(0, 200)})` : ''}`;
+  if (CODEX_LIMIT_MESSAGE.test(said)) return `Codex is out of usage for now${tail ? ` — ${tail.slice(0, 200)}` : ''}`;
+  const exit = e?.code != null ? ` (exit ${e.code})` : '';
+  return `${what} call to Codex failed${exit}${tail ? `: ${tail}` : ''} — ${login}`;
 }

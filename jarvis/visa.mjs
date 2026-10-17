@@ -48,6 +48,15 @@
 // rather than a hope about regex behaviour.
 //
 // Zero AI, zero network. Pure string work.
+//
+// WHOSE STATUS. Everything above was written for an F-1 student, and for him it
+// still runs exactly as written. What a clause MEANS does not depend on who
+// reads it; what it COSTS does. "We do not sponsor" hides a job from someone who
+// needs sponsorship and says nothing to a citizen, so the claims are collected
+// the same way for everyone and only the arbitration at the bottom reads the
+// person (`policyFor`). A caller may pass one explicitly as the third argument.
+
+import { person as PERSON, PRESETS } from './targeting.mjs';
 
 // ── layer 1: segmentation ───────────────────────────────────────────
 
@@ -113,8 +122,11 @@ const CLAUSE_BOUNDARY = new RegExp([
   // "sponsorship" — splitting there would turn a real refusal into a harmless
   // mention, which is the same class of error in the opposite direction.
   '\\s+(?=(?:and|but|or|yet|so|while|whereas|however)\\s+(?:[\\w-]+\\s+){0,3}?(?:is|are|was|were|will|would|can|cannot|can\\s?not|could|may|might|shall|do|does|did|must|has|have|had)\\b)',
-  // Subordinators always open a new clause of their own.
-  '\\s+(?=(?:who|whom|whose|which|because|since|although|though|unless|if|when|whereas|provided\\s+that|as\\s+long\\s+as)\\b)',
+  // Subordinators always open a new clause of their own — except a relative
+  // after its preposition, which belongs to the noun before it (F-733):
+  // Emerson's "This is not a position for which sponsorship will be provided"
+  // split at "which", stranded the "not", and read as an OFFER to sponsor.
+  '(?<!\\b(?:for|in|on|under|through|by|with|to|of|from|at|via))\\s+(?=(?:who|whom|whose|which|because|since|although|though|unless|if|when|whereas|provided\\s+that|as\\s+long\\s+as)\\b)',
   // "that" only when it heads a complement clause, not a relative "the visa that…".
   '\\s+(?=that\\s+(?:we|they|it|you|this|the|candidates?|applicants?|sponsorship|employment)\\b)',
 ].join('|'), 'gi');
@@ -285,7 +297,13 @@ const EXPORT_AUTH = /\b(?:contingent\s+(?:up)?on|subject\s+to|conditioned\s+(?:u
  * negation-driven classifier will trip over. Recognising the genre once, here,
  * is far more durable than trying to keep every other rule from touching it.
  */
-const EEO = /\b(?:without\s+regard\s+to|regardless\s+of|equal\s+(?:employment\s+)?opportunit(?:y|ies)|affirmative\s+action|protected\s+(?:class|status|characteristic|veteran)|do(?:es)?\s+not\s+discriminate|prohibits?\s+(?:unlawful\s+)?discriminat\w*|\bEEO\b|E-?Verify)\b/i;
+//
+// "regardless of" counts only when a protected trait follows it. Bare, it also
+// matched Toro's refusal: "We are unable to sponsor or take over sponsorship of
+// a school/employment or any other visa, regardless of expiration date, now or
+// in the future." The clause was skipped as EEO text and the posting passed as
+// silent on sponsorship (F-639).
+const EEO = /\b(?:without\s+regard\s+to|regardless\s+of\s+(?:[\w-]+,?\s+){0,3}?(?:race|colou?r|religio\w*|creed|sex\b|sexual|gender|national\s+origin|ancestry|age\b|disabilit\w*|veteran|marital|genetic|pregnan\w*|citizenship|protected|any\s+(?:other\s+)?(?:characteristic|status\s+protected))|equal\s+(?:employment\s+)?opportunit(?:y|ies)|affirmative\s+action|protected\s+(?:class|status|characteristic|veteran)|do(?:es)?\s+not\s+discriminate|prohibits?\s+(?:unlawful\s+)?discriminat\w*|\bEEO\b|E-?Verify)\b/i;
 
 // ── layer 3: polarity ───────────────────────────────────────────────
 
@@ -385,7 +403,7 @@ function requiresPermanentAuth(clause) {
  *     authorization, student status), because clause boundaries are what bound
  *     negation — that is the entire fix.
  *   • Sentence scope for the rest (citizenship, U.S. person, clearance, export
- *     control), because those are read from COORDINATED LISTS that clause
+ *     control), because those are read from COORDICHRISD LISTS that clause
  *     splitting would take apart: "must be a U.S. citizen, lawful permanent
  *     resident, or protected individual" is one ITAR U.S.-person clause, and
  *     reading its first fragment alone would report it as citizen-only —
@@ -492,18 +510,68 @@ const BLOCK_SPEC = {
 };
 
 /**
+ * WHAT HIDES A JOB FOR THIS PERSON.
+ *
+ *   needs sponsorship (F-1, a work visa)   all four blocks, every warning — the
+ *                                          original rule, unchanged
+ *   authorized, not a U.S. person          clearance and citizenship still hide
+ *   (an EAD, say)                          it; a refusal to sponsor is nothing to
+ *                                          them, and a demand for PERMANENT
+ *                                          authorization is a caution to check
+ *   permanent resident                     citizenship and clearance still hide
+ *                                          it (a green card cannot be cleared);
+ *                                          export control is satisfied
+ *   citizen                                nothing hides it. A clearance becomes
+ *                                          a caution carrying the sentence: a
+ *                                          citizen can be cleared, but "active
+ *                                          clearance required" wants one already
+ *                                          held, and that is theirs to judge
+ *
+ * Sponsorship-only notes (hedges, OPT mentions, silence, the green badge) are
+ * written to someone who needs sponsorship, so only that person gets them.
+ */
+export function policyFor(p = PERSON) {
+  const needsSponsorship = p?.needsSponsorship !== false;
+  const citizen = p?.workAuth === 'citizen';
+  const usPerson = !needsSponsorship && !!p?.usPerson;
+  const blocks = needsSponsorship ? new Set(BLOCK_ORDER)
+    : citizen ? new Set()
+      : new Set(['clearance', 'us_citizen']);
+  return {
+    blocks,
+    needsSponsorship,
+    // Export control is a hurdle only for someone who is not a U.S. person.
+    exportWarnings: !usPerson,
+    clearanceCaution: !blocks.has('clearance'),
+    permAuthCaution: !needsSponsorship && !usPerson,
+    // His own history, in his own warnings — nobody else's.
+    notes: (p?.fullName && PRESETS[p.preset]?.writing?.examplesOwner === p.fullName && PRESETS[p.preset].writing.visaNotes) || GENERIC_NOTES,
+  };
+}
+
+/** The export-control notes for someone with no history the code knows of. */
+const GENERIC_NOTES = {
+  us_person: 'Names a "U.S. person" requirement (citizen, permanent resident, asylee or refugee). This is the hardest of the export-control wordings — the employer has to want to file an export licence for you. Employers do file them, so it is worth asking rather than skipping, but ask early.',
+  export_authorization: 'The offer is contingent on obtaining U.S. Government export authorization. That is a licence application your employer files, not a formality. Ask what they have done before.',
+};
+
+/**
  * Classify work authorization. Returns at most one hard block plus any warnings.
  *
  * Contract is unchanged from the old implementation — same block keys, same
  * warning keys, same shape — so serve.mjs, db.mjs and the dashboard need no
  * changes. Only how the verdict is REACHED is different.
  *
+ * `ctx.person` overrides the installed profile (tests, and any caller that
+ * classifies for someone else).
+ *
  * @returns {{block: null|{key:string,reason:string,quote:string|null}, warnings: Array<{key:string,level:string,note:string,quote:string|null}>}}
  */
-export function classifyVisa(title, description) {
+export function classifyVisa(title, description, ctx = {}) {
   const text = `${title || ''}\n${description || ''}`;
   const claims = collectClaims(text);
   const warnings = [];
+  const policy = policyFor(ctx.person || PERSON);
 
   const of = (topic, polarity) => claims.filter(c => c.topic === topic && c.polarity === polarity);
   const negSponsor = of('sponsorship', 'negative');
@@ -526,11 +594,37 @@ export function classifyVisa(title, description) {
 
   let block = null;
   for (const topic of BLOCK_ORDER) {
+    if (!policy.blocks.has(topic)) continue;
     const hits = of(topic, 'negative');
     if (!hits.length) continue;
     if (conflicted && (topic === 'sponsorship' || topic === 'permanent_auth')) continue;
     block = { ...BLOCK_SPEC[topic], quote: hits[0].quote || null };
     break;
+  }
+
+  // What stops being a block for this person is still said when it is worth
+  // reading — with the sentence, the way every caution is.
+  const clearance = of('clearance', 'negative');
+  if (policy.clearanceCaution && clearance.length) {
+    warnings.push({
+      key: 'clearance',
+      level: 'caution',
+      note: 'Requires a security clearance. A U.S. citizen can be cleared, so this does not hide the job — but a posting that wants an ACTIVE clearance wants one you already hold, and some will sponsor one for a new hire. Read the sentence.',
+      quote: clearance[0].quote || null,
+    });
+  }
+  if (policy.permAuthCaution && negPerm.length) {
+    warnings.push({
+      key: 'perm_authorization',
+      level: 'caution',
+      note: 'Asks for permanent or unrestricted work authorization. If your authorization has an end date, this may exclude you — read the sentence.',
+      quote: negPerm[0].quote || null,
+    });
+  }
+
+  if (!policy.needsSponsorship) {
+    if (policy.exportWarnings) exportWarnings(of, warnings, policy.notes);
+    return { block, warnings };
   }
 
   if (conflicted) {
@@ -555,38 +649,7 @@ export function classifyVisa(title, description) {
     });
   }
 
-  // EXPORT CONTROL, MOST SPECIFIC WORDING FIRST.
-  //
-  // All three of these are cautions, never blocks (see BLOCK_ORDER above). They
-  // are reported one at a time, strongest first, because a posting that carries
-  // a U.S.-person list also mentions the EAR somewhere, and stacking three
-  // warnings on one job says less than naming the hardest sentence in it.
-  const usPerson = of('us_person', 'negative');
-  const exportAuth = of('export_auth', 'negative');
-  const exportMention = of('export_control', 'mention');
-
-  if (usPerson.length) {
-    warnings.push({
-      key: 'us_person',
-      level: 'caution',
-      note: 'Names a "U.S. person" requirement (citizen, permanent resident, asylee or refugee). This is the hardest of the export-control wordings — the employer has to want to file for you. You have held an export-controlled role before, so it is worth asking rather than skipping, but ask early.',
-      quote: usPerson[0].quote || null,
-    });
-  } else if (exportAuth.length) {
-    warnings.push({
-      key: 'export_authorization',
-      level: 'caution',
-      note: 'The offer is contingent on obtaining U.S. Government export authorization. That is a licence application your employer files, not a formality — but it is the same class of paperwork that cleared your Applied Materials summer. Ask what they have done before.',
-      quote: exportAuth[0].quote || null,
-    });
-  } else if (exportMention.length) {
-    warnings.push({
-      key: 'export_control',
-      level: 'caution',
-      note: 'Mentions export control (ITAR/EAR) without naming a status requirement. Not a security clearance and usually not an obstacle — semiconductor tool work is EAR-controlled by default. Read the sentence.',
-      quote: exportMention[0].quote || null,
-    });
-  }
+  exportWarnings(of, warnings, policy.notes);
 
   // Only a clause that actually PROMISES sponsorship earns the green badge, and
   // never while something blocks or contradicts it.
@@ -623,6 +686,44 @@ export function classifyVisa(title, description) {
   }
 
   return { block, warnings };
+}
+
+/**
+ * EXPORT CONTROL, MOST SPECIFIC WORDING FIRST.
+ *
+ * All three of these are cautions, never blocks (see BLOCK_ORDER above). They
+ * are reported one at a time, strongest first, because a posting that carries
+ * a U.S.-person list also mentions the EAR somewhere, and stacking three
+ * warnings on one job says less than naming the hardest sentence in it.
+ * `notes` carries the two person-specific wordings (policyFor).
+ */
+function exportWarnings(of, warnings, notes) {
+  const usPerson = of('us_person', 'negative');
+  const exportAuth = of('export_auth', 'negative');
+  const exportMention = of('export_control', 'mention');
+
+  if (usPerson.length) {
+    warnings.push({
+      key: 'us_person',
+      level: 'caution',
+      note: notes.us_person,
+      quote: usPerson[0].quote || null,
+    });
+  } else if (exportAuth.length) {
+    warnings.push({
+      key: 'export_authorization',
+      level: 'caution',
+      note: notes.export_authorization,
+      quote: exportAuth[0].quote || null,
+    });
+  } else if (exportMention.length) {
+    warnings.push({
+      key: 'export_control',
+      level: 'caution',
+      note: 'Mentions export control (ITAR/EAR) without naming a status requirement. Not a security clearance and usually not an obstacle — semiconductor tool work is EAR-controlled by default. Read the sentence.',
+      quote: exportMention[0].quote || null,
+    });
+  }
 }
 
 // Exported for the tests, which assert on the mechanism (segmentation, polarity)

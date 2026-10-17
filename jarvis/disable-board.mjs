@@ -64,8 +64,10 @@ export function disableEntry(text, name, why) {
   const stamp = `${String(why).replace(/"/g, "'").replace(/\s+/g, ' ').trim()} — disabled ${new Date().toISOString().slice(0, 10)}.`;
   const nl = /\r\n/.test(block) ? '\r\n' : '\n';
   let out = /^    notes: "/m.test(block)
-    ? block.replace(/^(    notes: ")/m, `$1${stamp} `)
-    : block.replace(/^(    enabled: true)/m, `    notes: "${stamp}"${nl}$1`);
+    // Function replacers, not template strings (F-638): a reason containing
+    // "$12/hr" was read as capture group 1 + "2/hr" and wrote broken YAML.
+    ? block.replace(/^(    notes: ")/m, (m, p1) => `${p1}${stamp} `)
+    : block.replace(/^(    enabled: true)/m, (m, p1) => `    notes: "${stamp}"${nl}${p1}`);
   out = out.replace(/^    enabled: true([ \t]*)$/m, '    enabled: false$1');
   return { text: text.slice(0, at) + out + text.slice(end), changed: true, reason: 'ok' };
 }

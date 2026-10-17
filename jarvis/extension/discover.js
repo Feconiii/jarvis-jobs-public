@@ -29,10 +29,17 @@
    * three-quarters of one. Handing each timer over through a message port
    * restarts the chain at nesting level zero. Same helper as content.js.
    */
+  // Hidden, the worker keeps the time (content.js, 2026-09-25): a hidden
+  // page's timers never fire sooner than once a second.
   const pause = (ms) => new Promise((r) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; r(); } };
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden' && ms > 0 && globalThis.chrome?.runtime?.sendMessage) {
+      try { chrome.runtime.sendMessage({ type: 'sleep', ms }, () => { void chrome.runtime.lastError; finish(); }); } catch { /* fallback below */ }
+    }
     let port;
-    try { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); r(); }; port = ch.port2; } catch { /* no ports here */ }
-    setTimeout(() => (port ? port.postMessage(0) : r()), ms);
+    try { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); finish(); }; port = ch.port2; } catch { /* no ports here */ }
+    setTimeout(() => (port ? port.postMessage(0) : finish()), ms);
   });
 
   /**
@@ -105,6 +112,10 @@
    * makes a typed value stick. This is the single most important function here.
    */
   function setNativeValue(el, value) {
+    // Only a real field holds a value. Called on a <div> combobox or a
+    // component host, the input setter throws "Illegal invocation" and the
+    // field it was meant for was left cleared (Western Digital, 2026-09-24).
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) return;
     const proto = el instanceof HTMLTextAreaElement
       ? HTMLTextAreaElement.prototype
       : el instanceof HTMLSelectElement
@@ -140,11 +151,21 @@
     const g = String(got ?? ''); const w = String(want ?? '');
     if (g === w) return true;
     const bare = (x) => x.toLowerCase().replace(/[^a-z0-9]/g, '');
-    return !!g && bare(g) === bare(w);
+    if (!!g && bare(g) === bare(w)) return true;
+    // The same number, as content.js's kept_same reads it (F-633): "6" for
+    // "06", and a box that keeps only "90000" of "$90000/year". Never an
+    // amount written with k or m.
+    if (/^\d+$/.test(g.trim()) && /^\d+$/.test(w.trim()) && Number(g) === Number(w)) return true;
+    return /^\s*\d[\d,]*\s*$/.test(g) && !/\d\s*[kKmM]\b/.test(w)
+      && /^[\s$€£]*[\d,]+(\.0+)?\s*(\/\s*(yr|year|annum)|per\s+(year|annum)|annually|usd|a\s+year)?\s*$/i.test(w)
+      && g.replace(/\D/g, '') === w.replace(/\.0+\s*/, ' ').replace(/[^\d]/g, '');
   };
   const tick = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  async function enterText(el, value, { settleMs = 60 } = {}) {
+  // `stay`: type without leaving the box. A suggest-as-you-type list closes on
+  // blur — Lever's "Current location" drops its rows the moment the field is
+  // left, so the rows were never there to choose from (2026-09-25).
+  async function enterText(el, value, { settleMs = 60, stay = false } = {}) {
     const want = String(value ?? '');
     const read = () => (el.isContentEditable ? String(el.textContent || '') : String(el.value ?? ''));
     const doc = el.ownerDocument || document;
@@ -184,6 +205,7 @@
     // not raise those events itself — raise them here. Guarded by hasFocus()
     // so a focused window does not get them twice.
     const leave = () => {
+      if (stay) return;
       const wasActive = doc.activeElement === el;
       if (wasActive) { try { el.blur(); } catch { /* fall through */ } }
       const focusedDoc = typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
@@ -210,9 +232,31 @@
   // SmartRecruiters chains a question through two slots (<spl-autocomplete>
   // → <spl-input> → its <label>), so the label read as "" until this.
   const slotText = (n) => (n && n.tagName === 'SLOT' && n.assignedNodes
-    ? n.assignedNodes({ flatten: true }).map((t) => t.textContent || '').join(' ')
-    : (n?.textContent || ''));
-  const text = (n) => slotText(n).replace(/\s+/g, ' ').trim();
+    ? n.assignedNodes({ flatten: true }).map((t) => plainText(t)).join(' ')
+    : plainText(n));
+  // WORDS, NOT CODE OR SOMEONE ELSE'S OPTIONS (Spirit AeroSystems on iCIMS,
+  // 2026-10-02). A question's container held a <style> block, and its label
+  // read "#remainderSection{background-color:white;position:absolute;…}"; a
+  // Year box inside a <label> that also held the Month and Day dropdowns read
+  // "MonthJanFebMar…Day1234…Year". textContent includes both. Style, script
+  // and template text never are, and a dropdown's options are not the label
+  // of anything but that dropdown.
+  // …nor a dropdown's own box: Paylocity draws its State and Country menus,
+  // current value and all, INSIDE the <label>, which read "StateWashington"
+  // and "CountryUnited States" — and no rule knew either (F-691).
+  const NOT_WORDS = 'style, script, noscript, template, select, option, datalist, [aria-haspopup="listbox"], [role="listbox"]';
+  function plainText(n) {
+    if (!n) return '';
+    if (n.nodeType === 1 && /^(STYLE|SCRIPT|NOSCRIPT|TEMPLATE)$/.test(n.tagName)) return '';
+    if (n.nodeType !== 1 || /^(SELECT|OPTION|DATALIST)$/.test(n.tagName) || !n.querySelector(NOT_WORDS)) return n.textContent || '';
+    const copy = n.cloneNode(true);
+    copy.querySelectorAll(NOT_WORDS).forEach((x) => x.remove());
+    return copy.textContent || '';
+  }
+  // "SVGs not supported by this browser." is the fallback text inside an
+  // icon's <svg>, not words on the form. Workable's resume slot read as
+  // exactly that (Verustruct, 2026-09-24), so it was never taken for a resume.
+  const text = (n) => slotText(n).replace(/SVGs? (are )?not supported by (this|your) browser\.?/gi, ' ').replace(/\s+/g, ' ').trim();
 
   /**
    * The label a human would read for this control.
@@ -241,7 +285,13 @@
    */
   function fieldKey(el) {
     const wrap = el.closest('[data-automation-id^="formField-"]');
-    return wrap?.getAttribute('data-automation-id') || el.getAttribute('data-automation-id') || '';
+    const wd = wrap?.getAttribute('data-automation-id') || el.getAttribute('data-automation-id') || '';
+    if (wd) return wd;
+    // A JSON-schema form's list entries (Honda's Phenom apply, 2026-10-02):
+    // `experienceData[1].companyName` says which job and which part of it, which
+    // the label ("Company Name", twice) cannot.
+    const id = el.id || '';
+    return /^[A-Za-z]+\[\d+\]\.[\w.]+$/.test(id) ? id : '';
   }
 
   /**
@@ -264,7 +314,15 @@
    * one we merely typed into reads back the typed text perfectly. Asking the
    * input is not just unhelpful, it is exactly backwards.
    */
+  // A PLACEHOLDER IS NOT A VALUE. TSMC's SuccessFactors menus show "No
+  // Selection" until something is chosen; read as the value, "No" looked
+  // already chosen and nothing was ever clicked (2026-09-24).
+  const PLACEHOLDER_VALUE_RE = /^\s*(no\s+selection|none\s+selected|nothing\s+selected|select|choose|please\s+(select|choose)|select\s+(one|an?\s+option|a\s+value|an?\s+(state|country|province|region))|choose\s+(one|an?\s+option)|-+|—)\s*[.:…-]*\s*$/i;
   function comboValue(el) {
+    const v = comboValueRaw(el);
+    return PLACEHOLDER_VALUE_RE.test(String(v || '')) ? '' : v;
+  }
+  function comboValueRaw(el) {
     // TWO WIDGETS, OPPOSITE CONVENTIONS, and reading the wrong one is worse
     // than not reading at all.
     //
@@ -290,6 +348,36 @@
     const wrap = el.closest?.('[data-automation-id^="formField-"]');
     const chips = wrap?.querySelector('[data-automation-id="selectedItemList"]');
     if (chips) return text(chips);
+    // SMARTRECRUITERS' <spl-multiselect-autocomplete> keeps the choice on the
+    // component — `host.value` holds the option ids and the chip is drawn in
+    // its shadow root — while the input it wraps is emptied on every pick
+    // (Western Digital, measured 2026-09-24). Read as the input, a pick that
+    // landed looked like nothing, and a retry toggled it back off.
+    // The input can sit several components deep (the multi-select wraps an
+    // inner input component), so walk out through the hosts to the one that
+    // holds a `value`.
+    // THE ATTRIBUTE, NOT THE PROPERTY: an extension's content script runs in
+    // an isolated world where a component's own JS properties (`host.value`)
+    // do not exist; SmartRecruiters mirrors the choice into a `value`
+    // attribute, which the DOM shares with every world.
+    const hostValue = (h) => { const p = h.value; return p != null ? p : h.getAttribute?.('value'); };
+    let host = el.getRootNode?.()?.host;
+    for (let i = 0; host && i < 4 && !(/autocomplete|select/i.test(host.tagName) && ('value' in host || host.hasAttribute?.('value'))); i += 1) host = host.getRootNode?.()?.host;
+    if (host && /autocomplete|select/i.test(host.tagName)) {
+      const v = hostValue(host);
+      if (Array.isArray(v) ? v.length : (v != null && String(v).trim())) {
+        // A single select shows its label in the box itself.
+        if (!/multi/i.test(host.tagName) && String(el.value || '').trim()) return String(el.value).trim();
+        const shown = [...(host.shadowRoot?.querySelectorAll('[class*="tag" i], [class*="chip" i], spl-tag, spl-chip') || [])].map((t) => text(t)).filter(Boolean).join(', ');
+        return shown || text(host.shadowRoot || host) || String(v);
+      }
+    }
+    // A COMBOBOX THAT IS NOT AN INPUT (Rippling's `div role="combobox"`) shows
+    // its choice as its own text, and "Select..." until one is made.
+    if (el.tagName && !/^(INPUT|TEXTAREA)$/.test(el.tagName)) {
+      const t = text(el);
+      return /^(select|choose|pick)(\s+(one|an?\s+option|a\s+value))?\s*\.{0,3}$/i.test(t) ? '' : t;
+    }
 
     let node = el.parentElement;
     for (let i = 0; node && i < 4; i += 1, node = node.parentElement) {
@@ -319,7 +407,12 @@
    * that never heard about it — so a read-back check confirms the lie.
    */
   function isCombobox(el) {
-    if (el.getAttribute('role') !== 'combobox') return false;
+    // PAYLOCITY'S MENUS HAVE NO ROLE (F-691): a plain text input with
+    // aria-autocomplete="list" inside a box that owns the listbox. Read as a
+    // text box, "Washington" was typed into its search and thrown away.
+    if (el.getAttribute('role') !== 'combobox') {
+      return el.tagName === 'INPUT' && el.getAttribute('aria-autocomplete') === 'list' && !!el.closest('[aria-haspopup="listbox"]');
+    }
     return el.getAttribute('aria-autocomplete') === 'list' || el.hasAttribute('aria-expanded');
   }
 
@@ -434,7 +527,15 @@
   function attachedNear(el) {
     const scope = el.closest('[data-automation-id="file-upload"], section, form') || document;
     const chips = scope.querySelectorAll('[data-automation-id="delete-file"], [data-automation-id="file-preview"]');
-    return chips.length || el.files?.length || 0;
+    if (chips.length || el.files?.length) return chips.length || el.files.length;
+    // A COMPONENT THAT TOOK THE FILE AND EMPTIED ITS INPUT (SmartRecruiters'
+    // <spl-dropzone>, 2026-09-24) shows it in its own shadow root: a file name
+    // and a "Delete file" control. Counted, so a second pass does not upload
+    // on top of it.
+    const host = el.getRootNode?.()?.host;
+    const shown = host?.shadowRoot ? (host.shadowRoot.textContent || '') : '';
+    const del = host?.shadowRoot?.querySelector('[aria-label*="delete" i], [aria-label*="remove" i]');
+    return (del && /\.(pdf|docx?|rtf|odt|txt)\b/i.test(shown)) ? 1 : 0;
   }
   /**
    * A little of the wording around a control, for telling look-alikes apart.
@@ -462,10 +563,10 @@
   function helpText(el) {
     const tree = el.getRootNode();
     const described = String(el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean)
-      .map((id) => tree.getElementById?.(id)?.textContent || document.getElementById(id)?.textContent || '').join(' ');
+      .map((id) => plainText(tree.getElementById?.(id) || document.getElementById(id))).join(' ');
     const box = el.closest('[data-automation-id^="formField-"], fieldset, .application-question, [class*="question"], [class*="field"], li, section')
       || el.parentElement?.parentElement || el.parentElement;
-    let around = String(box?.textContent || '');
+    let around = plainText(box);
     const value = String(el.value || '');
     if (value) around = around.split(value).join(' ');
     return `${described} ${around}`.replace(/\s+/g, ' ').trim().slice(0, 800);
@@ -479,7 +580,7 @@
     const wdWrap = el.closest('[data-automation-id^="formField-"]');
     if (wdWrap) {
       const l = wdWrap.querySelector('label, legend');
-      if (l && !l.contains(el)) label = l.textContent;
+      if (l && !l.contains(el)) label = plainText(l);
     }
     // The label is looked for in the TREE THE CONTROL IS IN — its shadow
     // root when it has one — never only in the document.
@@ -490,7 +591,7 @@
       // host was given no text still renders "<label>*</label>", and taking
       // it stopped the walk up to the host that does carry the name. A label
       // whose words come through a <slot> reads them from the slot.
-      const lt = l ? [...l.querySelectorAll('slot')].map(slotText).join(' ') + ' ' + (l.textContent || '') : '';
+      const lt = l ? [...l.querySelectorAll('slot')].map(slotText).join(' ') + ' ' + plainText(l) : '';
       if (l && lt.replace(/[*✱\s]/g, '')) label = lt;
     }
     // A LABEL THAT IS ONLY A REQUIRED MARK IS NO LABEL, on every path. The
@@ -498,13 +599,15 @@
     // inside its component; `closest('label')` returned "*", which counted as
     // found, the walk to the host never ran, and the box was planned as a
     // question with no words (F-333).
-    const meaningful = (s) => /[^\s*✱:]/.test(String(s || ''));
+    // "Select" / "Choose one" is a control's own word, not a question: Boom
+    // Supersonic's searchable dropdown is aria-label="Select" (2026-09-25).
+    const meaningful = (s) => /[^\s*✱:]/.test(String(s || '')) && !/^\s*(select|choose)\b[\s\w.…-]{0,12}$/i.test(String(s || ''));
     if (!meaningful(label)) {
       const lb = el.getAttribute('aria-labelledby');
-      if (lb) label = lb.split(/\s+/).map((x) => (tree.getElementById?.(x) || document.getElementById(x))?.textContent || '').join(' ');
+      if (lb) label = lb.split(/\s+/).map((x) => plainText(tree.getElementById?.(x) || document.getElementById(x))).join(' ');
     }
     if (!meaningful(label)) label = el.getAttribute('aria-label') || '';
-    if (!meaningful(label)) label = el.closest('label')?.textContent || '';
+    if (!meaningful(label)) label = plainText(el.closest('label'));
     if (!meaningful(label)) {
       // WALK UP, don't stop at the first div.
       //
@@ -518,7 +621,17 @@
       // question.
       label = '';
       let node = parentOf(el);
+      // NEVER A LEVEL THAT HOLDS OTHER QUESTIONS (Breezy, 2026-09-24). Two
+      // levels up from Breezy's name box is the whole <form>; once its resume
+      // parse added work-history rows, the first "label"-classed thing in the
+      // form was a date picker's "Start date" — and EVERY field on the page,
+      // name, email, phone and a honeypot, was labelled "Start date" and
+      // planned his start date. A label found at a level holding other
+      // controls could belong to any of them, so the walk stops there.
+      const othersIn = (n) => [...n.querySelectorAll('input:not([type="hidden"]), select, textarea')]
+        .some((x) => x !== el && !(el.name && x.name === el.name) && !(el.type === 'radio' && x.type === 'radio'));
       for (let i = 0; node && i < 5 && !label; node = parentOf(node)) {
+        if (node.querySelectorAll && othersIn(node)) break;
         // A WEB COMPONENT NAMES ITS FIELD ON THE HOST. SmartRecruiters'
         // <spl-input label="First name"> renders that attribute inside its
         // shadow root; the phone number's label sits two hosts up.
@@ -536,8 +649,39 @@
         // Stepping out of a shadow root is not a level of the page.
         if (node.parentElement) i += 1;
       }
+      // THE QUESTION IN THE BLOCK BEFORE THE FIELD (Rippling, Boom Supersonic
+      // 2026-09-25): "Please explain why you want to work at Boom…" is a <p>
+      // in the sibling before `data-testid="field"`, with no label anywhere,
+      // and its searchable dropdown sits eight levels inside. Only once the
+      // walk above found NO label: Atomic Semi's "Ideal start date in office"
+      // has a real <label> one level further up and help text ("This is an
+      // in-office position.") in the sibling below it — read first, the help
+      // text became the question.
+      for (let n = type === 'file' ? null : parentOf(el), i = 0; n && i < 9 && !label; n = parentOf(n), i += 1) {
+        if (n.querySelectorAll && othersIn(n)) break;
+        const sib = n.previousElementSibling;
+        if (!sib || sib.querySelector('input, select, textarea, [role="combobox"], [role="radio"], [role="checkbox"]')) continue;
+        const first = (sib.innerText || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
+        if (first.length > 3 && first.length <= 400) label = first;
+      }
     }
     label = (label || '').replace(/\s+/g, ' ').replace(/[*✱]\s*$/, '').trim();
+    // A MACHINE CODE AT THE END IS NOT PART OF THE QUESTION. Waymo's labels
+    // carry <span>80aff57e</span> after the words ("First Name (required)
+    // 0830c081", 2026-09-24) — a fresh hex token per field. Eight hex
+    // characters with a digit in them; a real last word is never that.
+    label = label.replace(/\s+(?=[0-9a-f]{8}$)(?=\S*\d)[0-9a-f]{8}$/, '').trim();
+
+    // A DATE BOX NAMED FOR SOMETHING ELSE. Breezy's parsed work-history dates
+    // carry placeholder="Company" (its own copy-paste), so they read as
+    // "Company"; what they are is in the binding — ng-model
+    // "candidatePosition.date_start" / "date_end" (2026-09-24).
+    if ((type === 'date' || el.type === 'date') && !/date|from|to\b|start|end|since|until|when/i.test(label)) {
+      const bind = ['ng-model', 'formcontrolname', 'v-model', 'data-field', 'name', 'id']
+        .map((a) => el.getAttribute(a) || '').join(' ');
+      if (/start|from|begin/i.test(bind)) label = 'Start date';
+      else if (/end|to\b|until|finish/i.test(bind)) label = 'End date';
+    }
 
     // A <select>'s wrapper text contains every option, so the fallback can
     // swallow the whole list — Lever's Race field read as "RaceSelect…Hispanic
@@ -558,8 +702,34 @@
     // attach — the resume bug's second half. What names it is the section
     // heading above it ("Resume/CV/additional documents"), so put that in front.
     if (type === 'file') {
-      if (!label) label = 'Resume/CV';
-      if (!/resume|cv\b|curriculum/i.test(label)) {
+      // A NAMELESS upload is walked BEFORE it is called "Resume/CV". Dover
+      // (2026-09-24) has two bare inputs: "Autofill from resume" (a parser)
+      // and "Resume (optional)". Named first, both read as the resume, the
+      // walk that tells a parser apart never ran, and the file went to the
+      // parser.
+      const nameless = !label;
+      // A SLOT NAMED BY ITS BUTTON (Formlabs' Greenhouse embed, 2026-09-25).
+      // The cover-letter slot and "If your portfolio is not available online,
+      // please attach it here" were both read as "Attach", and the second was
+      // listed as left for him under that one word. The question is the first
+      // line above the button, at a level holding no other visible control.
+      if (/^\s*(attach|upload|browse|choose\s+(a\s+)?file|select\s+(a\s+)?file|add\s+(a\s+)?file)\s*[*✱]?\s*$/i.test(label)) {
+        const button = label.replace(/[*✱]/g, '').trim();
+        const othersShown = (n) => [...n.querySelectorAll('input:not([type="hidden"]), select, textarea')]
+          .some((x) => x !== el && x.type !== 'file' && x.getClientRects().length > 0);
+        for (let node = parentOf(el), i = 0; node && i < 6; i += 1, node = parentOf(node)) {
+          if (!node.querySelectorAll || othersShown(node) || node.querySelectorAll('input[type="file"]').length > 1) break;
+          // Greenhouse puts "Dropbox", "Google Drive" and "Enter manually"
+          // beside Attach; a control's own words are never the question.
+          const controls = new Set([...node.querySelectorAll('button, a, [role="button"]')].map((b) => text(b).toLowerCase()).filter(Boolean));
+          const lead = (node.innerText || '').split('\n').map((s) => s.trim())
+            .find((s) => s && s.toLowerCase() !== button.toLowerCase() && !controls.has(s.toLowerCase())
+              && !/^(accepted\s+file|file\s+types?|max(imum)?\s+file|or\s*$|drag|drop|enter\s+manually|dropbox|google\s+drive)/i.test(s));
+          if (lead && lead.length <= 200) { label = `${lead.replace(/[*✱:]\s*$/, '').trim()} — ${button}`; break; }
+        }
+      }
+      if (nameless) label = 'Resume/CV';
+      if (nameless || !/resume|cv\b|curriculum/i.test(label)) {
         // Walk up to the NEAREST ancestor that contains a heading and use that
         // one, whatever it says. Measured on Workday, the "Resume/CV/additional
         // documents" heading is seven levels above the input, so a short walk
@@ -569,6 +739,12 @@
         // and if the nearest does not name a resume then this is not one.
         let node = parentOf(el);
         for (let i = 0; node && i < 12; i += 1, node = parentOf(node)) {
+          // A SLOT WITH A NAME OF ITS OWN STOPS AT ITS OWN QUESTION. Ashby's
+          // "Cover Letter" slot (Mariana Minerals, 2026-09-25) walked up to the
+          // whole form, whose first line is "Autofill from resume", and was
+          // skipped as the parser slot; the letter never went on.
+          if (!nameless && node.querySelectorAll
+            && [...node.querySelectorAll('input:not([type="hidden"]), select, textarea')].some((x) => x !== el && (x.type === 'file' || x.getClientRects().length > 0))) break;
           // A section that says "Resume *" in a label-like first line rather
           // than a heading: SmartRecruiters' <oc-resume-upload> (F-332), which
           // sits under the posting's own h1 and would otherwise be named by
@@ -605,11 +781,17 @@
     // A label that is already a full sentence needs no question in front of it;
     // hunting for one can only make it worse. The length gate is what tells the
     // two cases apart, and it is the same distinction the comment above draws.
-    if ((type === 'radio' || type === 'checkbox') && label.trim().length > 24) {
+    // …but only for a control that stands alone. A long OPTION in a group is
+    // still an option: Capstan Medical's "Yes - I'm attending our pursuing
+    // higher education currently" (Lever, 2026-09-26) became the question, and
+    // "Are you currently enrolled in … a Bachelor's, Master's, or Doctoral
+    // degree?" above it was never read.
+    const grouped = el.name && (el.getRootNode().querySelectorAll?.(`input[type="${type}"][name="${CSS.escape(el.name)}"]`) || []).length > 1;
+    if ((type === 'radio' || type === 'checkbox') && label.trim().length > 24 && !grouped) {
       return label;
     }
     if (type === 'radio' || type === 'checkbox') {
-      let group = el.closest('fieldset')?.querySelector('legend')?.textContent
+      let group = plainText(el.closest('fieldset')?.querySelector('legend'))
         || (() => {
           // `[role=group]` and a plain aria-labelled fieldset matter as much as
           // radiogroup: GlobalFoundries' Workday labels "Have you previously
@@ -618,7 +800,7 @@
           const g = el.closest('[role="radiogroup"], [role="group"], fieldset');
           if (!g) return '';
           const lb = g.getAttribute('aria-labelledby');
-          return (lb ? (document.getElementById(lb)?.textContent || '') : '')
+          return (lb ? plainText(document.getElementById(lb)) : '')
             || g.getAttribute('aria-label') || '';
         })();
 
@@ -643,7 +825,10 @@
           // Preceding siblings are where the question actually is.
           let cand = '';
           for (let sib = node.previousElementSibling; sib && !cand; sib = sib.previousElementSibling) {
-            const t = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+            // A <style> above the options is not the question (Spirit's
+            // "#remainderSection{background-color:white;…}", 2026-10-02).
+            if (/^(STYLE|SCRIPT|NOSCRIPT|TEMPLATE|LINK|META)$/.test(sib.tagName)) continue;
+            const t = plainText(sib).replace(/\s+/g, ' ').trim();
             // A short question is still a question when it is written as one
             // — a <label>, <legend> or heading of its own ("Pronouns", on
             // Lever, F-346); a stray short line of prose is not.
@@ -680,17 +865,68 @@
     const ph = el.getAttribute('placeholder')?.trim() || '';
     if (ph && !/^(type|enter|write|your|select|choose|please|e\.?g\.?|start typing)\b/i.test(ph)) return ph;
 
+    // A BOX UNDER A HEADING OF ITS OWN is named by the heading. Breezy's
+    // summary and cover letter are bare <textarea name="cSummary"> /
+    // "cCoverLetter" under "<h3>Summary</h3>" / "<h3>Cover Letter</h3>"
+    // (2026-09-24), and were reported by their internal names. Only a heading
+    // with no other control between it and the box.
+    heading: for (let n = el, i = 0; n && i < 4; i += 1, n = n.parentElement) {
+      for (let s = n.previousElementSibling; s; s = s.previousElementSibling) {
+        if (s.querySelector?.('input:not([type="hidden"]), select, textarea')) break heading;
+        const h = s.matches?.('h1, h2, h3, h4, h5, legend') ? s : s.querySelector?.('h1, h2, h3, h4, h5, legend');
+        const t = h ? text(h).replace(/[*✱:]\s*$/, '').trim() : '';
+        if (t && t.length <= 60) return t;
+        // …or by a QUESTION written above it in plain text. Rippling's custom
+        // short answers are <p>What is your salary expectation?</p> over a box
+        // with no label, no placeholder and a random name (Cintal,
+        // 2026-09-24), and were reported as "o8tr6xgz5N". Only a line that
+        // asks something, so a stray paragraph never names a field.
+        const q = h ? '' : text(s).replace(/[*✱]\s*$/, '').trim();
+        if (q && q.length <= 300 && /\?$/.test(q)) return q;
+        // …or by a SHORT LINE directly above it, written as a plain <div>:
+        // Dover's "First Name *", "Phone Number" (2026-09-24) — the form had
+        // no <label> anywhere and every box was reported by its internal
+        // name. The nearest sibling only, one line, no control inside it.
+        if (!h && s === n.previousElementSibling) {
+          const line = text(s).replace(/[*✱:]\s*$/, '').replace(/[*✱]\s*$/, '').trim();
+          if (line && line.length <= 80 && !/\n/.test(s.innerText || '')) return line;
+        }
+      }
+    }
+
     // Nor is a machine-generated name. Lever writes `cards[<uuid>][field5]`;
     // reporting that back to him as the question is noise dressed as a label.
+    // Rippling writes a fresh random token per load ("WgaoKnKViAz",
+    // "0Dq0 u2aLhP"), which reads as a different unanswerable question on
+    // every visit: a name that flips case over and over is not words.
     const nm = el.getAttribute('name') || '';
-    if (nm && !/[[\]]|[0-9a-f]{8}-[0-9a-f]{4}/i.test(nm)) return nm.replace(/[_-]+/g, ' ').trim();
+    const flips = (nm.match(/[a-z](?=[A-Z])|[A-Z](?=[a-z])|[A-Za-z](?=\d)|\d(?=[A-Za-z])/g) || []).length;
+    if (nm && !/[[\]]|[0-9a-f]{8}-[0-9a-f]{4}/i.test(nm) && flips < 5) return nm.replace(/[_-]+/g, ' ').trim();
 
     return '';
   }
 
   /** Radios and checkboxes that share a name are ONE question, not several. */
+  /**
+   * ASHBY'S CHECKBOX GROUPS (Base Power, 2026-09-25). Each box of "How did you
+   * hear about Base Power Company?" is NAMED after its own option, so the
+   * name-grouping below made every option its own question — the question was
+   * lost, "LinkedIn" met the LinkedIn-profile rule and stayed unticked. The
+   * boxes share an id prefix (`<question>-labeled-checkbox-N`), and the
+   * question is the fieldset's first <label>.
+   */
+  // …and its radio groups the same way ("How did you hear about Eight
+  // Sleep?" came through labelled by its first option, 2026-09-25).
+  const ASHBY_GROUP_RE = /^(.+)-labeled-(?:checkbox|radio)-\d+$/;
+  function ashbyGroupQuestion(el) {
+    if (!ASHBY_GROUP_RE.test(String(el?.id || ''))) return '';
+    const q = el.closest('fieldset')?.firstElementChild;
+    return q && q.tagName === 'LABEL' ? text(q) : '';
+  }
   function groupKey(el) {
     if (el.type !== 'radio' && el.type !== 'checkbox') return null;
+    const ashby = String(el.id || '').match(ASHBY_GROUP_RE);
+    if (ashby) return `${el.type}:ashby:${ashby[1]}`;
     // A shared `name` is the usual grouping. Workday sometimes omits it and
     // relies on the formField wrapper instead, and without this fallback each
     // option of one question became a separate unanswerable field.
@@ -700,6 +936,26 @@
   }
 
   /** The option text for one radio or checkbox, without the question prefix. */
+  // ASHBY'S YES/NO (2026-09-25). A yes-or-no question there is two buttons,
+  // "Yes" and "No", over a hidden checkbox. Read as that checkbox it arrived
+  // with the single option "YesNo", so "Do you now, or in the future, require
+  // visa sponsorship?" was planned as a bare tick on Mariana Minerals' form and
+  // ended cleared. The buttons are the question's options.
+  function yesNoButtons(el) {
+    if ((el.type || '').toLowerCase() !== 'checkbox') return null;
+    for (let n = el.parentElement, i = 0; n && i < 4; n = n.parentElement, i += 1) {
+      // Never a level that holds another question: a plain consent box beside
+      // a Yes/No would borrow its buttons.
+      if ([...n.querySelectorAll('input, select, textarea')].some((x) => x !== el)) return null;
+      const bs = [...n.querySelectorAll('button')];
+      if (!bs.length) continue;
+      const yes = bs.find((b) => /^\s*yes\s*$/i.test(b.textContent || ''));
+      const no = bs.find((b) => /^\s*no\s*$/i.test(b.textContent || ''));
+      return bs.length === 2 && yes && no ? [yes, no] : null;
+    }
+    return null;
+  }
+
   function optionText(el) {
     const l = el.id && el.getRootNode().querySelector(`label[for="${CSS.escape(el.id)}"]`);
     return text(l) || el.value || '';
@@ -753,7 +1009,12 @@
    */
   const FURNITURE_NAME = /^(?:keyword|keywords|kwopt|reqnumber|requisition_?id|jobreqid|radius|distance|sortby|sort_?order|pagesize|facet)/i;
   /** …and by what the label says, for a panel whose names are numbered too. */
-  const FURNITURE_LABEL = /^\s*keywords?\s*$|^\s*keyword search options\b|^\s*search (?:jobs|openings|by)\b|^\s*requisition id\s*$|^\s*(?:sort by|results per page|search radius|distance)\s*$/i;
+  const FURNITURE_LABEL = /^\s*keywords?\s*$|^\s*keyword search options\b|^\s*search (?:jobs|openings|by)\b|^\s*requisition id\s*$|^\s*(?:sort by|results per page|search radius|distance)\s*$|^\s*subscribe\b|\bnews\s*(?:&|and)\s*updates\b/i;
+  // A SITE'S OWN SEARCH BOX is named `q` (Swisslog's careers page, 2026-09-25:
+  // "q" and "Subscribe for news & updates" were the two things "left for you"
+  // on a page with no application on it). The WHOLE name, never a prefix —
+  // "question_12" is a real field.
+  const FURNITURE_EXACT_NAME = /^(?:q|s|query|search|searchterm|search_term)$/i;
 
   /**
    * A BOT TRAP (F-388). Workday's Create Account page carries
@@ -773,6 +1034,18 @@
     if (!el) return false;
     const attrs = `${el.getAttribute?.('data-automation-id') || ''} ${el.name || ''} ${el.id || ''} ${(typeof el.className === 'string' ? el.className : '')} ${el.getAttribute?.('aria-label') || ''}`;
     if (HONEYPOT_ATTR.test(attrs)) return true;
+    // Breezy's "hp_7f2b" (2026-09-24): named hp_<hash>, in an aria-hidden box
+    // at left:-9999px with tabindex -1 — invisible to a person.
+    if (el.type !== 'file') {
+      if (/(^|[\s_-])hp[_-][0-9a-z]{2,}\b/i.test(`${el.name || ''} ${el.id || ''}`)) return true;
+      try {
+        if (el.closest?.('[aria-hidden="true"]') && el.getAttribute?.('tabindex') === '-1') return true;
+        // Page coordinates, not the viewport's: a field scrolled out of view
+        // above is still a field.
+        const r = el.getBoundingClientRect?.();
+        if (r && (r.right + window.scrollX < -500 || r.bottom + window.scrollY < -500)) return true;
+      } catch { /* not measurable — judged by its words below */ }
+    }
     if (HONEYPOT_TEXT.test(el.getAttribute?.('aria-label') || '')) return true;
     return HONEYPOT_TEXT.test(labelFor(el, (el.type || 'text').toLowerCase()) || '');
   }
@@ -785,7 +1058,7 @@
       const nm = (n.getAttribute && n.getAttribute('name')) || '';
       return FURNITURE_ANY.test(id) || FURNITURE_ANY.test(cls)
         || FURNITURE_TOKEN.test(id) || FURNITURE_TOKEN.test(cls)
-        || (!!nm && (FURNITURE_ANY.test(nm) || FURNITURE_NAME.test(nm)));
+        || (!!nm && (FURNITURE_ANY.test(nm) || FURNITURE_NAME.test(nm) || FURNITURE_EXACT_NAME.test(nm)));
     };
     // The control's own label, before anything else is asked about it.
     if (el && FURNITURE_LABEL.test((labelFor(el, el.type || 'text') || '').trim())) return true;
@@ -802,17 +1075,46 @@
 
     // 2. THE FORM BOUNDARY. Inside a real <form>, no name on the control can
     //    overrule the fact that it belongs to the application.
-    if (form) return named(form);
+    // …UNLESS THE FORM SAYS WHAT IT IS. Waymo's posting page carries a second
+    // <form> under "Job Alerts — Sign up to receive tailored job alerts"
+    // (2026-09-24), with its own First Name, Email, Departments and
+    // Locations; it was read as the application. Its heading is the only name
+    // it has.
+    if (form) {
+      let box = form;
+      for (let i = 0; box && i < 4; i += 1, box = box.parentElement) {
+        // The NEAREST worded heading before the field — Waymo's alert form
+        // opens with an empty <legend>, and a container two levels up can hold
+        // both the alert form's heading and the application's.
+        const h = [...(box.querySelectorAll?.('h1, h2, h3, h4, legend') || [])]
+          .filter((x) => text(x) && (x.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))
+          .pop();
+        if (h && !h.contains(el)) {
+          if (/^\s*(job\s+alerts?|get\s+job\s+alerts|talent\s+(community|network)|join\s+our\s+talent|newsletter|stay\s+(connected|in\s+touch))\b/i.test(text(h))) return true;
+          break;
+        }
+      }
+      return named(form);
+    }
 
-    // 3. No enclosing form, so judge by the names on the chain.
-    for (let n = el; n && n !== document.documentElement; n = parentOf(n)) {
+    // 3. No enclosing form, so judge by the names on the chain. <body> is not
+    //    on it: its classes describe the PAGE. SmartRecruiters' chat widget
+    //    sets "has-winston-chat-mobile-apply" there, and every control outside
+    //    the form became furniture — Western Digital's privacy consent box was
+    //    never discovered, ticked or reported (F-567, 2026-09-24).
+    for (let n = el; n && n !== document.documentElement && n !== document.body; n = parentOf(n)) {
       if (named(n)) return true;
     }
     return false;
   }
 
   const visible = (el) => {
-    if (el.disabled || el.readOnly) return false;
+    // READONLY MEANS NOTHING ON A RADIO OR A CHECKBOX — the browser still
+    // ticks it — and Eightfold marks every radio readonly. AMAT's whole
+    // "Position Specific Questions" block (sponsorship, work authorization,
+    // graduation status, degree, major, graduation term, relocation) was
+    // dropped here, on every AMAT application, and never reported (F-694).
+    if (el.disabled || (el.readOnly && !/^(radio|checkbox)$/i.test(el.type || ''))) return false;
     if (el.type === 'hidden') return false;
     // A SLIDER IS NEVER AN ANSWER. Eaton's Eightfold posting embeds a video
     // whose Seek and Volume are `input[type=range]`; they counted as two form
@@ -820,7 +1122,17 @@
     // Apply was never followed and the report listed "Volume" as a question
     // left for him. Measured live.
     if (el.type === 'range' || el.type === 'color') return false;
-    if (el.closest('video, audio, [class*="player" i], [class*="video" i]')) return false;
+    // …but never the page itself: Modernizr writes its feature tests onto
+    // <html> as classes — "video audio canvas …" — so every control on every
+    // Modernizr page sat "inside a video player". ADP Workforce Now is one:
+    // the signed-in Therm-X form read as 0 fields and a sign-in wall
+    // (2026-10-16), and no ADP application ever filled a box.
+    const mediaBox = el.closest('video, audio, [class*="player" i], [class*="video" i]');
+    if (mediaBox && mediaBox !== document.documentElement && mediaBox !== document.body) return false;
+    // AN OPEN CALENDAR'S OWN MONTH AND YEAR LISTS are its navigation, not
+    // questions: Honda's react-datepicker popup came back as fields named
+    // "<", "May 2026" and "2026" (2026-10-02). The date box itself stays.
+    if (el.closest('.react-datepicker, .react-datepicker-popper')) return false;
 
     // A FILE INPUT IS EXEMPT FROM EVERY ONE OF THESE TESTS, and this check must
     // come FIRST. Getting that half-right is why he never once saw a resume.
@@ -890,8 +1202,12 @@
   /** What a button is called: its text, its aria-label, or its component host's. */
   const buttonName = (b) => {
     const host = b.getRootNode?.().host;
-    return [text(b), b.getAttribute('aria-label'), host?.getAttribute?.('aria-label'), host ? text(host) : '']
-      .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    // Each name once: Honda's Next says "Next" in its text AND its aria-label,
+    // and "Next Next" matched no Next pattern — his presses there were never
+    // logged as steps (2026-10-02).
+    const names = [text(b), b.getAttribute('aria-label'), host?.getAttribute?.('aria-label'), host ? text(host) : '']
+      .map((s) => String(s || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    return [...new Map(names.map((s) => [s.toLowerCase(), s])).values()].join(' ').trim();
   };
   const insideEntry = (el) => !!el.closest?.(ENTRY_SEL);
 
@@ -905,6 +1221,24 @@
     return '';
   }
 
+  /**
+   * THE QUESTION ABOVE A SPLIT DATE (Boom Supersonic's Rippling form,
+   * 2026-09-25). Its three boxes label themselves "month", "day" and "year";
+   * the question — "Please share your anticipated graduation date." — sits in
+   * a wrapper above them. The nearest ancestor whose words are more than the
+   * boxes' own slashes is where it is.
+   */
+  function splitDateQuestion(el) {
+    let box = el;
+    for (let i = 0; i < 14 && box; i += 1) {
+      box = box.parentElement;
+      const words = String(box?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (words.replace(/[\s/.-]+/g, '').replace(/^(mm|dd|yyyy|month|day|year)+$/i, '').length > 3) {
+        return words.replace(/[\s/]+$/g, '').slice(0, 300);
+      }
+    }
+    return '';
+  }
   function datePartOf(el) {
     if (!el || el.tagName !== 'INPUT') return undefined;
     const s = [el.getAttribute('data-automation-id'), el.id, el.getAttribute('aria-label'), el.placeholder, el.name].filter(Boolean).join(' ');
@@ -966,7 +1300,11 @@
       // enumerator: "Company" inside a Work Experience panel is that job's
       // employer, not the answer to "current company". (The driver has the
       // same rule, for the same reason.)
-      .filter((el) => !insideEntry(el));
+      .filter((el) => !insideEntry(el))
+      // A HONEYPOT IS FOR BOTS, and filling one flags the application as one.
+      // Breezy's "hp_7f2b" sits in an aria-hidden box at left:-9999px with
+      // tabindex -1 (2026-09-24) — invisible to a person, so never a question.
+      .filter((el) => !isHoneypot(el));
     const fields = [];
     const seenGroup = new Map();
 
@@ -996,9 +1334,12 @@
       // and the step would not advance. They are driven by clicking, or left
       // alone when Workday has already filled them from his candidate profile.
       const prompt = promptOf(el);
+      const yn = yesNoButtons(el);
+      const ownLabel = ashbyGroupQuestion(el) || labelFor(el, type);
+      const part = datePartOf(el);
       const field = {
-        label: labelFor(el, type),
-        type: prompt ? 'prompt' : (type === 'radio' ? 'radio' : type),
+        label: part && /^\s*(month|day|year|mm|dd|yyyy)\s*\*?\s*$/i.test(ownLabel || '') ? (splitDateQuestion(el) || ownLabel) : ownLabel,
+        type: prompt ? 'prompt' : (type === 'radio' || yn ? 'radio' : type),
         name: el.name || '',
         // An id inside a shadow root is scoped to that root, so every
         // instance of a component carries the same one ("i", "file-input");
@@ -1011,7 +1352,11 @@
         // WHICH PART OF A SPLIT DATE (2026-09-24). Workday's signature date is
         // three boxes, month / day / year, all labelled "Date"; each was given
         // the whole "09/23/2026" on four applications in one night.
-        datePart: datePartOf(el),
+        datePart: part,
+        // A CALENDAR PICKER'S TEXT BOX takes MM/DD/YYYY and nothing else
+        // (Honda's react-datepicker, 2026-10-02); "May 2026" typed into it
+        // parsed to nothing.
+        ...(el.closest?.('.react-datepicker__input-container, .react-datepicker-wrapper') ? { picker: 'mdy' } : {}),
         // How many files are ALREADY on this upload. Resuming a Workday draft
         // once stacked three copies of the same PDF on a live application,
         // because nothing checked before attaching.
@@ -1038,11 +1383,15 @@
         // For a written question it carries the help text and the word limit,
         // which is what decides how long the answer should be.
         near: el.tagName === 'TEXTAREA' ? helpText(el) : type === 'file' ? nearText(el) : undefined,
-        placeholder: el.tagName === 'TEXTAREA' ? (el.getAttribute('placeholder') || '').trim().slice(0, 200) || undefined : undefined,
+        // A one-line box's placeholder too when it is a DATE MASK ("mm/dd/yyyy",
+        // BambooHR), so the answer can be written in that shape.
+        placeholder: el.tagName === 'TEXTAREA' ? (el.getAttribute('placeholder') || '').trim().slice(0, 200) || undefined
+          : (/^\s*(m{1,2}|d{1,2}|y{2,4})\s*[/.-]\s*(m{1,2}|d{1,2}|y{2,4})(\s*[/.-]\s*(m{1,2}|d{1,2}|y{2,4}))?\s*$|^\s*(pick|select|choose|enter)\s+(a\s+|the\s+)?date\b/i.test(el.getAttribute('placeholder') || '') ? el.getAttribute('placeholder').trim() : undefined),
         options: el.tagName === 'SELECT'
           ? [...el.options].map((o) => o.textContent.trim())
-          : (type === 'radio' || type === 'checkbox' ? [optionText(el)] : []),
-        elements: [el],
+          : yn ? ['Yes', 'No']
+            : (type === 'radio' || type === 'checkbox' ? [optionText(el)] : []),
+        elements: yn || [el],
       };
       fields.push(field);
       if (gk) seenGroup.set(gk, field);
@@ -1064,16 +1413,60 @@
       }
       return el.parentElement || parentOf(el);
     };
-    const ariaOption = (el) => (el.getAttribute('label') || el.getAttribute('aria-label') || text(el) || el.getAttribute('value') || '').trim();
+    // AN EMPTY ANCHOR NAMED BY A LABEL BESIDE IT (TSMC's SuccessFactors form,
+    // 2026-09-24). Its radios are `<a id="455:_anchor" role="radio">` with no
+    // text of their own; "Yes", "2025", "Spring" sit in a label next to each.
+    // Read as-is, nine questions arrived with options ["", "", ""] and a
+    // "question" that was the first option's word, and not one was answered.
+    const byId = (el, id) => (id ? (el.getRootNode().getElementById?.(id) || document.getElementById(id)) : null);
+    const ariaOption = (el) => {
+      const own = (el.getAttribute('label') || el.getAttribute('aria-label') || text(el) || '').trim();
+      if (own) return own;
+      const lb = (el.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => text(byId(el, id))).filter(Boolean).join(' ');
+      if (lb) return lb;
+      const forId = el.id && [...(el.getRootNode().querySelectorAll?.('label[for]') || [])].find((l) => l.htmlFor === el.id || l.htmlFor === el.id.replace(/_anchor$/, ''));
+      if (forId && text(forId)) return text(forId);
+      // The next element beside it, when that is a short word and not another control.
+      for (let sib = el.nextElementSibling; sib; sib = sib.nextElementSibling) {
+        if (sib.matches?.('[role="radio"], [role="checkbox"], input, select, textarea')) break;
+        const t = text(sib);
+        if (t) return t.length <= 80 ? t : '';
+      }
+      const up = el.parentElement;
+      if (up && up.querySelectorAll('[role="radio"], [role="checkbox"]').length === 1) {
+        const t = text(up);
+        if (t && t.length <= 80) return t;
+      }
+      return (el.getAttribute('value') || '').trim();
+    };
     const ariaQuestion = (group, optionTexts) => {
-      const own = new Set(optionTexts.map((t) => t.toLowerCase()));
+      const own = new Set(optionTexts.map((t) => t.toLowerCase()).filter(Boolean));
+      // "2025 2026 2027" — the options on one line — is not a question either.
+      const isOption = (t) => {
+        const low = t.toLowerCase();
+        if (own.has(low)) return true;
+        let rest = ` ${low} `;
+        for (const o of [...own].sort((a, b) => b.length - a.length)) rest = rest.split(` ${o} `).join(' ');
+        return own.size > 1 && !rest.replace(/[\s|/,*]+/g, '');
+      };
       const slot = [...group.querySelectorAll('[slot*="label"], legend, label, [class*="label"]')]
-        .map((n) => text(n)).find((t) => t && !own.has(t.toLowerCase()));
+        .map((n) => text(n)).find((t) => t && !isOption(t));
       if (slot) return slot;
       const lb = group.getAttribute('aria-labelledby');
-      const named = (lb ? text(group.getRootNode().getElementById?.(lb) || document.getElementById(lb)) : '') || group.getAttribute('aria-label') || '';
+      const named = (lb ? text(byId(group, lb)) : '') || group.getAttribute('aria-label') || '';
       if (named.trim()) return named.trim();
-      return (group.innerText || '').split('\n').map((s) => s.trim()).find((s) => s && !own.has(s.toLowerCase())) || '';
+      const inner = (group.innerText || '').split('\n').map((s) => s.trim()).find((s) => s && !isOption(s));
+      if (inner) return inner;
+      // EVERYTHING INSIDE THE GROUP IS AN OPTION, so the question is above it —
+      // the preceding sibling, or its parent's, a few levels up.
+      for (let node = group, hops = 0; node && hops < 5; node = node.parentElement, hops += 1) {
+        for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+          if (sib.querySelector?.('[role="radio"], input, select, textarea')) break;
+          const t = text(sib);
+          if (t && t.length > 3 && t.length < 600 && !isOption(t)) return t;
+        }
+      }
+      return '';
     };
     const ariaGroups = new Map();
     for (const el of deepQuerySelectorAll('[role="radio"], [role="checkbox"]')) {
@@ -1112,6 +1505,129 @@
       if (group) ariaGroups.set(group, field);
     }
 
+    // A COMBOBOX THAT IS A <div> (Rippling, 2026-09-24). Gender, veteran and
+    // disability — and one required question — were `div role="combobox"`
+    // named through aria-labelledby. Every pass here starts from an <input>,
+    // so none of them reached the plan. The label is what aria-labelledby
+    // points at; the choice, if any, is the div's own text.
+    for (const el of deepQuerySelectorAll('[role="combobox"]')) {
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) continue;
+      if (!el.getClientRects().length || el.getAttribute('aria-disabled') === 'true') continue;
+      if (el.querySelector('input, select, textarea')) continue;
+      if (siteFurniture(el) || insideEntry(el)) continue;
+      // Not inside a web component: SmartRecruiters' <spl-…> widgets carry
+      // their own inputs, already read above, and its phone country-code
+      // picker taken here was cleared by the fill ("Illegal invocation",
+      // Western Digital 2026-09-24). Nor a country-code picker anywhere.
+      if (el.getRootNode() !== document) continue;
+      if (/country\s*code|dial(l?ing)?\s*code|calling\s*code/i.test(`${el.getAttribute('aria-label') || ''} ${el.id || ''}`)) continue;
+      const lb = (el.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => text(byId(el, id))).filter(Boolean).join(' ');
+      const aria = el.getAttribute('aria-label') || '';
+      const named = lb || (/^(select|choose)\b/i.test(aria) ? '' : aria);
+      let label = (named || labelFor(el, 'text') || '').replace(/\s+/g, ' ').replace(/[*✱]\s*$/, '').trim();
+      // Named only "Select" (Rippling's one required dropdown): the question is above it.
+      if (!label || /^(select|choose)\b.{0,12}$/i.test(label)) {
+        label = (ariaQuestion(el.parentElement || el, [label, text(el), 'Select', 'Select...']) || '').replace(/\s+/g, ' ').replace(/[*✱]\s*$/, '').trim();
+      }
+      // …or in the block before its field wrapper, six levels up (Boom
+      // Supersonic's custom dropdown, 2026-09-25): the first line of the
+      // nearest earlier sibling that holds no control.
+      if (!label || /^(select|choose)\b.{0,12}$/i.test(label)) {
+        for (let n = el.parentElement, i = 0; n && i < 8; n = n.parentElement, i += 1) {
+          if (n.querySelectorAll('input:not([type="hidden"]), select, textarea, [role="combobox"]').length > 1) break;
+          const sib = n.previousElementSibling;
+          if (!sib || sib.querySelector('input, select, textarea, [role="combobox"], [role="radio"], [role="checkbox"]')) continue;
+          const first = (sib.innerText || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
+          if (first.length > 3 && first.length <= 400) { label = first.replace(/[*✱]\s*$/, '').trim(); break; }
+        }
+      }
+      if (!label || /^(select|choose)\b.{0,12}$/i.test(label)) continue;
+      fields.push({
+        label,
+        type: 'prompt',
+        name: '',
+        id: el.id || '',
+        key: fieldKey(el),
+        current: comboValue(el) || undefined,
+        promptKind: 'combo',
+        attached: undefined,
+        required: el.getAttribute('aria-required') === 'true',
+        maxLength: undefined,
+        near: undefined,
+        options: [],
+        elements: [el],
+      });
+    }
+
+    // HIDDEN NATIVE INPUTS BEHIND STYLED BOXES (Rippling, 2026-09-24).
+    //
+    // Rippling's custom questions are real <input type="checkbox|radio"> with
+    // `display: none`, each under a visible box reading "Yes" or "No". Neither
+    // pass above sees them — the input has no box on screen, and the visible
+    // box has no role — so a whole questionnaire reached the plan as nothing.
+    // The visible box is the option: it is what gets clicked, its text is the
+    // option's name, and the hidden input inside it says whether it took.
+    const styledGroups = new Map();
+    for (const input of deepQuerySelectorAll('input[type="radio"], input[type="checkbox"]')) {
+      if (input.getClientRects().length > 0 || input.disabled) continue;
+      if (siteFurniture(input) || insideEntry(input)) continue;
+      // ASHBY'S YES/NO lands here, not in the main pass: its checkbox is
+      // hidden and has no id (the label's `for` names it by `name`). Read as a
+      // styled box, the one box was the whole Yes/No container, so the option
+      // came out "YesNo" (Mariana Minerals, measured live 2026-09-25).
+      const yn = yesNoButtons(input);
+      if (yn) {
+        const entry = yn[0].parentElement?.parentElement || yn[0].parentElement;
+        const named = input.name && entry?.querySelector(`label[for="${CSS.escape(input.name)}"]`);
+        const label = (named ? text(named) : '') || (entry ? ariaQuestion(entry, ['Yes', 'No']) : '');
+        if (label) {
+          fields.push({
+            label: label.replace(/\s+/g, ' ').replace(/[*✱]\s*$/, '').trim(),
+            type: 'radio', name: input.name || '', id: input.id || '', key: '',
+            current: undefined, promptKind: undefined, attached: undefined,
+            required: input.required || !!entry?.querySelector('label[class*="required"]'),
+            maxLength: undefined, near: undefined,
+            options: ['Yes', 'No'], elements: yn, aria: true,
+          });
+        }
+        continue;
+      }
+      let box = input.parentElement;
+      for (let d = 0; box && d < 4; d += 1, box = box.parentElement) {
+        if (box.getClientRects().length > 0 && box.querySelectorAll('input[type="radio"], input[type="checkbox"]').length === 1 && text(box)) break;
+      }
+      if (!box || !box.getClientRects().length || !text(box) || text(box).length > 120) continue;
+      const gk = `${input.type}|${input.name || ''}`;
+      if (!input.name) continue;
+      if (!styledGroups.has(gk)) styledGroups.set(gk, { type: input.type, boxes: [], inputs: [] });
+      const g = styledGroups.get(gk);
+      g.boxes.push(box); g.inputs.push(input);
+    }
+    for (const g of styledGroups.values()) {
+      const options = g.boxes.map((b) => text(b));
+      // The container every option sits in; the question is read from it or above it.
+      let wrap = g.boxes[0].parentElement;
+      while (wrap && !g.boxes.every((b) => wrap.contains(b))) wrap = wrap.parentElement;
+      const label = wrap ? ariaQuestion(wrap, options) : '';
+      if (!label) continue;
+      fields.push({
+        label: label.replace(/\s+/g, ' ').replace(/[*✱]\s*$/, '').trim(),
+        type: g.type,
+        name: g.inputs[0].name,
+        id: g.inputs[0].id || '',
+        key: '',
+        current: undefined,
+        promptKind: undefined,
+        attached: undefined,
+        required: g.inputs.some((i) => i.required) || /\*\s*$/.test(label),
+        maxLength: undefined,
+        near: undefined,
+        options,
+        elements: g.boxes,
+        aria: true,
+      });
+    }
+
     // ── the wrapper pass ────────────────────────────────────────────────
     //
     // A WORKDAY DROPDOWN CAN HAVE NO NATIVE CONTROL AT ALL, and the loop above
@@ -1137,7 +1653,10 @@
     // own `'hidden'` case was therefore unreachable — gets a chance to see it.
     for (const wrap of document.querySelectorAll('[data-automation-id^="formField-"]')) {
       const key = wrap.getAttribute('data-automation-id');
-      if (fields.some((f) => f.key === key)) continue;
+      // THIS WRAPPER, not this key (F-670): every added language row repeats
+      // the first row's keys, and a key already seen skipped row 2's Reading,
+      // Speaking and Writing — Flowserve refused the step on all three.
+      if (fields.some((f) => (f.elements || []).some((e) => wrap.contains(e)))) continue;
       if ([...wrap.querySelectorAll('input, select, textarea')].some(visible)) continue;
       const btn = promptButton(wrap);
       if (!btn || !visible(btn) || siteFurniture(btn)) continue;
@@ -1167,7 +1686,58 @@
         elements: [btn],
       });
     }
-    return fields;
+    // ICON FALLBACK TEXT IS NOT PART OF A LABEL, whichever path read it
+    // (Workable's resume slot, 2026-09-24).
+    for (const f of fields) {
+      if (typeof f.label === 'string') f.label = f.label.replace(/SVGs? (are )?not supported by (this|your) browser\.?/gi, ' ').replace(/\s+/g, ' ').trim();
+    }
+    // A DATE PICKER'S OWN BOX IS NOT A QUESTION (Rippling, Boom Supersonic
+    // 2026-09-25): typing a graduation month opened a calendar whose inner
+    // input read "//September2026SMTWTFS1234…TodayClear", and it was listed as
+    // a required question left for him. A label holding a week's day letters
+    // in a row is a calendar grid.
+    // A MONTH LIST AND THE YEAR LIST AFTER IT ARE ONE DATE (Ashby's education
+    // history, Applied Intuition 2026-09-25): "Start Date" named only the
+    // month <select>, the year beside it had no name at all, and the month
+    // was planned as a whole date ("this box wants a full date"). Named as
+    // the halves they are, the education-date rules answer both.
+    const MONTHS = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?$/i;
+    const count = (f, re) => (f.options || []).filter((o) => re.test(String(o?.text ?? o).trim())).length;
+    for (let i = 0; i + 1 < fields.length; i += 1) {
+      const m = fields[i], y = fields[i + 1];
+      // The year list is unnamed, or named the same as the month beside it.
+      if (m.type !== 'select' || y.type !== 'select' || (String(y.label || '').trim() && y.label !== m.label)) continue;
+      if (count(m, MONTHS) < 10 || count(y, /^(19|20)\d{2}$/) < 5 || !String(m.label || '').trim()) continue;
+      const base = String(m.label).replace(/\s+month$/i, '').trim();
+      m.label = `${base} month`;
+      y.label = `${base} year`;
+    }
+    // A PAY-PERIOD LIST WITH NO NAME (Sabanto's Breezy form, 2026-09-25):
+    // Hourly / Weekly / Monthly / Yearly sits beside "Desired Salary" with no
+    // label of its own and reached the plan as "". Named for the salary it
+    // belongs to.
+    const PERIOD = /^(hourly|daily|weekly|bi-?weekly|monthly|yearly|annually|annual|per\s+(hour|day|week|month|year))$/i;
+    for (let i = 0; i < fields.length; i += 1) {
+      const f = fields[i];
+      if (String(f.label || '').trim() || !/^(select|radio|prompt)$/.test(f.type)) continue;
+      if ((f.options || []).filter((o) => PERIOD.test(String(o?.text ?? o).trim())).length < 3) continue;
+      const pay = fields.slice(Math.max(0, i - 3), i).reverse().find((x) => /salary|compensation|pay\b|wage|rate/i.test(String(x.label || '')));
+      f.label = `${pay ? pay.label : 'Pay'} — period`;
+    }
+    // A QUESTION ABOUT A LIST PRINTED UNDER IT carries that list (Atomic Semi,
+    // 2026-09-25): "If no, is your home country listed below?" — the
+    // countries are text in the same entry, and the answer is whether his is
+    // among them. The entry's text goes to the planner as `near`.
+    for (const f of fields) {
+      if (f.near || !/\b(listed|named|shown)\s+(below|above)|\bthe\s+following\s+countr|\bcountries\s+(below|above|listed)/i.test(String(f.label || ''))) continue;
+      const head = String(f.label).slice(0, 30);
+      for (let n = f.elements?.[0]?.parentElement, i = 0; n && i < 8; n = n.parentElement, i += 1) {
+        const t = n.innerText || '';
+        if (t.includes(head) && t.length > f.label.length + 20) { f.near = t.replace(/\s+/g, ' ').slice(0, 2000); break; }
+      }
+    }
+    const CALENDAR = /S\s?M\s?T\s?W\s?T\s?F\s?S\d|Su\s*Mo\s*Tu\s*We\s*Th\s*Fr\s*Sa/;
+    return fields.filter((f) => !(typeof f.label === 'string' && CALENDAR.test(f.label)));
   }
 
   // ── walking a multi-step application ────────────────────────────────
@@ -1215,6 +1785,14 @@
     return false;
   }
 
+  const phenomStep = (b) => {
+    const cls = typeof b.className === 'string' ? b.className : '';
+    return /\bbtn-next\b/.test(cls) && /\bbtn-navigate\b/.test(cls)
+      && /^\s*next\s*$/i.test(b.textContent || '')
+      && !!b.closest('.navigation[class*="-step"]')
+      && /[?&]step=\d/.test(location.search);
+  };
+
   function nextControl() {
     const ats = here();
     const wd = [...document.querySelectorAll(
@@ -1237,7 +1815,12 @@
       if (ats?.submit && matchesAny(b, ats.submit)) return null;
       // A control that submits is his, whatever it is labelled. Refusing it
       // costs one click he makes himself; clicking it costs an application.
-      if (wouldSubmit(b)) return null;
+      // …EXCEPT PHENOM'S STEP BUTTON (Honda, 2026-10-02). Each step of its
+      // apply flow is a <form> whose Next is type=submit
+      // (`.navigation.<step>-step > button.btn-navigate.btn-next`); the
+      // application is sent only by the last step's own Submit. Refusing it
+      // stopped the walk on every one of Honda's five steps.
+      if (wouldSubmit(b) && !phenomStep(b)) return null;
       return clickTarget(b);
     }
     return null;
@@ -1299,6 +1882,12 @@
       if (emailGate()) return `this site asks for your email first — press "${name}", type the code it emails you, and the form fills by itself from there`;
       return `the only way on is "${name}", which submits the form — that press is yours`;
     }
+    // A NEXT THAT IS GREYED OUT IS NOT THE END OF THE FORM (2026-10-16). ADP
+    // disables Next until its required resume is in; the run said "reached the
+    // last step before Submit" on step 2 of 6.
+    const greyed = deepQuerySelectorAll('button, [role="button"], input[type="button"]')
+      .find((b) => onScreen(b) && (b.disabled || b.getAttribute('aria-disabled') === 'true') && NEXT_RE.test(text(b) || b.value || b.getAttribute('aria-label') || ''));
+    if (greyed) return `"${(text(greyed) || greyed.value || 'Next').trim()}" is greyed out — this step still needs something it requires (see the list); once that is in, press it`;
     return null;
   }
 
@@ -1316,9 +1905,35 @@
    * guesses into fields we are about to answer from his profile, and "Use My
    * Last Application" copies answers written for a different job.
    */
+  // A PRIVACY NOTICE BETWEEN APPLY AND THE FORM (ADP Workforce Now, Mando,
+  // F-692): Apply opens "Privacy Policy — Consent & Continue | Decline & Close"
+  // in place, the run waited for a page that never came, and nothing filled.
+  // His standing answer to a consent is yes — every one, cookies included
+  // ("can we just press consent on everything", 2026-10-03, after Eightfold's
+  // notices). Never a button that would submit, and a bare Confirm / OK /
+  // Continue only in a notice that says nothing of submitting, withdrawing or
+  // deleting.
+  const CONSENT_GO_RE = /^\s*(?:i\s+)?(consent|accept(\s+all)?|agree|acknowledge|understand)(\s+(&|and)\s+(continue|proceed|apply|close))?\s*\.?\s*$/i;
+  const CONSENT_PLAIN_RE = /^\s*(confirm|ok(ay)?|continue|proceed)\s*\.?\s*$/i;
+  function consentGate() {
+    const panes = deepQuerySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog[open], sdf-focus-pane, sdf-modal, .modal, [class*="modal" i]')
+      .filter((d) => onScreen(d) || onScreen(d.shadowRoot?.querySelector('[role="dialog"]')));
+    for (const pane of panes) {
+      const words = `${pane.textContent || ''} ${pane.shadowRoot?.textContent || ''}`.replace(/\s+/g, ' ');
+      if (!/\bprivacy\b|\bconsent\b|\bterms\b|\bdata\s+protection\b|\bcookies?\b|\bnotice\b|\bagree(ment)?\b|\bartificial\s+intelligence\b|\bAI\b/i.test(words)) continue;
+      // …and never a sign-in or account box's Continue: that is his.
+      const plainOk = !/\b(submit|submission|withdraw|delete|remove|discard|cancel\s+(your|this)\s+application)\b/i.test(words)
+        && !pane.querySelector('input[type="password"], input[type="email"], input[autocomplete="username"]');
+      const named = (b) => (b.textContent || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ');
+      const buttons = [...pane.querySelectorAll('button, [role="button"], sdf-button')].filter((b) => onScreen(b) && !wouldSubmit(b));
+      const go = buttons.find((b) => CONSENT_GO_RE.test(named(b))) || (plainOk && buttons.find((b) => CONSENT_PLAIN_RE.test(named(b))));
+      if (go) return go.shadowRoot?.querySelector('button') || go;
+    }
+    return null;
+  }
   function startGate() {
     const manual = document.querySelector('[data-automation-id="applyManually"]');
-    return onScreen(manual) ? manual : null;
+    return onScreen(manual) ? manual : consentGate();
   }
 
   /**
@@ -1407,6 +2022,19 @@
       || OTP_RE.test(`${el.name || ''} ${el.id || ''} ${el.getAttribute('aria-label') || ''} ${el.placeholder || ''}`)
       || OTP_RE.test(labelFor(el, (el.type || 'text').toLowerCase())))) return true;
 
+    // A VERIFICATION SIGN-UP THAT ALSO OFFERS GOOGLE IS A SIGN-IN PAGE
+    // (2026-10-16). ADP's "Join Our Talent Community": name, email, mobile,
+    // "Where would you like to receive a verification code?" — and "Sign in
+    // with Google" beside them. While its boxes were invisible (F-746) it read
+    // as a wall and Google was pressed, which is his standing instruction;
+    // once they were readable the run filled the sign-up and stopped at the
+    // code. The Google button wins whenever the page is asking to send a code.
+    if (ssoControl && ssoControl()
+      // Before its Continue is pressed, ADP's page says it in other words: "the
+      // mobile number or email associated with this verification process",
+      // "Alternatively, you can sign in through your social media accounts".
+      && /receive (a|the|your) (verification|security|one[\s-]?time) code|where (would|should) (you like to|we) (receive|send)[^.?]{0,30}code|send (you |me )?(a|the) (verification|one[\s-]?time) code|associated with this verification process|sign in (through|with|using) your social media/i.test(document.body?.innerText || '')) return true;
+
     // A PASSWORD FIELD SETTLES IT, and this is the important half.
     //
     // Choosing "Apply Manually" while signed out lands on Workday's Create
@@ -1485,6 +2113,16 @@
   const GONE_RE = /oops|gone too far|no longer (available|accepting|active|posted|open)|has been (filled|closed|removed)|position (closed|filled)|(job|position|posting|role|opening|vacancy)[^.]{0,40}(isn.?t|is not)\s+available|(page|job|position|posting|requisition|opening|vacancy)\s+(you\s+requested\s+)?(was|is|has been)?\s*(not found|closed|filled|removed|expired|unavailable)|(page|job|position|posting|requisition|opening|vacancy)[^.]{0,40}(does\s?n.?t|does not)\s+exist/i;
 
   function postingGone() {
+    // THE SITE SAID SO IN THE ADDRESS (Rippling, Aalo Atomics 2026-09-25): a
+    // pulled posting redirects to the board with `?rr_message=job_not_found`,
+    // and the board's own filters made the page look like a form — the report
+    // read "everything that could be filled is; Submit is yours" on a job
+    // board.
+    if (/[?&](rr_message|message|error)=job[_-]?not[_-]?found\b/i.test(location.search || '')) return 'job not found';
+    // …which Rippling's router then rewrites away (…/jobs?jobBoardSlug=…
+    // &page=0) before any of this runs; the worker saw the address the tab
+    // actually landed on and passes it along.
+    if (globalThis.__jarvisRun?.gone) return String(globalThis.__jarvisRun.gone);
     // Application controls mean this is a form, whatever the prose says. Site
     // furniture does not count — a dead Amazon posting still renders the whole
     // job-search bar, which is 21 controls and not one of them an application.
@@ -1497,9 +2135,16 @@
     // was never examined at all, so the deadest page in his queue read as an
     // ordinary empty one.
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    // A SESSION THAT TIMED OUT IS NOT A DEAD POSTING. SmartRecruiters: "Due to
+    // inactivity, the form has been closed to protect your data. Click on the
+    // button below to start your application process again." (Western
+    // Digital, 2026-09-24) matched "has been closed" and was reported as a
+    // posting gone — the one false verdict that can retire a live job.
+    if (SESSION_OVER_RE.test(text)) return null;
     const m = text.match(GONE_RE);
     return m ? m[0] : null;
   }
+  const SESSION_OVER_RE = /due\s+to\s+inactivity|session\s+(has\s+)?(expired|timed\s+out)|your\s+session\s+(is\s+about\s+to\s+)?(expire|time\s+out)|to\s+protect\s+your\s+data|start\s+your\s+application(\s+process)?\s+again/i;
 
   /**
    * A page that is refusing us rather than showing a form.
@@ -1558,8 +2203,22 @@
     if (REFUSED_RE.test(text.slice(0, 800))) {
       return { kind: 'blocked', why: 'this site refused the browser (an Access Denied page, not a form) — wait a few minutes and try again' };
     }
+    // …AND SAID AS WHAT IT IS: the form timed out and must be reopened.
+    if (SESSION_OVER_RE.test(text.slice(0, 800)) && allControls().filter((el) => visible(el) && !siteFurniture(el)).length === 0) {
+      return { kind: 'session', why: 'the site closed the form for inactivity — reopen it (its button starts the application again), then click Jarvis' };
+    }
+    // AN APPLICATION ALREADY STARTED ELSEWHERE. firststage (Wayve, 2026-09-24):
+    // after the CV, "You already have an application in progress — It looks
+    // like you have already started an application for this role using this
+    // email address", with one button that emails a link. It was reported as
+    // "something required is still empty" with nothing listed. The link and
+    // the draft are his; the button is never pressed for him.
+    if (IN_PROGRESS_RE.test(text) && allControls().filter((el) => visible(el) && !siteFurniture(el)).length === 0) {
+      return { kind: 'in-progress', why: 'this site already holds an application you started for this role under your email — continue that one (the site can email you a link to it)' };
+    }
     return null;
   }
+  const IN_PROGRESS_RE = /you\s+(?:already\s+)?have\s+an?\s+(?:application|draft)\s+(?:already\s+)?in\s+progress|already\s+started\s+an\s+application\s+for\s+this\s+(?:role|job|position)/i;
 
   /**
    * The Apply control on a JOB POSTING, when this page is not the form yet.
@@ -1574,7 +2233,10 @@
    * and the same reason: stated twice they drift, and that is F-14, F-74 and
    * F-77 in this ledger already.
    */
-  const APPLY_TEXT_RE = /^\s*(apply|apply now|apply here|apply to this job|apply for this job|i'?m interested|start (your )?application|continue to application)\s*$/i;
+  // A SAVED APPLICATION'S WAY BACK IN IS APPLY TOO (2026-10-16): ADP shows a
+  // posting he has started as "Pending Submission" with "Complete Your
+  // Application" where Apply was, and the run said "no form here yet".
+  const APPLY_TEXT_RE = /^\s*(apply|apply now|apply here|apply to this job|apply for this job|i'?m interested|start (your )?application|continue to application|(complete|continue|resume|finish) (your |this |my )?application)\s*$/i;
   const APPLY_PATH_RE = /(^|\/)(apply|application|applications|applicant|apply-now)(\/|$)/i;
 
   function applyControl() {
@@ -1603,6 +2265,17 @@
       const named = cands.find((b) => matchesAny(b, ats.apply));
       if (named) return named;
     }
+    // PHENOM CAREER SITES live on the employer's own domain (careers.honda.com,
+    // www.jpl.jobs), so no host names them — the markup does. Measured
+    // 2026-10-02: the posting's Apply Now is <a data-ph-at-id="apply-link">,
+    // and the job-alert email box, the chatbot input and the "rate your
+    // experience" stars made the page count as a form, so Apply was never
+    // followed and the alert email was filled instead. The first one is the
+    // posting's own; the rest belong to "similar jobs" below it.
+    // Never on the application itself (/apply?jobSeqNo=…&step=1).
+    const phenom = !/\/(?:hvh)?apply\b/i.test(location.pathname)
+      && cands.find((b) => b.getAttribute('data-ph-at-id') === 'apply-link');
+    if (phenom) return phenom;
 
     const real = allControls()
       .filter((el) => visible(el) && !siteFurniture(el));
@@ -1630,6 +2303,31 @@
   }
 
   /** A cheap fingerprint of what is on screen, to tell one step from the next. */
+  /**
+   * CLOSED SECTIONS HIDE THEIR QUESTIONS (TSMC, SuccessFactors, 2026-09-24).
+   *
+   * The application is a stack of collapsed sections — Profile Information,
+   * Prior Work Experience, Formal Education, Skills, Job-Specific Information —
+   * each a <button aria-expanded="false"> inside an <h2>. Closed, their fields
+   * are not on the page to read, so a run saw almost nothing. Every closed
+   * SECTION HEADER is opened: a disclosure button that sits in a heading (or
+   * carries SuccessFactors' own section class), never a dropdown's trigger
+   * (aria-haspopup, a combobox), never one holding a field, never site chrome
+   * and never anything that would submit. Returns how many it opened.
+   */
+  function expandSections() {
+    const heads = deepQuerySelectorAll('button[aria-expanded="false"], [role="button"][aria-expanded="false"]')
+      .filter((b) => b.getClientRects().length > 0)
+      .filter((b) => !b.hasAttribute('aria-haspopup') || b.getAttribute('aria-haspopup') === 'false')
+      .filter((b) => b.getAttribute('role') !== 'combobox' && !isCombobox(b))
+      .filter((b) => b.closest('h1, h2, h3, h4, h5, h6, [role="heading"]')
+        || /rcmFormSectionTopBar/.test(typeof b.className === 'string' ? b.className : ''))
+      .filter((b) => !b.querySelector('input, select, textarea'))
+      .filter((b) => !siteFurniture(b) && !wouldSubmit(b));
+    for (const b of heads) b.click();
+    return heads.length;
+  }
+
   function stepSignature() {
     const ids = [...document.querySelectorAll('[data-automation-id^="formField-"]')]
       .map((n) => n.getAttribute('data-automation-id')).join('|');
@@ -1642,7 +2340,19 @@
     // the modal before it and no inputs at all, so it read as "nothing
     // changed" and the Google button was never pressed (Jabil, measured live).
     const wall = onScreen(document.querySelector('[data-automation-id="GoogleSignInButton"], input[type="password"], [data-automation-id="signInLink"]')) ? '::wall' : '';
-    return `${heading}::${ids || allControls().length}${gate}${wall}`;
+    // WHICH controls, not only how many (F-573). Wayve's firststage steps share
+    // a heading and a path and hold one control each — the CV upload, then a
+    // consent box — so "heading::1" called the second step the first. Workday
+    // is named by its field ids already; everything else by type and name.
+    let fp = '';
+    const ctrls = allControls();
+    if (!ids) {
+      const s = ctrls.map((el) => `${el.type || el.tagName}:${el.name || el.id || ''}`).join('|');
+      let h = 0;
+      for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
+      fp = `::f${(h >>> 0).toString(36)}`;
+    }
+    return `${heading}::${ids || ctrls.length}${fp}${gate}${wall}`;
   }
 
   /**
@@ -1719,11 +2429,19 @@
 
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     if (!MOVED_RE.test(text)) return null;
+    // MID-APPLICATION IS NOT MOVED (F-732). GlobalFoundries' live Workday form,
+    // between two steps with no controls drawn yet, matched the loose phrases
+    // and the run stopped with "moved — linkedin.com/company/globalfoundries".
+    // Inside an apply flow only the migration notice itself counts.
+    if (/\/apply(\/|$|\?)/i.test(location.pathname + location.search)
+      && !/\b(we(?:'ve| have)? moved to|use this link to new job applications|no longer accept(?:ing)? applications?)\b/i.test(text)) return null;
 
-    // The destination, when the page names one — that is the useful half.
+    // The destination, when the page names one — that is the useful half. A
+    // footer's social link is not a destination.
+    const SOCIAL_RE = /(^|\.)(linkedin|facebook|twitter|x|instagram|youtube|glassdoor|tiktok)\.com$/i;
     const link = [...document.querySelectorAll('a[href]')]
       .map((a) => a.href)
-      .find((h) => /^https?:/i.test(h) && !h.includes(location.hostname)) || null;
+      .find((h) => { try { const u = new URL(h); return /^https?:$/i.test(u.protocol) && u.hostname !== location.hostname && !SOCIAL_RE.test(u.hostname); } catch { return false; } }) || null;
     const said = (text.match(/[^.]*(?:moved|no longer accept|new job applications)[^.]*/i) || [''])[0].trim().slice(0, 160);
     return { why: said || 'this employer has moved to a different application system', link };
   }
@@ -1904,6 +2622,11 @@
     if (offersSubmit) return null;
     // Some ATSes say it in the URL before they say it on the page.
     if (ATS?.CONFIRMATION_URL_RE?.test(location.pathname)) return `confirmation page (${location.pathname})`;
+    // A CANDIDATE'S OWN DASHBOARD lists his applications and their statuses
+    // ("Application Submitted", "jobs you have applied to") — it is never the
+    // confirmation of the one in front of him (iCIMS /jobs/dashboard, Werfen,
+    // 2026-09-24).
+    if (/\/(dashboard|my-?applications|candidate-?home|candidatehome|myprofile)\b/i.test(location.pathname)) return null;
     // The headline, not the whole page: a confirmation leads with it.
     const t = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 800);
     const m = t.match(SUBMITTED_RE);
@@ -1947,6 +2670,10 @@
    */
   const COOKIE_DECLINE_RE = /^(?:decline(?: all)?(?: cookies)?|reject(?: all)?(?: cookies)?|refuse(?: all)?|deny(?: all)?|(?:only |just )?(?:strictly )?(?:necessary|essential|required)(?: cookies)?(?: only)?|(?:accept )?(?:only )?(?:necessary|essential)(?: cookies)?(?: only)?|no,? thanks|continue without (?:accepting|cookies)|(?:i )?do not accept|opt[ -]?out|use (?:necessary|essential) cookies only)$/i;
   const COOKIE_CLOSE_RE = /^(?:close|dismiss|got it|ok(?:ay)?|x|✕|×)$/i;
+  // HIS RULE SINCE 2026-10-03: "can we just press consent on everything i
+  // give permission i always consent anyways". Accept first; a bare close
+  // next; decline only on a banner that offers nothing else.
+  const COOKIE_ACCEPT_RE = /^(?:accept(?: all)?(?: cookies)?|allow(?: all)?(?: cookies)?|(?:i )?(?:agree|accept|consent)(?: (?:&|and) (?:close|continue|proceed))?|ok,? i agree|yes,? i agree|accept (?:and|&) (?:close|continue))$/i;
   function dismissCookieBanner() {
     if (dismissCookieBanner.done) return null;
     const shown = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
@@ -1961,8 +2688,9 @@
       .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
     for (const region of regions) {
       const buttons = [...region.querySelectorAll('button, a, [role="button"], input[type="button"]')].filter(shown);
-      const decline = buttons.find((b) => COOKIE_DECLINE_RE.test(txt(b)))
-        || buttons.find((b) => COOKIE_CLOSE_RE.test(txt(b)));
+      const decline = buttons.find((b) => COOKIE_ACCEPT_RE.test(txt(b)))
+        || buttons.find((b) => COOKIE_CLOSE_RE.test(txt(b)))
+        || buttons.find((b) => COOKIE_DECLINE_RE.test(txt(b)));
       if (!decline) continue;
       dismissCookieBanner.done = true;
       const label = txt(decline);
@@ -1981,11 +2709,12 @@
     // actually talks about cookies and holds no form fields — the guard the
     // region pass uses, applied upwards from the button instead of downwards
     // from a container.
-    const named2 = deepQuerySelectorAll('[data-automation-id*="legalNotice" i], [data-automation-id*="cookie" i], [id*="cookie" i]')
-      .filter((b) => shown(b) && /^(BUTTON|A)$/.test(b.tagName) && COOKIE_DECLINE_RE.test(txt(b)));
-    const loose = deepQuerySelectorAll('button, a, [role="button"]')
-      .filter((b) => shown(b) && COOKIE_DECLINE_RE.test(txt(b)) && txt(b).length < 40);
-    for (const b of [...named2, ...loose]) {
+    const take = (re) => [
+      ...deepQuerySelectorAll('[data-automation-id*="legalNotice" i], [data-automation-id*="cookie" i], [id*="cookie" i]')
+        .filter((b) => shown(b) && /^(BUTTON|A)$/.test(b.tagName) && re.test(txt(b))),
+      ...deepQuerySelectorAll('button, a, [role="button"]').filter((b) => shown(b) && re.test(txt(b)) && txt(b).length < 40),
+    ];
+    for (const b of [...take(COOKIE_ACCEPT_RE), ...take(COOKIE_DECLINE_RE)]) {
       let el = b.parentElement;
       for (let i = 0; el && i < 6; i += 1, el = el.parentElement) {
         const t = el.textContent || '';
@@ -2000,12 +2729,176 @@
     return null;
   }
 
+  /**
+   * WHAT THE PAGE IS SAYING IN RED (his ask, 2026-10-02: "detect red sentences
+   * or letters on pages when errors pop up … it would help you troubleshoot
+   * the logs"). A form that refuses a step says why on the page, and mostly
+   * only there: in red under the box, in a role=alert banner, beside a box
+   * marked aria-invalid. The answer log held what went in, never what the
+   * page answered back, so a refusal had to be described from memory.
+   *
+   * Reading only. Each message carries how it was recognised (`red`, `alert`,
+   * `invalid`), the field it sits under, and its colour, so a log line can be
+   * traced to the box without a screenshot.
+   */
+  const ERROR_WORD_RE = /\b(required|invalid|error|errors|must|please\s+(?:enter|select|provide|fill|complete|choose|upload|correct|answer|add|use|check)|cannot|can't|isn't\s+valid|not\s+(?:a\s+)?valid|too\s+(?:long|short|many|large)|fail(?:ed|ure)?|missing|incorrect|exceeds?|at\s+least|no\s+more\s+than|only\s+\d|did\s+not|could\s+not|couldn't|will\s+not|won't|not\s+(?:be\s+)?(?:accepted|allowed|supported|uploaded|saved|found)|doesn't\s+match|does\s+not\s+match|unable|problem|wrong|issues?\s+(?:that\s+)?needs?|needs?\s+(?:corrections?|attention|to\s+be\s+fixed))\b/i;
+  const SUCCESS_RE = /\b(successfully|success|uploaded|saved|thank\s+you|complete[d]?)\b/i;
+  // The static required markers every form draws in red before anything goes wrong.
+  const REQUIRED_MARK_RE = /^[\s*†‡()]*(?:required(?:\s+fields?)?|indicates\s+(?:a\s+)?required(?:\s+(?:field|question)s?)?|required\s+fields?\s+are\s+marked(?:\s+with\s+an?\s+asterisk)?|fields?\s+marked\s+with\s+(?:an?\s+)?\*?\s*(?:are|is)\s+required)?[\s*†‡().:]*$/i;
+  function redness(color) {
+    const m = String(color || '').match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+%?))?/i);
+    if (!m) return false;
+    const [r, g, b] = [+m[1], +m[2], +m[3]];
+    const a = m[4] === undefined ? 1 : (/%$/.test(m[4]) ? parseFloat(m[4]) / 100 : +m[4]);
+    return a >= 0.4 && r >= 150 && r - g >= 70 && r - b >= 50;
+  }
+  // The element's OWN text — a wrapper whose child is red is not itself red.
+  const ownText = (el) => [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(' ').replace(/\s+/g, ' ').trim();
+  const fieldNear = (el) => {
+    let box = el;
+    for (let i = 0; i < 5 && box; i += 1, box = box.parentElement) {
+      const c = box.querySelector?.('input:not([type=hidden]):not([type=submit]):not([type=button]), select, textarea, [role="combobox"], [role="radiogroup"]');
+      if (c) {
+        try { return labelFor(c, c.type || c.tagName.toLowerCase()) || ''; } catch { return ''; }
+      }
+    }
+    return '';
+  };
+  function errorsOnPage({ max = 15 } = {}) {
+    const out = [];
+    const seen = new Set();
+    const add = (el, text, how) => {
+      const t = String(text || '').replace(/\s+/g, ' ').trim();
+      if (t.length < 2 || t.length > 400 || seen.has(t)) return;
+      if (REQUIRED_MARK_RE.test(t)) return;
+      if (SUCCESS_RE.test(t) && !ERROR_WORD_RE.test(t)) return;
+      seen.add(t);
+      let color = '';
+      try { color = getComputedStyle(el).color; } catch { /* detached */ }
+      out.push({ text: t.slice(0, 300), how, field: fieldNear(el).slice(0, 200), color });
+    };
+    // 1. Said as an error by the markup.
+    for (const el of deepQuerySelectorAll('[role="alert"], [aria-live="assertive"], [data-automation-id*="rror"], [class*="error" i], [class*="invalid" i], [id*="error" i]')) {
+      if (!onScreen(el) || el.querySelector('input, select, textarea')) continue;
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      // AN ALERT IS NOT AN ERROR BY BEING ONE (F-670). Workday and Oracle
+      // announce "Saving", "Done", "You're all set", "… page is loaded" through
+      // role="alert"; 20 of the first 37 logged lines were those.
+      if (t && (ERROR_WORD_RE.test(t) || redness(getComputedStyle(el).color))) add(el, t, 'alert');
+    }
+    // 2. The message a box marked invalid points at.
+    for (const box of deepQuerySelectorAll('[aria-invalid="true"]')) {
+      if (!onScreen(box)) continue;
+      const ids = String(box.getAttribute('aria-describedby') || box.getAttribute('aria-errormessage') || '').split(/\s+/).filter(Boolean);
+      const said = ids.map((id) => box.getRootNode().getElementById?.(id)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+      const label = (() => { try { return labelFor(box, box.type || box.tagName.toLowerCase()) || ''; } catch { return ''; } })();
+      const t = said || `marked invalid: ${label || box.name || box.id || box.tagName.toLowerCase()}`;
+      if (!seen.has(t)) {
+        seen.add(t);
+        out.push({ text: t.slice(0, 300), how: 'invalid', field: label.slice(0, 200), color: '' });
+      }
+    }
+    // 3. Anything drawn in red: a sentence, a word, a single letter's warning.
+    const all = deepQuerySelectorAll('body *');
+    for (let i = 0; i < all.length && i < 6000; i += 1) {
+      const el = all[i];
+      if (/^(SCRIPT|STYLE|NOSCRIPT|OPTION|SVG|PATH|INPUT|TEXTAREA|SELECT)$/i.test(el.tagName)) continue;
+      const t = ownText(el);
+      if (!t || t.length < 2) continue;
+      let cs;
+      try { cs = getComputedStyle(el); } catch { continue; }
+      if (!redness(cs.color) || !onScreen(el)) continue;
+      // A red brand heading or link is not a message: it needs an error word
+      // or a box beside it.
+      if (!ERROR_WORD_RE.test(t) && !fieldNear(el)) continue;
+      if (/^(A|BUTTON|H1|H2)$/.test(el.tagName) && !ERROR_WORD_RE.test(t)) continue;
+      add(el, (el.textContent || t), 'red');
+    }
+    return out.slice(0, max);
+  }
+
+  /**
+   * WHAT IS ON THE PAGE THAT THE PLAN NEVER SAW (2026-10-03, "how do we make
+   * this robust"). 263 fields since 09-26 went out "not planned": AMAT's
+   * readonly radios, Paylocity's label-swallowing menus, Oracle's grid rows,
+   * Workday's repeated language rows. Each was invisible for weeks because a
+   * field discover() drops is reported nowhere. This lists every control a
+   * person can see and answer that no discovered field covers — so a miss is
+   * logged and shown on the run it happens, not found by him.
+   *
+   * Covered = the control is a field's element, inside one or holding one,
+   * shares a radio/checkbox name or a Workday wrapper with one, or its label
+   * holds one. Never counted: honeypots and site furniture (discover's own
+   * tests), search boxes, sliders, cookie notices, the extension's own panel,
+   * an open list's rows, disabled controls.
+   */
+  const UNSEEN_SEL = 'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image]):not([type=reset]):not([type=search]):not([type=range]):not([type=color]), select, textarea, [role="combobox"], [role="radio"], [role="checkbox"], [role="switch"], [contenteditable="true"], button[aria-haspopup="listbox"]';
+  function unseenControls(fields = null, { max = 20 } = {}) {
+    const out = [];
+    try {
+      const list = Array.isArray(fields) ? fields : discover();
+      const els = list.flatMap((f) => f.elements || []).filter(Boolean);
+      const covered = new Set(els);
+      const names = new Set(els.map((e) => e.name).filter(Boolean));
+      const wraps = new Set(els.map((e) => e.closest?.('[data-automation-id^="formField-"]')).filter(Boolean));
+      const drawn = (el) => onScreen(el) || [...(el.labels || [])].some(onScreen);
+      for (const el of deepQuerySelectorAll(UNSEEN_SEL)) {
+        if (covered.has(el) || el.disabled) continue;
+        // A LOCKED BOX IS NOT A QUESTION (F-716): Lam's Email, read-only once
+        // he is signed in, was reported as missed. Eightfold's read-only radios
+        // and a read-only combobox trigger are still answerable, so kept.
+        if ((el.readOnly || el.getAttribute('aria-readonly') === 'true') && !/^(radio|checkbox)$/i.test(el.type || '')
+          && !el.getAttribute('role') && !el.getAttribute('aria-haspopup')) continue;
+        // …AND A READ-ONLY PICKER THAT ALREADY SHOWS A VALUE IS ANSWERED (F-737).
+        // Micron's Eightfold signature Date sets itself to today ("16 Oct
+        // 2026"), and every run told him "Date (on the page, but Jarvis never
+        // saw it — answer it yourself)" about a box that was already filled.
+        if ((el.readOnly || el.getAttribute('aria-readonly') === 'true') && !/^(radio|checkbox)$/i.test(el.type || '')
+          && String(el.value || '').trim()) continue;
+        if (!drawn(el)) continue;
+        if (el.closest?.('#jarvis-overlay, [role="listbox"], [role="grid"], [role="menu"], .react-datepicker, video, audio')) continue;
+        if (el.getRootNode?.()?.host?.id === 'jarvis-overlay') continue;
+        if (siteFurniture(el)) continue;
+        // Work/education/language/website entries are filled by the entry
+        // filler from his history, not by the plan.
+        if (insideEntry(el) || /dateSection/.test(el.getAttribute('data-automation-id') || '')) continue;
+        if (el.name && names.has(el.name)) continue;
+        const w = el.closest?.('[data-automation-id^="formField-"]');
+        if (w && wraps.has(w)) continue;
+        if (els.some((e) => e.contains?.(el) || el.contains?.(e))) continue;
+        if ([...(el.labels || [])].some((l) => els.some((e) => l.contains(e)))) continue;
+        let near = '';
+        for (let n = el.parentElement; n && !near && n !== document.body; n = n.parentElement) near = (n.querySelector('label, legend')?.textContent || '').trim();
+        if (/\bcookies?\b/i.test(near)) continue;
+        let label = '';
+        try { label = labelFor(el, el.type || el.getAttribute('role') || el.tagName.toLowerCase()) || ''; } catch { label = ''; }
+        label = String(label || near || el.getAttribute('aria-label') || el.name || el.id || '').replace(/\s+/g, ' ').trim();
+        // One line per question: a radio group's options are one miss, not five.
+        if (/^(radio|checkbox)$/i.test(el.type || '') || /^(radio|checkbox)$/.test(el.getAttribute('role') || '')) {
+          label = label.replace(/\s+—\s+[^—]*$/, '');
+          if (el.name) { if (names.has(el.name)) continue; names.add(el.name); }
+        }
+        out.push({
+          el,
+          label: label.slice(0, 200),
+          kind: `${el.tagName.toLowerCase()}${el.type && el.tagName === 'INPUT' ? `[${el.type}]` : ''}${el.getAttribute('role') ? `[role=${el.getAttribute('role')}]` : ''}`,
+          required: el.required || el.getAttribute('aria-required') === 'true',
+        });
+        if (out.length >= max) break;
+      }
+    } catch { /* a check, never the fill */ }
+    // One line per question: a radio group's options are one miss, not five.
+    const seen = new Set();
+    return out.filter((u) => { const k = `${u.label}|${u.el.name || ''}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  }
+
   globalThis.__jarvis = {
+    errorsOnPage, redness, unseenControls,
     labelFor, optionText, groupKey, visible, discover, setNativeValue, enterText,
-    fieldKey, promptOf, isCombobox, comboValue, nextControl, stepSignature, settle, startGate, signInWall, signInWallKind, applyControl,
+    fieldKey, promptOf, isCombobox, comboValue, nextControl, stepSignature, expandSections, settle, startGate, signInWall, signInWallKind, applyControl,
     wouldSubmit, advanceBlockedBy, postingGone, pageBlocked, atsMoved,
     readPosting, postingFromJsonLd, postingFromDom, htmlToText, applicationDone, alreadyApplied, looksLikeApplication, ssoControl, waitForSomething,
-    dismissCookieBanner, COOKIE_DECLINE_RE,
+    dismissCookieBanner, COOKIE_DECLINE_RE, consentGate,
     experienceSections, ENTRY_IDS, ENTRY_PRIMARY, insideEntry,
     SUBMIT_RE, FINAL_RE, NEXT_RE, OTP_RE,
     deepQuerySelectorAll, allControls, clickTarget, parentOf, onScreen, headingAbove, buttonName,

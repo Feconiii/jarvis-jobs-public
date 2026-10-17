@@ -410,6 +410,46 @@ eq("Bachelor's matches Bachelor's Degree Or Equivalent", optionMatches("Bachelor
   eq('seniority in the title still wins', lvl('Leadership Development Program - Senior Manager'), 'exclude');
 }
 
+console.log('\n🧪 a Bachelor\'s that needs no experience is entry, whatever the other routes ask (F-729)');
+{
+  const lvl = (t, d = '') => classifyExperience(t, d).level;
+  // First Solar, 2026-10-14: read as "10+ years — likely too senior".
+  const firstSolar = `Education/Experience:
+• Associate’s Degree in an engineering or similar technical discipline combined with
+• 3 or more years of First Solar technical experience, or
+• 6 or more years of technical work experience in a Manufacturing setting.
+• Bachelor’s Degree, Master’s Degree, or Ph.D. in an engineering or similar technical discipline with no experience required.
+• 10 or more years’ experience as a highly skilled technician/specialist in a relevant discipline.`;
+  eq('First Solar\'s degree route is entry', lvl('Engineer- Manufacturing I USA (Finishing)', firstSolar), 'entry');
+  eq('…and the card quotes the degree line', /no experience required/.test(classifyExperience('Engineer- Manufacturing I', firstSolar).evidence[0]), true);
+  // The degree and the waiver must be on one line: a waiver for technicians
+  // elsewhere does not free a 5-year engineering ask.
+  eq('a waiver on another line is not the degree route',
+    lvl('Process Engineer', 'Requirements:\n• Bachelor\'s degree in Mechanical Engineering.\n• 5+ years of process engineering experience required.\nTechnician track: no experience required, we will train.'), 'stretch');
+  eq('a Bachelor\'s plus years is still the years', lvl('Process Engineer', '• Bachelor\'s degree and 5+ years of experience required.'), 'stretch');
+  // 2026-10-16, Providien: the years are the route WITHOUT the degree.
+  eq('"a bachelor\'s … or 5+ years" is entry', lvl('Manufacturing Engineer I', '• A bachelor\'s degree in engineering/sciences or 5+ years of experience in a technical role.'), 'entry');
+  eq('…"Bachelor\'s and 3 years, or 5 years" is still a 3-year ask', lvl('Manufacturing Engineer', '• Bachelor\'s degree and 3 years of experience, or 5 years of experience.'), 'stretch');
+  eq('…and "Bachelor\'s or Master\'s or 4 years" waives nothing for a Master\'s', lvl('Engineer', '• Master\'s degree, or a Bachelor\'s degree with 4 years of experience.'), 'stretch');
+  // Measured on the store: these waive the years for a doctorate or a Master's, not for him.
+  eq('Intel: no experience with a PhD is not his route',
+    lvl('Silicon Packaging Design Engineer', '- At least 4 years of experience in substrate/package design with a Bachelor\'s degree, 3 years with a Master\'s degree, or no experience required with a PhD.'), 'stretch');
+  eq('SSi: no prior experience with a Master\'s is not his route',
+    lvl('Systems Design Quality Engineer', 'Minimum 5+ years of experience with a Bachelor’s degree in Quality Engineering, or no prior experience required with a Master’s degree.'), 'stretch');
+  eq('AbbVie: "PhD and no experience necessary" is not his route',
+    lvl('Data Scientist', 'Bachelor’s Degree and typically 10 years of experience, Master’s Degree and typically 8 years of experience, PhD and no experience necessary.'), 'exclude');
+}
+
+// A required range that starts at zero is a way in (Therm-X, 2026-10-16).
+{
+  const e = classifyExperience('Mechanical Engineer I/II – Thermal Systems', 'Requirements\n• Level I: 0–2 years of relevant experience, or strong internship and project work. Level II: 3+ years of mechanical design engineering.');
+  if (e.level === 'entry') { pass++; console.log('  ✅ "Level I: 0–2 years … Level II: 3+" is entry, not a 3-year stretch'); }
+  else { fail++; console.log(`  ❌ Level I/II posting read as ${e.level} (${e.years}y)`); }
+  const p = classifyExperience('Mechanical Engineer', 'Preferred\n• 0-2 years nice to have\nRequirements\n• 4+ years of design experience');
+  if (p.level !== 'entry') { pass++; console.log('  ✅ a zero range only under Preferred does not undo a required 4+'); }
+  else { fail++; console.log('  ❌ a preferred 0-2 overrode a required 4+'); }
+}
+
 // ── report ──────────────────────────────────────────────────────────
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
