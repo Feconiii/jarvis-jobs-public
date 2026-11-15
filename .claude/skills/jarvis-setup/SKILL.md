@@ -236,4 +236,6 @@ node jarvis/setup.mjs --answers data/jarvis/setup-answers.json --update
 
 `--update` keeps what was added since (work history, narrative, every rule in
 `preferences.md`), adds only the new answers' rules, and keeps a
-`.bak-<date>` copy of each file it changes. Then `npm run jarvis:rescore`.
+`.bak-<date>` copy of each file it changes. A blank answer never clears a
+value already there; to remove one, edit the file with them. Then
+`npm run jarvis:rescore`.

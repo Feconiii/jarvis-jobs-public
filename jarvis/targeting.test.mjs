@@ -145,6 +145,7 @@ test('THE AI PLAN SETS HOW MUCH THE AI RUNS: usage, the model ladder, and never 
 test('a plan for the other assistant is refused; a codex user defaults to a ChatGPT plan', () => {
   assert.ok(validate(withDefaults({ ...FULL, llm: 'codex', ai_plan: 'claude-max' })).some((e) => e.startsWith('ai_plan')));
   assert.equal(withDefaults(ANSWERS).ai_plan, 'chatgpt-plus');
+  assert.equal(personFrom(yaml.load(profileYaml(withDefaults({ ...FULL, ai_plan: ' Claude-Max ' })))).plan, 'claude-max', 'a plan typed in capitals still reads');
   assert.deepEqual(validate(withDefaults(FULL)), []);
   assert.ok(validate(withDefaults({ ...FULL, applications_per_week: 'lots' })).some((e) => e.startsWith('applications_per_week')));
 });
@@ -180,6 +181,7 @@ test('A RE-RUN WITH --update KEEPS WHAT WAS ADDED SINCE and backs up what it cha
   const first = withDefaults(ANSWERS);
   const prof = yaml.load(profileYaml(first));
   prof.narrative.headline = 'Analyst who reconciles';
+  prof.candidate.github = 'https://github.com/test-analyst';   // added by hand inside a block setup writes
   writeFileSync(paths.profile, yaml.dump(prof));
   const ap = yaml.load(applyProfileYaml(first, readFileSync(paths.applyExample, 'utf8')));
   ap.work_experience = [{ title: 'Intern', company: 'Somewhere' }];
@@ -190,6 +192,7 @@ test('A RE-RUN WITH --update KEEPS WHAT WAS ADDED SINCE and backs up what it cha
   assert.equal(p2.narrative.headline, 'Analyst who reconciles', 'narrative kept');
   assert.equal(p2.targeting.plan, 'claude-api', 'new answers in');
   assert.equal(p2.candidate.location, 'Boston, MA');
+  assert.equal(p2.candidate.github, 'https://github.com/test-analyst', 'a hand-added key inside a block stays');
   const a2 = yaml.load(readFileSync(paths.apply, 'utf8'));
   assert.deepEqual(a2.work_experience, [{ title: 'Intern', company: 'Somewhere' }], 'work history kept');
   assert.equal(a2.identity.city, 'Boston');

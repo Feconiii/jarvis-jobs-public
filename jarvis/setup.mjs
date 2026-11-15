@@ -130,7 +130,7 @@ export function withDefaults(a) {
   const out = { ...a };
   for (const q of QUESTIONS) {
     if ((out[q.key] == null || out[q.key] === '') && q.def && out.full_name) out[q.key] = q.def(out);
-    if (q.choices && out[q.key]) out[q.key] = String(out[q.key]).toLowerCase();
+    if (q.choices && out[q.key]) out[q.key] = String(out[q.key]).trim().toLowerCase();
   }
   return out;
 }
@@ -320,6 +320,22 @@ function writeGuarded(file, text, { force, log }) {
  * every rule and gain only the new answers' lines they do not have yet. Each
  * file changed is kept beside itself as <name>.bak-<date> first.
  */
+/**
+ * `fresh`'s answers over `old`, block by block, so a key added by hand inside
+ * a block stays. A blank in `fresh` (a question not answered, or a key setup
+ * only writes as a placeholder) never wipes a value already there.
+ */
+function deepMerge(old, fresh) {
+  const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const blank = (v) => v == null || v === '' || (Array.isArray(v) && !v.length);
+  const out = { ...old };
+  for (const [k, v] of Object.entries(fresh)) {
+    if (isObj(v) && isObj(old[k])) out[k] = deepMerge(old[k], v);
+    else if (!(blank(v) && !blank(old[k]))) out[k] = v;
+  }
+  return out;
+}
+
 export function updateAll(a, { log = console.log, paths = {} } = {}) {
   const P = { ...DEFAULT_PATHS, ...paths };
   const backup = (file) => { if (existsSync(file)) copyFileSync(file, `${file}.bak-${stamp()}`); };
@@ -328,7 +344,7 @@ export function updateAll(a, { log = console.log, paths = {} } = {}) {
   backup(P.profile);
   mkdirSync(path.dirname(P.profile), { recursive: true });
   writeFileSync(P.profile, `# Updated by jarvis/setup.mjs --update on ${stamp()}. Edit freely.\n`
-    + yaml.dump({ ...old, ...fresh, narrative: old.narrative || fresh.narrative, cover_letter: old.cover_letter || fresh.cover_letter }, { lineWidth: 100 }));
+    + yaml.dump({ ...deepMerge(old, fresh), narrative: old.narrative || fresh.narrative, cover_letter: old.cover_letter || fresh.cover_letter }, { lineWidth: 100 }));
   log(`  updated  ${path.relative(ROOT, P.profile)}`);
   const base = existsSync(P.apply) ? readFileSync(P.apply, 'utf8') : readFileSync(P.applyExample, 'utf8');
   backup(P.apply);
