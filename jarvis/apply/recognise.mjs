@@ -244,7 +244,7 @@ export async function recogniseLeftovers(plan, fields, profile, planOpts, { ask,
   if (took) {
     const by = (x) => plan.actions.filter((a) => a.action === x);
     plan.unanswered = by('unknown').map((a) => ({ label: a.label, why: a.why }));
-    if (plan.summary) for (const k of Object.keys(plan.summary)) plan.summary[k] = by(k === 'letter' ? 'upload-letter' : k).length;
+    if (plan.summary) for (const k of Object.keys(plan.summary)) plan.summary[k] = by(k === 'letter' ? 'upload-letter' : k === 'portfolio' ? 'upload-portfolio' : k).length;
     plan.review = plan.actions.filter((a) => a.review).map((a) => ({ label: a.label, value: a.value }));
   }
   return took;

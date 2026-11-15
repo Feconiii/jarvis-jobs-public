@@ -325,7 +325,13 @@
         "F-428",
         "F-465"
       ],
-      "notes": "His most important employers (Applied Materials, Lam, Micron, Qualcomm). Micron is the hardest form met (F-465)."
+      "notes": "His most important employers (Applied Materials, Lam, Micron, Qualcomm). Micron is the hardest form met (F-465).",
+      "clearHosts": [
+        {
+          "host": "careers.micron.com",
+          "evidence": "2026-11-04: two applications filled in full and submitted with no sign-in (jobs 6433a588dce2df37 New College Grad Dry Etch Equipment Engineer, fa6bd35abee81023 Semiconductor Equipment Applications Eng), per the first mate"
+        }
+      ]
     },
     {
       "key": "radancy",

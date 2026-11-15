@@ -83,6 +83,8 @@ test('THE PANEL IS TOLD WHAT A PAGE IS: the posting, its fit, and the applicatio
   assert.ok(body.fit.band, 'and its band');
   assert.ok(Array.isArray(body.fit.skills.matched) && Array.isArray(body.fit.skills.missing), 'skills asked for, split by whether he has them');
   assert.ok(Array.isArray(body.fit.reasons));
+  // The fill stop (jarvis/fill-stop.mjs): an ordinary posting carries no reason.
+  assert.deepEqual(body.stop, { reasons: [], read: true }, JSON.stringify(body.stop));
   assert.ok(body.application, 'the build that /api/apply-page started');
   assert.ok(['tailoring', 'ready'].includes(body.application.status));
   assert.equal(body.submit, false, 'nothing here submits');
@@ -192,6 +194,23 @@ test('A COVER LETTER IS WRITTEN IN THE BACKGROUND AND READ BACK — switched off
   assert.equal(done.submit, false);
   const unknown = await post('/api/cover-letter', { id: 'nope' });
   assert.equal(unknown.status, 404);
+});
+
+test('FILL STOP (F-1051): a citizens-only posting comes back with its reason, from the store\'s own triage', async () => {
+  const barred = {
+    ...POSTING,
+    title: 'Manufacturing Engineer II',
+    description: `${'Design fixtures for the assembly line. SolidWorks, GD&T, DOE. '.repeat(4)}Must be a U.S. citizen. No exceptions.`,
+    url: 'https://jobs.lever.co/acme/9f8e7d6c-1111-2222-3333-444455556666',
+  };
+  const seen = await post('/api/apply-page', { pageUrl: barred.url, posting: barred });
+  assert.equal(seen.status, 200, JSON.stringify(seen.body));
+  const { status, body } = await get(`/api/panel?pageUrl=${encodeURIComponent(barred.url)}`);
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.job.id, seen.body.id);
+  assert.equal(body.stop?.read, true, JSON.stringify(body.stop));
+  assert.ok(body.stop.reasons.length >= 1, JSON.stringify(body.stop));
+  assert.match(body.stop.reasons[0], /Must be a U\.S\. citizen/);
 });
 
 test('A PAGE THAT IS NOT A POSTING IS SAID SO — never the last application\'s job', async () => {

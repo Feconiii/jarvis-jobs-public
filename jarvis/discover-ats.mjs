@@ -51,10 +51,17 @@ import yaml from 'js-yaml';
 
 import { guardArgs } from './cli.mjs';
 import { makeHostLimiter, serviceOf } from './net-pool.mjs';
-import { resolveBranded, renderCareers, closeRenderer } from './branded-boards.mjs';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  SLOW_ONLY, PACE_MS, holdDeadline, loadState, saveState, heldUntil, hold,
+  addPending, removePending, prunePending, runSlowLane, SLOW_LANE_BUDGET,
+} from './ats-holds.mjs';
+import { resolveBranded, renderCareers, closeRenderer, unreadableBoardIn } from './branded-boards.mjs';
 import pinpoint from '../providers/pinpoint.mjs';
 import teamtailor from '../providers/teamtailor.mjs';
 import personio from '../providers/personio.mjs';
+import jobvite from '../providers/jobvite.mjs';
+import { isBambooPlaceholder } from '../providers/bamboohr.mjs';
 import { makeHttpCtx } from '../providers/_http.mjs';
 import { person, discovery } from './targeting.mjs';
 
@@ -259,6 +266,57 @@ function isDropped(url) {
   return !!s && droppedServices.has(s);
 }
 
+// A HOLD OUTLIVES THE RUN (F-634). Workable's 429 is a Cloudflare IP block
+// with Retry-After ≈ 70,000 s, and a request inside it restarts it — and the
+// same block stops Alex applying to Workable jobs from this network. So the
+// deadline is written to a file, and until it passes no request of any kind,
+// speculative or not, from this run or the next, goes to that host.
+const HOLDS_FILE_DEFAULT = process.env.JARVIS_DISCOVER_HOLDS || path.join(ROOT, 'data', 'jarvis', 'discover-holds.json');
+let holdsFile = HOLDS_FILE_DEFAULT;
+let holdState = null;
+function holdsNow() {
+  if (!holdState) holdState = loadState(holdsFile);
+  return holdState;
+}
+/** Tests: point the hold file somewhere harmless (or nowhere, with file ''). */
+export function _configureHolds({ file = holdsFile, state = null } = {}) {
+  holdsFile = file;
+  holdState = state || loadState(file);
+  droppedServices.clear();
+  refusalsByService.clear();
+  deferredByService.clear();
+  paceNext.clear();
+  return holdState;
+}
+export function _holdState() { return holdsNow(); }
+function isHeld(service) { return !!service && !!heldUntil(holdsNow(), service, clock.now()); }
+
+// The clock the pacer waits on — swapped for a fake one in tests.
+let clock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+export function _setClock(c) { clock = { ...clock, ...c }; }
+
+// ONE REQUEST AT A TIME, SPACED, FOR A HOST THAT BLOCKS BY THE DAY. Every
+// request to a SLOW_ONLY host (Workable) waits its turn PACE_MS apart, whoever
+// sends it — the careers-page confirmation of a board the company itself named
+// included, since five of those at once look like the burst that trips it.
+const paceNext = new Map();
+async function waitTurn(service, gap) {
+  const now = clock.now();
+  const at = Math.max(now, paceNext.get(service) || 0);
+  paceNext.set(service, at + gap);
+  if (at > now) await clock.sleep(at - now);
+}
+
+// Names that lost a probe to a refused or slow-only host: the probe context
+// carries them from req() up to the company being resolved, so the slow lane
+// can re-ask exactly that slug on exactly that ATS.
+const probeContext = new AsyncLocalStorage();
+const deferredByService = new Map();   // slow-only guesses held back, by host
+function markLost(service, how) {
+  const st = probeContext.getStore();
+  if (st?.frame && !st.frame.refused) { st.frame.refused = service; st.frame.how = how; }
+}
+
 // TWO KINDS OF REFUSAL, AND ONLY ONE OF THEM MATTERS.
 //
 // The first version of this report listed every refusing host together, which
@@ -285,7 +343,22 @@ export function refusalReport() {
   };
 }
 
-async function req(url, { method = 'GET', body = null, headers = {} , speculative = true } = {}) {
+async function req(url, { method = 'GET', body = null, headers = {} , speculative = true, slowLane = false } = {}) {
+  const service = serviceOf(url);
+  const shared = ATS_SERVICE_RE.test(service + '.');
+  // A held host is not asked at all — not by a guess, not by the company's own
+  // link, not by the slow lane. One request inside Workable's block restarts it.
+  if (isHeld(service)) {
+    if (shared) markLost(service, 'held');
+    return { ok: false, status: 429, text: '', refused: true, held: true };
+  }
+  // A guess at a slow-only host waits for the slow lane, which asks only for
+  // the names nothing else resolved, one request every PACE_MS.
+  if (speculative && !slowLane && SLOW_ONLY.has(service)) {
+    deferredByService.set(service, (deferredByService.get(service) || 0) + 1);
+    markLost(service, 'deferred');
+    return { ok: false, status: 0, text: '', refused: true, deferred: true };
+  }
   // A service that has already refused us this run is not asked again — but
   // only for SPECULATION.
   //
@@ -296,8 +369,21 @@ async function req(url, { method = 'GET', body = null, headers = {} , speculativ
   // is how Slip Robotics stayed missing after everything else was fixed — its
   // page named `apply.workable.com/slip-robotics`, and the breaker (tripped
   // earlier in the run by slug guesses) refused to look.
-  if (speculative && isDropped(url)) return { ok: false, status: 429, text: '', refused: true };
-  return withService(serviceOf(url), async () => {
+  if (speculative && !slowLane && isDropped(url)) {
+    if (shared) markLost(service, 'dropped');
+    return { ok: false, status: 429, text: '', refused: true };
+  }
+  return withService(service, async () => {
+    // Queued behind requests that may have earned a hold while this one waited.
+    if (isHeld(service)) {
+      if (shared) markLost(service, 'held');
+      return { ok: false, status: 429, text: '', refused: true, held: true };
+    }
+    if (SLOW_ONLY.has(service) || slowLane) await waitTurn(service, PACE_MS[service] ?? 1500);
+    if (isHeld(service)) {
+      if (shared) markLost(service, 'held');
+      return { ok: false, status: 429, text: '', refused: true, held: true };
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
@@ -319,7 +405,21 @@ async function req(url, { method = 'GET', body = null, headers = {} , speculativ
       // 429 and 403 are the host declining, and 405 is the same thing wearing an
       // odd status code (F-432). None of them is evidence that a board does not
       // exist.
-      if (res.status === 429 || res.status === 403 || res.status === 405) noteRefusal(url, res.status);
+      if (res.status === 429 || res.status === 403 || res.status === 405) {
+        noteRefusal(url, res.status);
+        if (shared) markLost(service, 'refused');
+        const until = holdDeadline(service, res.status, res.headers?.get?.('retry-after'), clock.now());
+        if (until) {
+          const st = holdsNow();
+          const fresh = !heldUntil(st, service, clock.now());
+          hold(st, service, until, { status: res.status, at: new Date(clock.now()).toISOString() });
+          droppedServices.add(service);
+          try { saveState(holdsFile, st); } catch { /* the run still stops asking */ }
+          if (fresh) console.error(`  ⚠  ${service} answered 429 with a block until ${until} — nothing more goes to it until then (this run or the next).`);
+          return { ok: false, status: res.status, text, refused: true, held: true };
+        }
+        return { ok: false, status: res.status, text, refused: true };
+      }
       return { ok: res.ok, status: res.status, text };
     } catch (err) {
       return { ok: false, status: 0, text: '', error: err.message };
@@ -574,12 +674,8 @@ async function probeWorkable({ slug, strong }, name, reqOpts = {}) {
   };
 }
 
-/** The demo board BambooHR serves under unclaimed-looking subdomains (F-637). */
-export function isBambooPlaceholder(jobs) {
-  return (jobs || []).some(x => String(x?.id) === '15'
-    && /^IT Security Engineer$/i.test(String(x?.jobOpeningName || '').trim())
-    && /mayfair/i.test(JSON.stringify(x?.location || '')));
-}
+/** The demo board BambooHR serves under unclaimed-looking subdomains (F-637) — one test, shared with the scanner. */
+export { isBambooPlaceholder };
 
 async function probeBambooHR({ slug, strong }, name, reqOpts = {}) {
   const r = await req(`https://${slug}.bamboohr.com/careers/list`, reqOpts);
@@ -866,11 +962,10 @@ async function resolveCompany({ name, ticker, skipWorkday = false, seeded = fals
   // Strong slugs first across every provider: a full-name match anywhere beats
   // a fragment match, so an unambiguous hit is never pre-empted by a lucky one.
   for (const cand of [...slugs].sort((a, b) => Number(b.strong) - Number(a.strong))) {
-    for (const probe of [
-      probeGreenhouse, probeAshby, probeLever, probeSmartRecruiters,
-      probeRippling, probeWorkable, probeBambooHR, probeBreezy, probeRecruitee,
-    ]) {
-      if (consider(await probe(cand, name))) return best;
+    // Workable's guesses are held back here and asked in the slow lane, only
+    // for names nothing else resolved (F-634) — see SLOW_ONLY.
+    for (const provider of SLUG_CHAIN) {
+      if (consider(await PROBE_BY_PROVIDER[provider](cand, name))) return best;
     }
   }
   // Workday last: it is the most expensive probe (POSTs, two stages). Seeded
@@ -953,6 +1048,9 @@ const BOARD_PATTERNS = [
   { provider: 'pinpoint', re: /([a-z0-9][a-z0-9-]{1,40})\.pinpointhq\.com/gi },
   { provider: 'teamtailor', re: /([a-z0-9][a-z0-9-]{1,40})\.teamtailor\.com/gi },
   { provider: 'personio', re: /([a-z0-9][a-z0-9-]{1,40})\.jobs\.personio\.(?:de|com)/gi },
+  // Jobvite names its employer in the PATH, not the host (2026-11-04: the
+  // coverage meter found Mini-Circuits at jobs.jobvite.com/mini-circuits).
+  { provider: 'jobvite', re: /(?:jobs|careers)\.jobvite\.com\/([a-z0-9][a-z0-9-]{1,60})/gi },
 ];
 
 /**
@@ -1010,6 +1108,7 @@ const BOARD_NOISE = new Set([
  * @param {string} html
  * @returns {Array<{provider: string, slug: string}>}
  */
+import { NOT_A_SLUG as JOBVITE_NOT_A_SLUG } from '../providers/jobvite.mjs';
 export function boardLinksIn(html) {
   if (typeof html !== 'string' || !html) return [];
   const out = [];
@@ -1019,6 +1118,8 @@ export function boardLinksIn(html) {
     for (const m of html.matchAll(re)) {
       const slug = String(m[1] || '').toLowerCase();
       if (!slug || BOARD_NOISE.has(slug)) continue;
+      // jobs.jobvite.com/jobs or /search is a page, not an employer (review, 2026-11-04).
+      if (provider === 'jobvite' && JOBVITE_NOT_A_SLUG.has(slug)) continue;
       const key = `${provider}:${slug}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1049,8 +1150,9 @@ function viaProvider(provider, urlOf) {
 const probePinpoint = viaProvider(pinpoint, (slug) => `https://${slug}.pinpointhq.com`);
 const probeTeamtailor = viaProvider(teamtailor, (slug) => `https://${slug}.teamtailor.com`);
 const probePersonio = viaProvider(personio, (slug) => `https://${slug}.jobs.personio.de`);
+const probeJobvite = viaProvider(jobvite, (slug) => `https://jobs.jobvite.com/${slug}/jobs`);
 
-const PROBE_BY_PROVIDER = {
+const RAW_PROBES = {
   greenhouse: probeGreenhouse,
   ashby: probeAshby,
   lever: probeLever,
@@ -1064,7 +1166,81 @@ const PROBE_BY_PROVIDER = {
   pinpoint: probePinpoint,
   teamtailor: probeTeamtailor,
   personio: probePersonio,
+  jobvite: probeJobvite,
 };
+
+/**
+ * A probe that remembers when it lost to a refusing host (F-634). If any of
+ * its requests was refused, held or deferred, and it found nothing, the
+ * company being resolved gets the probe on its list for the slow lane.
+ */
+function trackProbe(provider, fn) {
+  return async (cand, name, opts = {}) => {
+    const parent = probeContext.getStore();
+    const frame = { refused: '', how: '' };
+    const hit = await probeContext.run({ ...parent, frame }, () => fn(cand, name, opts));
+    if (frame.refused && !hit?.entry && parent?.lost) {
+      parent.lost.push({
+        name, provider, service: frame.refused, how: frame.how,
+        cand: { slug: cand.slug, strong: !!cand.strong }, speculative: opts.speculative !== false,
+      });
+    }
+    return hit;
+  };
+}
+const PROBE_BY_PROVIDER = Object.fromEntries(Object.entries(RAW_PROBES).map(([p, fn]) => [p, trackProbe(p, fn)]));
+const SLUG_CHAIN = ['greenhouse', 'ashby', 'lever', 'smartrecruiters', 'rippling', 'workable', 'bamboohr', 'breezy', 'recruitee'];
+
+/** One company resolved as main() does, with the probes it lost to a refusing host (tests, F-634). */
+export async function resolveCompanyTracked(company) {
+  const ctx = { lost: [] };
+  const result = await probeContext.run(ctx, () => resolveCompany(company));
+  return { result, lost: ctx.lost };
+}
+
+/**
+ * Ask one lost probe again, in the slow lane: the same slug on the same ATS,
+ * paced, past the run's breaker but never past a hold.
+ * @returns {Promise<{hit: object|null, refused: string, held: boolean, how: string}>}
+ */
+export async function slowProbe(item) {
+  const fn = RAW_PROBES[item.provider];
+  if (!fn) return { hit: null, refused: '', held: false, how: '' };
+  const frame = { refused: '', how: '' };
+  const hit = await probeContext.run({ frame }, () =>
+    fn(item.cand, item.name, { speculative: item.speculative !== false, slowLane: true }));
+  return { hit: hit?.entry ? hit : null, refused: frame.refused, held: frame.how === 'held', how: frame.how };
+}
+
+/**
+ * A readable board found on a page that ALSO links one nothing here reads
+ * (Bastian Solutions, 2026-11-07: a shared Workday board plus ADP MyJobs).
+ * The hit carries that platform, and the employer is settled as partly read.
+ */
+function withSecond(hit, pages) {
+  const also = unreadableBoardIn(pages.join('\n'));
+  return also ? { ...hit, alsoUnreadable: also } : hit;
+}
+
+/**
+ * The outcome a resolved company is settled with, and what goes with it.
+ * `admitted`: its board was new and written; `gated`: refused on identity.
+ * A board that belongs to another tracked company, on a careers page that
+ * also links a board nothing reads, is PARTIAL, not tracked: the LinkedIn
+ * sweep covers no-board and partial employers, and this one has postings
+ * only that second board holds.
+ */
+export function settledOutcome(r, { admitted = false, gated = false, write = false } = {}) {
+  const also = r?.alsoUnreadable ? { also: r.alsoUnreadable } : {};
+  if (admitted) return [write ? 'tracked' : 'found', { provider: r.provider, url: r.entry.careers_url, count: r.count, ...also }];
+  if (r?.entry) {
+    if (gated) return ['gated', { provider: r.provider, url: r.entry.careers_url }];
+    if (also.also) return ['partial', { provider: r.provider, url: r.entry.careers_url, ...also }];
+    return ['dupe', { provider: r.provider, url: r.entry.careers_url }];
+  }
+  if (r?.partial) return ['partial', { url: `https://${r.tenant}.${r.instance}.myworkdayjobs.com/` }];
+  return ['miss', r?.platform ? { platform: r.platform } : {}];
+}
 
 /** Where a company is likely to have put its openings. */
 const CAREERS_PATHS = ['/careers', '/jobs', '/careers/', '/company/careers', '/about/careers', '/'];
@@ -1120,7 +1296,7 @@ export async function resolveViaCareersPage(site, name, { authoritative = true }
       // other guess. This is the difference between finding a board and
       // inventing one.
       const hit = await probe({ slug, strong: authoritative }, name, { speculative: false });
-      if (hit?.entry) return hit;
+      if (hit?.entry) return withSecond(hit, pages);
     }
 
     // Workday last, and verified against the triple the page supplied rather
@@ -1142,10 +1318,10 @@ export async function resolveViaCareersPage(site, name, { authoritative = true }
       if (!w.ok) continue;
       const total = Number(parseJson(w.text)?.total ?? 0);
       if (!total) continue;
-      return {
+      return withSecond({
         entry: { name, careers_url: `https://${tenant}.${instance}.myworkdayjobs.com/${site}` },
         provider: 'workday', count: total,
-      };
+      }, pages);
     }
   }
   // A BOARD ON THE COMPANY'S OWN DOMAIN (branded-boards.mjs, 2026-10-03).
@@ -1163,7 +1339,7 @@ export async function resolveViaCareersPage(site, name, { authoritative = true }
       return r.ok ? r.text : '';
     },
   });
-  if (branded?.entry) return branded;
+  if (branded?.entry) return withSecond(branded, pages);
   // RENDERED, LAST (--render). The page's own script asks its ATS for jobs;
   // that request names the board when no link in the HTML does. Only the
   // company's own published site, or a guessed one that already named it.
@@ -1710,12 +1886,8 @@ async function main() {
   // now appended the moment it resolves; a dead run keeps what it found, and a
   // re-run skips those names as already tracked.
   let done = 0;
-  const results = await mapPool(companies, concurrency, async (c) => {
-    const r = await resolveCompany(c);
-    done++;
-    if (r.entry) process.stderr.write(`  ✓ ${c.name} → ${r.provider} (${r.count})\n`);
-    else if (r.partial) process.stderr.write(`  ~ ${c.name} → workday tenant ${r.tenant}.${r.instance}, site unknown\n`);
-    if (done % 25 === 0) process.stderr.write(`  … ${done}/${companies.length}\n`);
+  const lostByName = new Map();
+  const finish = (c, r) => {
     const out = { ...r, sector: c.sector };
     const wasGated = gatedLate.length;
     let admitted = admit(out);
@@ -1724,22 +1896,90 @@ async function main() {
       admitted = false;
       dupes.push(r.entry.name);
     }
-    if (admitted) {
-      out.admitted = true;
-      // A dry run found the board but tracked nothing, and says so.
-      settle(c.name, write ? 'tracked' : 'found', { provider: r.provider, url: r.entry.careers_url, count: r.count });
-    } else if (r.entry) {
-      // The board answered but belongs to someone already tracked, or is gated.
-      settle(c.name, gatedLate.length > wasGated ? 'gated' : 'dupe', { provider: r.provider, url: r.entry.careers_url });
-    } else if (r.partial) settle(c.name, 'partial', { url: `https://${r.tenant}.${r.instance}.myworkdayjobs.com/` });
-    else settle(c.name, 'miss', r.platform ? { platform: r.platform } : {});
+    if (admitted) out.admitted = true;
+    // A dry run found the board but tracked nothing, and says so. A board that
+    // belongs to someone already tracked is a dupe, or gated — or partial when
+    // the careers page also links a board nothing reads (settledOutcome).
+    settle(c.name, ...settledOutcome(r, { admitted, gated: gatedLate.length > wasGated, write }));
     return out;
+  };
+  const results = await mapPool(companies, concurrency, async (c) => {
+    const ctx = { lost: [] };
+    const r = await probeContext.run(ctx, () => resolveCompany(c));
+    done++;
+    if (r.entry) process.stderr.write(`  ✓ ${c.name} → ${r.provider} (${r.count})\n`);
+    else if (r.partial) process.stderr.write(`  ~ ${c.name} → workday tenant ${r.tenant}.${r.instance}, site unknown\n`);
+    if (done % 25 === 0) process.stderr.write(`  … ${done}/${companies.length}\n`);
+    // Only a name nothing resolved needs the probes it lost asked again.
+    if (r.miss && ctx.lost.length) lostByName.set(c.name.toLowerCase(), { c, lost: ctx.lost });
+    return finish(c, r);
   });
+
+  // THE SLOW LANE (F-634), instead of "re-run later". Every probe a miss lost
+  // to a refusing, dropped, held or slow-only host is asked again here — that
+  // host alone, one request at a time, PACE_MS apart, a 60 s back-off on a
+  // refusal and a hard stop on a hold. Names it cannot reach this run (held
+  // host, budget spent) are kept for the next run's slow lane, which asks them
+  // first; --write runs only, since a dry run must not leave work behind.
+  const holdsState = holdsNow();
+  const dropFromPending = prunePending(holdsState);
+  const fresh = [];
+  for (const { c, lost } of lostByName.values()) {
+    const low = !!(c.seeded || c.skipWorkday);
+    // At most the two strongest slugs per name and host: a fragment guess at a
+    // block-by-the-day host is not worth its share of the budget.
+    const perHost = new Map();
+    for (const l of lost.sort((a, b) => Number(b.cand.strong) - Number(a.cand.strong))) {
+      const k = `${l.service}|${l.provider}`;
+      const n = perHost.get(k) || 0;
+      if (n >= 2) continue;
+      perHost.set(k, n + 1);
+      fresh.push({ ...l, name: c.name, sector: c.sector || '', low });
+    }
+  }
+  const runNames = new Set(companies.map((c) => c.name.toLowerCase()));
+  const nowKnown = existingEntries().names;
+  // Held over from earlier runs: asked first, unless this run already asked the name or it is tracked now.
+  const carried = write ? holdsState.pending.filter((p) => !runNames.has(String(p.name).toLowerCase()) && !nowKnown.has(String(p.name).toLowerCase())) : [];
+  if (write) removePending(holdsState, holdsState.pending.filter((p) => !carried.includes(p)));
+  const lane = [...carried, ...fresh];
+  let laneFound = 0, laneClean = 0, laneDeferred = [];
+  if (lane.length) {
+    const hosts = [...new Set(lane.map((l) => l.service))];
+    console.error(`\n  Slow lane: ${lane.length} probe(s) a refusing host cost ${new Set(lane.map((l) => l.name.toLowerCase())).size} name(s)${carried.length ? ` (${carried.length} held over from an earlier run)` : ''} — ${hosts.map((h) => `${h} ${((PACE_MS[h] ?? 1500) / 1000).toFixed(1)} s apart`).join(', ')}`);
+    const budget = Number(process.env.JARVIS_SLOW_LANE_BUDGET) || SLOW_LANE_BUDGET;
+    const out = await runSlowLane(lane, {
+      probe: slowProbe,
+      isHeld,
+      sleep: clock.sleep,
+      budget,
+      log: (s) => console.error(s),
+    });
+    const named = new Set();
+    for (const { item, hit } of out.found) {
+      // Two hosts may both answer for one name; the first board found wins.
+      if (named.has(item.name.toLowerCase())) continue;
+      named.add(item.name.toLowerCase());
+      const minC = item.low ? 1 : MIN_CONFIDENT;
+      const r = hit.count >= minC ? hit : { ...hit, thin: true };
+      process.stderr.write(`  ✓ ${item.name} → ${r.provider} (${r.count}) — slow lane\n`);
+      const res = finish({ name: item.name, sector: item.sector }, r);
+      if (res.admitted) { results.push(res); laneFound++; }
+    }
+    laneClean = out.clean.length;
+    laneDeferred = out.deferred;
+    if (write) {
+      removePending(holdsState, [...out.found.map((f) => f.item), ...out.clean]);
+      addPending(holdsState, out.deferred);
+    }
+  }
+  if (write || lane.length) { try { saveState(holdsFile, holdsState); } catch { /* best effort */ } }
   const hits = results.filter(r => r.admitted);
   if (gatedLate.length) console.error(`  · ${gatedLate.length} dropped — the resolved board is clearance/ITAR-gated: ${gatedLate.join(', ')}`);
   if (dupes.length) console.error(`  · ${dupes.length} resolved to an already-tracked board — skipped: ${dupes.slice(0, 6).join(', ')}${dupes.length > 6 ? ', …' : ''}`);
   const partials = results.filter(r => r.partial);
-  const misses = results.filter(r => r.miss);
+  const laterFound = new Set(hits.map((h) => String(h.entry?.name || '').toLowerCase()));
+  const misses = results.filter(r => r.miss && !laterFound.has(String(r.name || '').toLowerCase()));
 
   console.error(`\n── Discovery complete ──`);
   const thin = hits.filter(h => h.thin);
@@ -1750,13 +1990,40 @@ async function main() {
   // being rate-limited reports the same "No ATS found" number as a run that
   // checked every board cleanly — and the companies behind it are dropped with
   // nothing recording that they were never really looked at.
+  //
+  // Since F-634 a refusal sends the names it cost to the slow lane. The line
+  // that tells the ledger "these misses are not real" (it retries them in
+  // three days rather than thirty) is printed only when some name is STILL
+  // unchecked after it; a refused host whose names were all re-asked is a note.
   const refused = refusalReport();
-  if (refused.ats.length) {
-    console.error(`  ⚠  ${refused.ats.length} shared ATS refused us — misses that depended on them are NOT real:`);
-    for (const r of refused.ats) {
-      console.error(`       ${r.service} — ${r.count} refusals (HTTP ${r.status})`);
+  const unchecked = new Set(laneDeferred.map((l) => l.name.toLowerCase()));
+  // Named one by one for the ledger (F-946): the warning line alone made it
+  // treat EVERY miss in the run as unreal, so a run with one Workable name
+  // held back put 1,500 real misses on the three-day retry.
+  // Only this run's own names: the slow lane also carries probes kept from
+  // earlier runs (discover-holds.json), and naming those here reported 18,572
+  // "unchecked" for one daily pass of 1,500 (2026-10-31).
+  // And only a probe that was NOT a blind guess: every name gets a speculative
+  // Workable slug, so while Workable held us every miss was "unchecked" (637 of
+  // 637 on 2026-10-31) and the 3-day loop came back. A guess stays in the slow
+  // lane's pending list and is asked when the hold lifts; a board the company's
+  // own careers page linked to is what keeps a miss open.
+  const mine = new Set(companies.map((c) => String(c.name || c).toLowerCase()));
+  settle('', 'unchecked-listed');   // this run names its unchecked names, even when there are none
+  for (const name of new Set(laneDeferred.filter((l) => !l.speculative).map((l) => l.name))) if (mine.has(String(name).toLowerCase())) settle(name, 'unchecked');
+  if (lane.length) console.error(`  Slow lane     : ${laneFound} found, ${laneClean} probe(s) answered cleanly, ${laneDeferred.length} not reached`);
+  if (unchecked.size) {
+    console.error(`  ⚠  shared ATS refused us — misses that depended on them are NOT real: ${unchecked.size} name(s) were never checked on ${[...new Set(laneDeferred.map((l) => l.service))].join(', ')}.`);
+    for (const r of refused.ats) console.error(`       ${r.service} — ${r.count} refusals (HTTP ${r.status})`);
+    for (const s of new Set(laneDeferred.map((l) => l.service))) {
+      const until = heldUntil(holdsState, s, clock.now());
+      console.error(`       ${s}: ${until ? `held until ${until} (its own Retry-After); nothing is sent to it before then` : 'the slow lane ran out of budget or kept being refused'}`);
     }
-    console.error('     Re-run later; the companies behind them were never actually checked.');
+    console.error(write
+      ? `     Kept for the next run's slow lane (${holdsState.pending.length} probe(s) waiting${dropFromPending ? `, ${dropFromPending} older ones dropped — the ledger brings those names back` : ''}).`
+      : '     Dry run: nothing kept. A --write run asks them in its slow lane.');
+  } else if (refused.ats.length) {
+    console.error(`  ·  ${refused.ats.length} shared ATS refused the fast pass (${refused.ats.map((r) => `${r.service} ×${r.count}`).join(', ')}); every name that cost was re-asked in the slow lane.`);
   }
   if (refused.sites.length) {
     // Ordinary bot protection on a company's own homepage. One company each,

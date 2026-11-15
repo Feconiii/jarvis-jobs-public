@@ -122,6 +122,14 @@ check('…however good it otherwise looks',
 check('the reason names what was wanted',
   /roles you asked for/.test(applyPrefs(job({ title: 'Yard Hostler' }), req).hard[0]), true);
 
+// F-959: an engineering program is titled by the program (Schaeffler).
+check('an R&D development program asking for an engineering degree passes',
+  applyPrefs(job({ title: 'Accelerated Leadership Development Program - Research & Development Path - Chassis Mechatronics', description: "Bachelor's Degree in relevant Engineering or Engineering Technology" }), req).hard.length, 0);
+check('…a supply-chain program listing engineering among majors does not',
+  applyPrefs(job({ title: 'Supply Chain Development Program 2027', description: "Bachelor's degree in Supply Chain, Business or Engineering" }), req).hard.length, 1);
+check('…nor a program manager',
+  applyPrefs(job({ title: 'Product Development Program Manager', description: "Bachelor's degree in Engineering" }), req).hard.length, 1);
+
 // It fires by NOT matching, the opposite of every other rule, so the field
 // scoping has to be right or it blocks on the description instead.
 const reqAll = parseRules('require robotics');
@@ -237,8 +245,32 @@ console.log('\n🧪 prefs: a never rule names a kind of JOB, so it must match th
   check('robotics in the description does not spare it',
     hard('Field Service Engineer III', 'Applied Materials', 'the underpinnings for robotics, AI and displays'), 1);
   check('a plain except still reads only the rule\'s field', parseRules('no cloud in title except hardware')[0].exceptFields, ['title']);
+
+  // A ROBOTICS EMPLOYER WITHOUT THE WORD IN ITS NAME (audit 2026-11-12). Tutor
+  // Intelligence is a robotics company (91 of its 101 described postings read
+  // as robotics); its field roles were cut because "robot" is not in its name.
+  // The employer's field comes from the store (store.mjs employerFields); the
+  // lookup is passed in here so the test never reads his store.
+  const fieldsOf = (co) => ({ 'Tutor Intelligence': ['robotics'], 'Applied Materials': [], Hitachi: ['industrial'] })[co] || [];
+  const hardWith = (title, company, lookup = fieldsOf) => applyPrefs(job({ title, company, description: 'x' }), rules, { employerFields: lookup }).hard.length;
+  check('a field role at an employer whose postings are robotics is spared', hardWith('Field Service Engineer', 'Tutor Intelligence'), 0);
+  check('…not at an employer in another field', hardWith('Field Process Engineer I', 'Hitachi'), 1);
+  check('…not at one with no field of its own', hardWith('Field Service Engineer III', 'Applied Materials'), 1);
+  check('…and with no lookup it is cut as before', hardWith('Field Service Engineer', 'Tutor Intelligence', null), 1);
+  check('…the employer field spares only a rule whose exception reads the company',
+    applyPrefs(job({ title: 'Field Service Engineer', company: 'Tutor Intelligence', description: 'x' }),
+      parseRules('no field in title except robotics'), { employerFields: fieldsOf }).hard.length, 1);
 }
 
+
+console.log('\n🧪 prefs: an abbreviated title still names the role (2026-10-24)');
+{
+  const req = parseRules('require engineer, engineering, mechanical designer in title');
+  const blocked = (title) => applyPrefs(job({ title }), req).hard.length;
+  check('"Robotics Systems Eng II" is an engineer', blocked('Robotics Systems Eng II , Tech Deployment'), 0);
+  check('"Mfg. Engr." is an engineer', blocked('Mfg. Engr. III'), 0);
+  check('"English Teacher" is not', blocked('English Teacher'), 1);
+}
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

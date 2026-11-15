@@ -29,12 +29,14 @@ export const DETAIL_SOURCES = [
   'breezy',
   'greenhouse',
   'icims',
+  'jobvite',
   'oracle-orc',
   'paylocity',
   'phenom',
   'rippling',
   'sitemap-jobs',
   'smartrecruiters',
+  'successfactors',
   'ukg',
   'workable',
   'workday',
@@ -43,7 +45,7 @@ export const DETAIL_SOURCES = [
 /**
  * Sources whose LIST api already ships the body, so their rows arrive read and
  * never need an enrichment pass at all. Measured on the store 2026-09-10 —
- * amazon-jobs, ashby, successfactors and extension sit at 100% read,
+ * amazon-jobs, ashby and extension sit at 100% read (successfactors did too, and moved to DETAIL_SOURCES on 2026-10-27, F-937: translated-only requisitions arrive empty),
  * lever 97%, jibeapply 89%, recruitee 82%. Phenom also read 100% and was
  * moved out on 2026-10-03 (F-673): its 'body' is a ~380-character teaser, and
  * the full posting is read from the employer's Workday tenant.
@@ -59,7 +61,6 @@ export const BODY_IN_LIST = [
   'jibeapply',
   'lever',
   'recruitee',
-  'successfactors',
 ];
 
 /**

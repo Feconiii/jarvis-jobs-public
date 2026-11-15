@@ -166,7 +166,12 @@
     {
       key: 'oracle',
       host: /\.oraclecloud\.com$/i,
-      shape: (u) => /\/CandidateExperience\//i.test(u.pathname),
+      // …and on the employer's own domain (F-793): Texas Instruments runs it at
+      // careers.ti.com/en/sites/CX/job/25017157/apply/section/1, the store holds
+      // careers.ti.com/en/sites/CX_1/job/25017157. Read by host only, the id was
+      // never seen and his TI form was "not a posting in your store".
+      shape: (u) => /\/CandidateExperience\//i.test(u.pathname)
+        || /^\/(?:[a-z]{2}(?:[-_][a-z]{2})?\/)?sites\/[A-Za-z0-9_-]+\/(?:job|requisitions\/preview)\/\d{5,}(?:\/|$)/i.test(u.pathname),
       token: (u) => { const m = u.pathname.match(/\/(?:job|preview)\/(\d+)(?:\/|$)/); return m ? `oracle:${m[1]}` : null; },
       // Oracle's Submit and Next are the same footer button, told apart by text.
       next: 'footer.apply-flow-pagination button',
@@ -193,6 +198,12 @@
       token: (u) => { const id = q(u, 'opportunityId'); return id ? `ukg:${id}` : null; },
       submit: 'input[type="submit"][value="Submit Application" i], ukg-button[data-automation="btn-submit"]',
       next: 'ukg-button[data-automation="btn-next"]',
+      // R3 (2026-11-07): a confirmation-shaped URL alone is not proof here; the
+      // page must say it was sent (Warren CAT was logged "sent" unsent). And
+      // its own Submit on screen means not sent (a <ukg-button>, which the
+      // generic button test never sees).
+      confirmNeedsText: true,
+      submitSelectorBlocks: true,
     },
     {
       key: 'adp',
@@ -240,6 +251,35 @@
     },
   ];
 
+  /**
+   * EMPLOYERS' OWN APPLICATION SITES, BY THEIR POSTING ID ONLY (R2, 2026-11-06).
+   * Each URL names its posting, so a tab that moves from one posting to another
+   * here is two jobs, not one. They are NOT in the table above on purpose:
+   * that table also decides which pages count as an application site at all
+   * (isAtsHost, atsFor), and www.tesla.com or www.google.com are far more than
+   * that. Shapes read off his own store and answer log, not anyone's config:
+   *   Tesla      /careers/search/job/<slug>-<id>, /careers/search/job/apply/<id>
+   *              (the apply id IS the posting id: 20 of 20 of his)
+   *   Paylocity  /Recruiting/Jobs/Details/<id>, /Recruiting/Jobs/Apply/<id>[/<CO>]
+   *   Google     careers.google.com/jobs/results/<id>-<slug>,
+   *              www.google.com/about/careers/applications/jobs/results/<id>[-<slug>]
+   *   Meta       www.metacareers.com/jobs/<id>
+   */
+  const POSTING_IDS = [
+    { key: 'tesla', host: /^(?:www\.)?tesla\.com$/i, id: (u) => u.pathname.match(/^\/(?:[a-z]{2}_[A-Z]{2}\/)?careers\/search\/job\/(?:apply\/)?(?:[^/]*-)?(\d{5,})\/?$/)?.[1] },
+    { key: 'paylocity', host: /^recruiting\.paylocity\.com$/i, id: (u) => u.pathname.match(/^\/Recruiting\/Jobs\/(?:Details|Apply)\/(\d+)(?:\/|$)/i)?.[1] },
+    { key: 'google', host: /^(?:careers\.google\.com|www\.google\.com)$/i, id: (u) => u.pathname.match(/^\/(?:about\/careers\/applications\/)?jobs\/results\/(\d{6,})(?:-|\/|$)/)?.[1] },
+    { key: 'meta', host: /^(?:www\.)?metacareers\.com$/i, id: (u) => u.pathname.match(/^\/(?:v2\/)?jobs\/(\d{6,})(?:\/|$)/)?.[1] },
+  ];
+  function postingId(u) {
+    for (const p of POSTING_IDS) {
+      if (!p.host.test(u.hostname)) continue;
+      const id = p.id(u);
+      if (id) return `${p.key}:${id}`;
+    }
+    return null;
+  }
+
   /** Which ATS a URL belongs to, by host, or by URL shape for company-hosted tenants. */
   function atsFor(url) {
     let u;
@@ -273,7 +313,7 @@
     if (gh) return `greenhouse:${gh[1]}`;
     const ab = u.search.match(/[?&]ashby_jid=([0-9a-f-]{36})/i);
     if (ab) return `ashby:${ab[1].toLowerCase()}`;
-    return null;
+    try { return postingId(u); } catch { return null; }
   }
 
   /** Is this a host that belongs to an ATS at all? */

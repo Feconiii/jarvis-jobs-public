@@ -75,6 +75,21 @@ function parsePostedOn(label) {
 }
 
 /** @type {Provider} */
+/**
+ * The city Workday puts in a posting's path: "/job/Lisbon-Santos-37/…" →
+ * "Lisbon Santos 37". Some tenants (Accenture) send no `locationsText` at all,
+ * and a blank location buckets as "unknown", which keeps a Bengaluru posting in
+ * the deck (F-777). The path segment is the posting's primary location.
+ * @param {string} externalPath
+ */
+export function locationFromPath(externalPath) {
+  const m = String(externalPath || '').match(/^\/job\/([^/]+)\//);
+  if (!m) return '';
+  let seg = m[1];
+  try { seg = decodeURIComponent(seg); } catch { /* keep it raw */ }
+  return seg.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export default {
   id: 'workday',
 
@@ -109,7 +124,7 @@ export default {
           title: j.title || '',
           url: ep.jobBase + j.externalPath,
           company: entry.name,
-          location: j.locationsText || '',
+          location: j.locationsText || locationFromPath(j.externalPath),
           postedAt: parsePostedOn(j.postedOn),
         });
       }

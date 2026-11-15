@@ -26,16 +26,22 @@ import { writeFileSync, readFileSync } from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
 import { fileURLToPath } from 'url';
-import { getJob, updateJob, query, db, STORE_DIR, withStoreLock } from './store.mjs';
+import { getJob, updateJob, query, db, STORE_DIR, withStoreLock, THIN_BODY } from './store.mjs';
 import { triage } from './triage.mjs';
 import { scoreFit, getProfile, slimFit } from './fit.mjs';
 import { resolveSalary } from './salary-text.mjs';
-import { htmlToText } from './text.mjs';
+import { htmlToText, hollowBody } from './text.mjs';
 import { embeddedPosting } from './embedded-posting.mjs';
 import { adpDetailApi } from '../providers/adp.mjs';
+import { jobvitePostingFromHtml } from '../providers/jobvite.mjs';
 import { makeHostLimiter, serviceOf } from './net-pool.mjs';
-import { makePacer, pacePath } from './pace.mjs';
+import { makePacer, pacePath, TARGETED_RESERVE, paceKeys, paceLimits, hasAllowance } from './pace.mjs';
+import { readSettings } from './settings.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { CAPPED_BOARD } from './unlisted.mjs';
+import { makeRefusalGate, loadRefusals, saveRefusals, refusalsPath, isPolicyRefusal, hostKey } from './refusals.mjs';
 import { DETAIL_SOURCES, driftFrom } from './detail-sources.mjs';
+import { employerClass } from './employer-taste.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -60,6 +66,11 @@ function finishProgress(why = '') {
   LIVE = null;
   writeProgress({
     running: false, total: T.total, done: T.done, ok: T.ok, failed: T.failed, gone: T.gone,
+    // Held back by today's read allowance (F-448): not failures and not
+    // "nothing found"; the dashboard says they wait for tomorrow.
+    paced: T.paced || 0, pacedServices: [...(T.pacedServices || [])],
+    // Bodies for new postings the screen was waiting on: new survivors to read.
+    freshRead: T.freshRead || 0,
     completedAt: new Date().toISOString(), ...(why ? { endedBy: why } : {}),
   });
 }
@@ -73,7 +84,42 @@ function writeProgress(p) {
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
-const CONCURRENCY = 6;
+/**
+ * THE HONEST CLIENT FOR iCIMS (2026-11-03). Every *.icims.com host answered the
+ * browser-looking UA above with 405 — measured: a browser UA gets 405 and 2 KB,
+ * a plain client name gets 200 and the posting with its schema.org JobPosting.
+ * The 405s since 2026-09-09 (isRefusal) were the host turning away a client
+ * that claims to be Chrome and does not behave like one. iCIMS gets a plain,
+ * truthful name instead. Jobvite (2026-11-04) gets the same name from the
+ * start: its posting pages answered it with 200 and the full JobPosting.
+ */
+export const HONEST_UA = 'Jarvis-Jobs/1.0 (personal job search; one posting at a time)';
+export function userAgentFor(url) {
+  try { return /(^|\.)(?:icims|jobvite)\.com$/i.test(new URL(String(url)).hostname) ? HONEST_UA : UA; } catch { return UA; }
+}
+// Narrower on request (JARVIS_ENRICH_CONCURRENCY=2) for a hand-run repair on a
+// machine someone is using; the dashboard's worker keeps the default.
+const CONCURRENCY = Number(process.env.JARVIS_ENRICH_CONCURRENCY) || 6;
+
+/**
+ * Does this posting still need its body read (F-761)? No body; or a body under
+ * THIN_BODY that nothing has read in full — the list teaser Workday and Phenom
+ * hand back. The same question `needsRead` asks in SQL, for a hand-picked list.
+ *
+ * `refreshDays`: also a body last read more than that many days ago (or never
+ * dated). A read is a snapshot, and employers edit after posting: GE Vernova's
+ * R5052095 was read the day after it went up, at 2,071 characters; three weeks
+ * later the same CXS record carried 3,915, the new tail holding the pay range
+ * and "We will not sponsor individuals for employment visas" (F-627). Nothing
+ * was cut on our side — the posting grew, and nothing read it again.
+ */
+export function needsReading(job, refreshDays, now = Date.now()) {
+  const body = String(job?.description || '');
+  if (!body || (body.length < THIN_BODY && !job?.enrichedAt)) return true;
+  if (!(refreshDays >= 0)) return false;
+  const at = Date.parse(job?.enrichedAt || '');
+  return !Number.isFinite(at) || now - at > refreshDays * 86_400_000;
+}
 const TIMEOUT_MS = 15000;
 
 // ── detail-URL derivation, per source ATS ───────────────────────────
@@ -109,14 +155,22 @@ export function appendGateQuestions(body, questions) {
   const labels = [];
   for (const q of questions) {
     const label = String(q?.label || '').replace(/\s+/g, ' ').trim();
-    if (!label || !GATE_QUESTION.test(label)) continue;
-    if (labels.some((l) => l.text === label)) continue;
+    if (!label) continue;
     // THE QUESTION'S OWN NOTE IS WHERE THE ITAR CLAUSE LIVES (Freeform,
     // 2026-10-02): "Citizenship Status" carries "Export Compliance: … must be
     // a 'U.S. person' as defined in the ITAR …" in its description, and the
     // posting body says nothing. He hid it for ITAR; the screen never saw it.
     const note = htmlToText(String(q?.description || '')).replace(/\s+/g, ' ').trim();
-    labels.push({ text: note && GATE_QUESTION.test(note) ? `${label} — ${note.slice(0, 900)}` : label, required: q?.required === true });
+    const noteIsGate = !!note && GATE_QUESTION.test(note);
+    // …AND THE LABEL NEED NOT SAY SO (F-665, 2026-10-18). Relativity Space's
+    // question is labelled just "EXPORT COMPLIANCE"; the note under it says the
+    // hire "must either be a 'U.S. person' … or otherwise eligible for a
+    // federally issued export control license". Only the label was tested, so
+    // the question was dropped and 652 rows read as silent. Either half being
+    // about the gate is enough.
+    if (!GATE_QUESTION.test(label) && !noteIsGate) continue;
+    if (labels.some((l) => l.label === label)) continue;
+    labels.push({ label, text: noteIsGate ? `${label} — ${note.slice(0, 900)}` : label, required: q?.required === true });
   }
   if (!labels.length) return body;
   return `${body}\n\nApplication form questions (asked by the employer on its own application):\n${
@@ -239,6 +293,7 @@ const DETAIL = {
       return {
         api: `https://${tenant}.${inst}.myworkdayjobs.com/wday/cxs/${tenant}/${site}${externalPath}`,
         pick: j => j?.jobPostingInfo?.jobDescription || '',
+        title: j => j?.jobPostingInfo?.title || '',
       };
     }
     m = url.match(/^https:\/\/(wd[\w-]*)\.myworkdaysite\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?recruiting\/([\w-]+)\/([^/]+)(\/.*)$/);
@@ -247,6 +302,7 @@ const DETAIL = {
       return {
         api: `https://${inst}.myworkdaysite.com/wday/cxs/${tenant}/${site}${externalPath}`,
         pick: j => j?.jobPostingInfo?.jobDescription || '',
+        title: j => j?.jobPostingInfo?.title || '',
       };
     }
     return null;
@@ -256,8 +312,20 @@ const DETAIL = {
   // curator needs 400 characters to read anything, so those rows took half of
   // every batch as "no description to read" (F-673). The Workday link is the
   // full posting; any other link has no reader here.
-  phenom(url) {
+  phenom(url, job) {
     if (/myworkday(?:jobs|site)\.com\//.test(url)) return DETAIL.workday(url);
+    // A SuccessFactors / Taleo / UltiPro apply link has no reader; the
+    // provider keeps the posting's page on the Phenom site as detailApi
+    // (providers/phenom.mjs phenomPage). Only an https page of that shape.
+    const page = String(job?.detailApi || '');
+    if (page !== url && /^https:\/\/[^/]+\/[a-z]{2,6}\/[a-z]{2}\/job\/[A-Za-z0-9-]+/.test(page)
+      && !/^https:\/\/[^/]+\/[a-z]{2,6}\/[a-z]{2}\/job\//.test(url)) {
+      // Built by the provider, so its locale can be a guess: read through
+      // readPhenomPage, which tries the locale the site answers with and
+      // never strikes a page it could not find (F-1048 review).
+      const spec = DETAIL.phenom(page);
+      return spec && { ...spec, phenomGuess: true, applyUrl: url };
+    }
     // A posting on the Phenom site itself: its page carries the whole record
     // (phenomPosting). The locale in the path must be the one the id was filed
     // under — QGRQGAGLOBALP122128EXTERNALENGLOBAL lives at /global/en/, and the
@@ -267,6 +335,15 @@ const DETAIL = {
     const loc = /EXTERNAL([A-Z]{2})([A-Z]{2,6})$/.exec(m[3]);
     const path = loc ? `${loc[2].toLowerCase()}/${loc[1].toLowerCase()}` : m[2];
     return { html: `${m[1]}/${path}/job/${m[3]}${m[4] || ''}`, pick: null };
+  },
+  // SuccessFactors career sites list the body in their feed (BODY_IN_LIST once),
+  // but a requisition listed only through translated templates arrives with
+  // every requirement section empty and is left unread (F-760). Its page is
+  // read instead, in English: the link redirects to the translated record and
+  // `localeVariant` names the en_US one beside it (F-937).
+  successfactors(url) {
+    if (!/^https:\/\/[^/]+\/job\//.test(url)) return null;
+    return { html: url, locale: 'en_US', pick: null };
   },
   // Greenhouse: list URL .../<board>/jobs/<id>  →  boards-api.greenhouse.io/v1/boards/<board>/jobs/<id>
   //
@@ -307,6 +384,7 @@ const DETAIL = {
     return {
       api: `${api}?content=true&questions=true`,
       pick: j => appendGateQuestions(j?.content || '', j?.questions),
+      title: j => j?.title || '',
       // departments[] is the business-unit signal ("2256 Neutron - SSC");
       // offices[] adds the site when present.
       team: j => [
@@ -352,6 +430,8 @@ const DETAIL = {
   // Besides the description, this upgrades the approximate slug-derived title
   // and fills the missing location.
   'sitemap-jobs'(url) {
+    const apple = appleDetailApi(url);
+    if (apple) return apple;
     return { html: url, pick: null };
   },
   // Rippling — the ATS a lot of the startups he actually wants are on (F-436).
@@ -449,8 +529,15 @@ const DETAIL = {
   // as an embedded record (embedded-posting.mjs → ukgPosting).
   ukg(url) {
     const u = String(url || '');
-    if (!/^https:\/\/recruiting\d*\.ultipro\.com\/[A-Za-z0-9]+\/JobBoard\/[0-9a-f-]{36}\/OpportunityDetail\?opportunityId=[0-9a-f-]{36}/i.test(u)) return null;
+    if (!/^https:\/\/(?:recruiting\d*\.ultipro\.com|[a-z0-9-]+\.rec\.pro\.ukg\.net)\/[A-Za-z0-9]+\/JobBoard\/[0-9a-f-]{36}\/OpportunityDetail\?opportunityId=[0-9a-f-]{36}/i.test(u)) return null;
     return { html: u, pick: null };
+  },
+  // Jobvite (F-985): the posting page carries a schema.org JobPosting with the
+  // whole body; a page without one falls back to div.jv-job-detail-description
+  // (jobPostingFromHtml → jobvitePostingFromHtml).
+  jobvite(url) {
+    const u = String(url || '');
+    return /^https:\/\/jobs\.jobvite\.com\/[a-z0-9][a-z0-9-]*\/job\/[A-Za-z0-9]+\/?$/i.test(u) ? { html: u, pick: null } : null;
   },
   icims(url) {
     const u = String(url || '');
@@ -459,6 +546,32 @@ const DETAIL = {
     return { html: `${u}${sep}in_iframe=1`, pick: null };
   },
 };
+
+/**
+ * APPLE'S OWN POSTING API (2026-11-03). jobs.apple.com pages are rendered in
+ * the browser and carry no schema.org JobPosting, so every Apple row from the
+ * sitemap failed "page had no JobPosting data" three times and was retired —
+ * 1,375 open Apple postings with no body, 377 of them in his field and below
+ * senior. The page's own data comes from /api/v1/jobDetails/<id>: summary,
+ * description, responsibilities, minimum and preferred qualifications.
+ */
+export function appleDetailApi(url) {
+  const m = /^https:\/\/jobs\.apple\.com\/[a-z]{2}-[a-z]{2}\/details\/([0-9][0-9-]+)(?:\/|$)/i.exec(String(url || ''));
+  if (!m) return null;
+  return {
+    api: `https://jobs.apple.com/api/v1/jobDetails/${m[1]}`,
+    pick: (j) => {
+      const r = j?.res || j || {};
+      return [
+        r.jobSummary && `<h3>Summary</h3>${r.jobSummary}`,
+        r.description && `<h3>Description</h3>${r.description}`,
+        r.responsibilities && `<h3>Responsibilities</h3>${r.responsibilities}`,
+        r.minimumQualifications && `<h3>Minimum Qualifications</h3>${r.minimumQualifications}`,
+        r.preferredQualifications && `<h3>Preferred Qualifications</h3>${r.preferredQualifications}`,
+      ].filter((x) => typeof x === 'string' && x.trim()).join('\n').replace(/\n(?!<h3>)/g, '<br>');
+    },
+  };
+}
 
 /** Extract the JobPosting object from a page's JSON-LD blocks. */
 function jobPostingFromHtml(html) {
@@ -479,7 +592,39 @@ function jobPostingFromHtml(html) {
   // No JSON-LD. Apple and Google publish none, and carry the whole posting in
   // their own page data instead — 8,061 rows failed here on their first pass
   // with "page had no JobPosting data" while the data sat in the same response.
-  return embeddedPosting(html);
+  // A Jobvite page with its schema.org block missing still shows the body in
+  // div.jv-job-detail-description (null on any page without that div).
+  return embeddedPosting(html) || microdataPosting(html) || jobvitePostingFromHtml(html);
+}
+
+/**
+ * schema.org MICRODATA (F-937, 2026-10-27). SuccessFactors career sites mark a
+ * posting up with itemprop attributes rather than a JSON-LD block —
+ * `<span itemprop="description">` (one for the posting, more for footers) and
+ * `itemprop="title"`. Each described element is taken whole, nested markup and
+ * all, by counting its own tag's opens and closes. Exported for tests.
+ */
+export function microdataPosting(html) {
+  const src = String(html || '');
+  const inner = (at) => {
+    const open = /^<([a-zA-Z][\w-]*)\b[^>]*>/.exec(src.slice(at));
+    if (!open) return '';
+    const tag = open[1].toLowerCase();
+    const re = new RegExp(`<(/?)${tag}\\b[^>]*>`, 'gi');
+    re.lastIndex = at + open[0].length;
+    let depth = 1, m;
+    while ((m = re.exec(src))) {
+      depth += m[1] ? -1 : 1;
+      if (depth === 0) return src.slice(at + open[0].length, m.index);
+    }
+    return '';
+  };
+  const starts = (prop) => [...src.matchAll(new RegExp(`<[a-zA-Z][\\w-]*\\b[^>]*itemprop="${prop}"[^>]*>`, 'gi'))].map((m) => m.index);
+  const description = starts('description').map(inner).filter((s) => s.trim()).join('\n');
+  if (htmlToText(description).trim().length < 200) return null;
+  const titleAt = starts('title')[0];
+  const title = titleAt != null ? htmlToText(inner(titleAt)).trim() : '';
+  return { '@type': 'JobPosting', ...(title ? { title } : {}), description };
 }
 
 /**
@@ -631,25 +776,106 @@ export function isGoneStatus(status, source) {
 // smaller one than a run that cannot finish.
 const NO_KEEPALIVE = { connection: 'close' };
 
+// The code rides on `httpStatus`, read only by the refusal gate: `status` stays
+// unset so the strike rules above keep treating every failure as they did.
+function httpFailure(code) { const e = new Error(`HTTP ${code}`); e.httpStatus = code; return e; }
+
 async function fetchJson(url, source) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(url, { headers: { 'user-agent': UA, accept: 'application/json', ...NO_KEEPALIVE }, signal: ctrl.signal });
+    const res = await fetch(url, { headers: { 'user-agent': userAgentFor(url), accept: 'application/json', ...NO_KEEPALIVE }, signal: ctrl.signal });
     if (isGoneStatus(res.status, source)) throw new Gone(res.status);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw httpFailure(res.status);
     return await res.json();
   } finally { clearTimeout(t); }
 }
 
 async function fetchHtml(url) {
+  return (await fetchHtmlAt(url)).text;
+}
+
+/**
+ * The same Phenom posting under the other locales the site itself names: the
+ * one a redirect landed on (a /us/en/ guess on a German site lands on /de/de/),
+ * then the one the apply link asks for (lang=en_GB → gb/en). Exported for tests.
+ */
+export function phenomAlternates(pageUrl, { landed = '', applyUrl = '' } = {}) {
+  const m = /^(https:\/\/[^/]+)\/([a-z]{2,6}\/[a-z]{2})(\/job\/.*)$/.exec(String(pageUrl || ''));
+  if (!m) return [];
+  const locs = [];
+  const l = /^(https:\/\/[^/]+)\/([a-z]{2,6}\/[a-z]{2})(?:[/?#]|$)/.exec(String(landed || ''));
+  if (l && l[1] === m[1]) locs.push(l[2]);
+  const p = /[?&](?:lang|locale)=([a-z]{2})[_-]([a-z]{2})(?![a-z])/i.exec(String(applyUrl || ''));
+  if (p) locs.push(`${p[2].toLowerCase()}/${p[1].toLowerCase()}`);
+  return [...new Set(locs)].filter((x) => x !== m[2]).map((x) => `${m[1]}/${x}${m[3]}`);
+}
+
+/**
+ * A Phenom page whose locale was built, not given (F-1048 review): read it, and
+ * when it 404s or comes back without a JobPosting (the site's home page after a
+ * redirect), read it under the locales phenomAlternates names. At most three
+ * reads. `fetchAt(url)` → { text, url }. Resolves { page, jp } or null.
+ * Exported for tests.
+ */
+export async function readPhenomPage(url, { applyUrl = '', fetchAt = fetchHtmlAt } = {}) {
+  const tried = [];
+  let queue = [url];
+  while (queue.length && tried.length < 3) {
+    const next = queue.shift();
+    if (tried.includes(next)) continue;
+    tried.push(next);
+    let page = null;
+    try { page = await fetchAt(next); } catch (e) {
+      const st = e?.httpStatus ?? e?.status;
+      if (st !== 404 && st !== 410) throw e;   // a refusal or a timeout is handled as one
+    }
+    const jp = page ? jobPostingFromHtml(page.text) : null;
+    if (jp) return { page, jp };
+    if (tried.length === 1) queue = phenomAlternates(url, { landed: page?.url || '', applyUrl });
+  }
+  return null;
+}
+
+/** How long a Phenom page that was not found waits before it is asked again. */
+export const PHENOM_COOLDOWN_MS = 24 * 3_600_000;
+/** Is this row's Phenom page still cooling after a miss. Exported for tests. */
+export function phenomCooling(id, misses, now = Date.now()) {
+  const at = Date.parse(misses?.[id] || '');
+  return Number.isFinite(at) && now - at < PHENOM_COOLDOWN_MS;
+}
+/** Only the misses still cooling, so the file never grows past a day of them. Exported for tests. */
+export function prunePhenomMisses(misses, now = Date.now()) {
+  return Object.fromEntries(Object.entries(misses || {}).filter(([id]) => phenomCooling(id, misses, now)));
+}
+function loadPhenomMisses(file) {
+  try { const m = JSON.parse(readFileSync(file, 'utf8')); return m && typeof m === 'object' ? m : {}; } catch { return {}; }
+}
+
+/** The page and the address it finally came from (after redirects). */
+async function fetchHtmlAt(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/html', ...NO_KEEPALIVE }, signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
+    const res = await fetch(url, { headers: { 'user-agent': userAgentFor(url), accept: 'text/html', ...NO_KEEPALIVE }, signal: ctrl.signal });
+    if (!res.ok) throw httpFailure(res.status);
+    return { text: await res.text(), url: res.url || url };
   } finally { clearTimeout(t); }
+}
+
+/**
+ * THE SAME POSTING IN ANOTHER LANGUAGE (F-937, 2026-10-27). A SuccessFactors
+ * career site can list a requisition only through its translations: CNH's feed
+ * carries each US posting as an Italian and a French copy with every
+ * requirement section empty, and the posting link redirects to
+ * `/job/<slug>/5708-it_IT/`. The English record is the same address with the
+ * locale swapped — `/job/<slug>/5708-en_US/`. Returns that address, or null
+ * when the page is not a locale-suffixed record or is already in `locale`.
+ */
+export function localeVariant(finalUrl, locale) {
+  const m = /^(https:\/\/[^?#]*\/)(\d+)-([a-z]{2}_[A-Z]{2})\/?(?:[?#].*)?$/.exec(String(finalUrl || ''));
+  if (!m || !locale || m[3] === locale) return null;
+  return `${m[1]}${m[2]}-${locale}/`;
 }
 
 // ── selection ───────────────────────────────────────────────────────
@@ -664,6 +890,7 @@ function parseArgs() {
     // A LIST OF POSTINGS, ONE ID PER LINE — a hand-picked batch (the recent
     // mechanical rows a curation run is about to read) that no filter names.
     idsFile: get('--ids-file'),
+    refresh: get('--refresh') != null ? Number(get('--refresh')) : undefined,
     company: get('--company')?.toLowerCase(),
     status: get('--status'),
     relevance: get('--relevance') != null ? Number(get('--relevance')) : undefined,
@@ -701,7 +928,7 @@ function selectJobs(opts) {
   if (opts.idsFile) {
     const ids = readFileSync(opts.idsFile, 'utf8').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
     return ids.map((id) => getJob(id, { description: true }))
-      .filter((j) => j && detailFor(j.source) && (opts.force || !j.description))
+      .filter((j) => j && detailFor(j.source) && (opts.force || needsReading(j, opts.refresh)))
       .slice(0, opts.limit);
   }
   const known = Object.keys(DETAIL);
@@ -755,6 +982,13 @@ function selectJobs(opts) {
   if (opts.stale != null) {
     delete filters.needsRead;
     filters.browsable = true;
+    // …but not the strike cutoff with it. Dropping needsRead also dropped
+    // `enrich_fails < 3`, so rows that can never produce a body (Texas
+    // Instruments reqs Oracle no longer returns, Teradyne pages the reader
+    // could not parse) were fetched again every hour, struck again, and
+    // reached 878 strikes. A fetch that cannot produce a body cannot show the
+    // posting is live either; check-liveness.mjs is the tool for those.
+    filters.readable = true;
     filters.seenBefore = new Date(Date.now() - opts.stale * 86400000).toISOString();
     const { rows } = query(filters, { sort: 'stalest', limit: opts.limit, full: true });
     return rows;
@@ -801,8 +1035,182 @@ function selectJobs(opts) {
   // ... Shift Engineer" titles score relevance 0, so a 150-row batch ordered
   // by relevance never reached the postings he is actually eligible for.
   const sort = filters.needsRead ? 'unread' : 'fit';
+  if (opts.auto && filters.needsRead) {
+    // THE SCREEN'S NEXT JOBS FIRST (2026-11-03). The whole-library screen
+    // leaves ~11,600 postings that pass every check except "no body yet" —
+    // the next jobs that can reach his inbox — and 99.8% had never been
+    // attempted, because this queue ranks a million rows by title relevance.
+    // They are read first; the relevance queue fills what is left.
+    // NEW POSTINGS FIRST (F-983, 2026-11-04): a posting first seen in the last
+    // FRESH_HOURS is read before the fit-ordered backlog, so a fit that went
+    // live today reaches his inbox today. Measured before: a new posting waited
+    // a median 49 h for its body, behind 9,000 older rows.
+    const waiting = screenWaiting(opts);
+    const first = freshFirst(waiting.filter((w) => !phenomCooling(w.id, phenomMisses)), opts.limit).map((w) => { if (w.fresh) SCREEN_NEW.add(w.id); return getJob(w.id, { description: true }); }).filter(Boolean);
+    if (first.length >= opts.limit) return first;
+    const taken = new Set(first.map((j) => j.id));
+    const spent = pacer.totals();
+    const rest = byEmployerTaste(query(filters, { sort, limit: Math.max(opts.limit * 10, 2000), full: true }).rows.filter((j) => !taken.has(j.id) && readableNow(j, spent, !isNewPosting(j))), opts.limit - first.length);
+    return [...first, ...rest];
+  }
   const { rows } = query(filters, { sort, limit: opts.limit, full: true });
   return rows;
+}
+
+/**
+ * Can this run send a request for the row: a detail URL, a site with today's
+ * allowance left, and not cooling after refusing us. A batch of rows that are
+ * only skipped reads nothing (2026-11-03: 11 of 12 paced once the screen's
+ * list was spent). A backlog row also leaves the new postings' share of the
+ * day alone until the release hour (F-1000).
+ */
+function readableNow(j, spentToday = pacer.totals(), backlog = false) {
+  if (phenomCooling(j.id, phenomMisses)) return false;
+  const spec = detailFor(j.source)?.(j.url, j);
+  const target = spec && (spec.html || spec.api);
+  if (!target) return false;
+  if (!hasAllowance(paceKeys(target, serviceOf), spentToday, PACE_LIMITS, { backlog: backlog && !TARGETED })) return false;
+  return !refusalGate.cooling(target);
+}
+
+/**
+ * New postings the screen passed on everything but their body, chosen this
+ * run. A body read for one is a new survivor for the reader: the run's
+ * progress file says how many (freshRead), and the dashboard starts a capped
+ * read when there are any (F-999 follow-up C).
+ */
+const SCREEN_NEW = new Set();
+
+/** First seen in the last FRESH_HOURS: a new posting, read ahead of the backlog and from its own share of the day. */
+export function isNewPosting(job, now = Date.now()) {
+  const seen = Date.parse(job?.firstSeen || job?.first_seen || '');
+  return Number.isFinite(seen) && now - seen < FRESH_HOURS * 3600e3;
+}
+
+/**
+ * Can a board's latest read vouch that a row is gone from it? Not when the
+ * read may have stopped at a page cap or a shard (review, 2026-11-03: Amazon
+ * reads by category and country, iCIMS/ADP/Jibe stop at max_pages): the
+ * listing check's own rule, a board at CAPPED_BOARD postings proves nothing.
+ * A sitemap lists every posting, so it always can. A row skipped here is only
+ * read later, never retired.
+ */
+export function boardCanVouch(source, recent) {
+  if (/^sitemap-jobs/.test(String(source || ''))) return true;
+  if (/^amazon/.test(String(source || ''))) return false;
+  return recent > 0 && recent < CAPPED_BOARD;
+}
+
+/** Has the board been read more than a day after it last listed this row? */
+export function droppedByItsBoard(lastSeen, boardNewest) {
+  const b = Date.parse(boardNewest || ''), r = Date.parse(lastSeen || '');
+  return Number.isFinite(b) && Number.isFinite(r) && b - r > 86_400_000;
+}
+
+/**
+ * The library screen's "waiting on a body" rows, best fit first, that this
+ * run can actually read: a deriver exists, under three strikes, not gone, and
+ * not on a site that is out of today's allowance or cooling after refusing
+ * us (a batch of rows that are only skipped reads nothing).
+ */
+export function screenWaiting(opts = {}, { file = path.join(STORE_DIR, 'screen.db'), cap = 3000, now = Date.now() } = {}) {
+  let ids = [];
+  try {
+    const s = new DatabaseSync(file, { readOnly: true });
+    // Every waiting row, best fit first (no cap here: a new posting with a
+    // middling fit must not fall past it); the cap applies to what is returned.
+    try { ids = s.prepare("SELECT id FROM verdicts WHERE stage = 'waiting-body' ORDER BY fit DESC").all().map((r) => r.id); }
+    finally { s.close(); }
+  } catch { return []; }
+  const spentToday = pacer.totals();
+  // A row its own board has stopped listing is most likely closed: Apple's
+  // waiting rows last listed on 10-31 all answered 404 on 11-03, those listed
+  // that morning 200. The listing check retires them after 7 days; until then
+  // the reader spends its turn on rows the board still lists.
+  const newest = new Map();
+  const newestFor = (j) => {
+    const k = `${j.company}\u0001${j.source}`;
+    if (!newest.has(k)) {
+      try {
+        const m = db().prepare('SELECT max(last_seen) AS m FROM jobs WHERE company = ? AND source = ?').get(j.company, j.source)?.m || null;
+        const recent = m ? db().prepare("SELECT count(*) AS n FROM jobs WHERE company = ? AND source = ? AND last_seen >= datetime(?, '-1 day')").get(j.company, j.source, m)?.n || 0 : 0;
+        newest.set(k, boardCanVouch(j.source, recent) ? m : null);
+      } catch { newest.set(k, null); }
+    }
+    return newest.get(k);
+  };
+  // Only the columns the choice needs (review, 2026-11-03): the full record,
+  // body included, is loaded for the rows a run actually takes (fullRows).
+  // The columns for every waiting id in a few batched reads (review,
+  // 2026-11-04: one lookup per row over 9,000 rows), then the cheap checks, then
+  // the costly ones (the board's newest listing, today's allowance) only until
+  // `cap` rows are found: new postings first, then the backlog, fit order within each.
+  const cols = 'id, url, title, company, source, location, last_seen, gone_at, enrich_fails, desc_len, enriched_at, first_seen';
+  const byId = new Map();
+  for (let i = 0; i < ids.length; i += 500) {
+    const part = ids.slice(i, i + 500);
+    for (const r of db().prepare(`SELECT ${cols} FROM jobs WHERE id IN (${part.map(() => '?').join(',')})`).all(...part)) byId.set(r.id, r);
+  }
+  const fresh = [], backlog = [];
+  for (const id of ids) {
+    const r = byId.get(id);
+    if (!r || r.gone_at || (r.enrich_fails || 0) >= 3) continue;
+    if (r.desc_len && !(r.desc_len < THIN_BODY && !r.enriched_at)) continue;   // needsReading, from the columns
+    const src = String(r.source || '').replace(/-manual$/, '');
+    if (opts.sources?.length && !opts.sources.includes(src)) continue;
+    const j = { id: r.id, url: r.url, title: r.title, company: r.company, source: r.source, location: r.location, lastSeen: r.last_seen,
+      fresh: now - Date.parse(r.first_seen || 0) < FRESH_HOURS * 3600e3 };
+    (j.fresh ? fresh : backlog).push(j);
+  }
+  const out = [];
+  const take = (list, max) => {
+    let n = 0;
+    for (const j of list) {
+      if (n >= max) break;
+      if (droppedByItsBoard(j.lastSeen, newestFor(j))) continue;
+      if (!readableNow(j, spentToday, !j.fresh)) continue;
+      out.push(j); n += 1;
+    }
+  };
+  take(fresh, cap);
+  take(backlog, cap);
+  return out;
+}
+
+/** How new a posting must be to go ahead of the backlog (first seen, hours). */
+export const FRESH_HOURS = 72;
+
+/** The most of one batch new postings may take, so the backlog always gets reads (review, 2026-11-04). */
+export const FRESH_SHARE = 0.6;
+
+/**
+ * New postings first (his kind of employer first among them), then the backlog
+ * the same way. New postings take at most FRESH_SHARE of a batch: a board added
+ * today is all "first seen" for three days and would otherwise fill every
+ * batch. Whatever either side cannot fill, the other may.
+ */
+export function freshFirst(rows, limit, classOf = employerClass) {
+  const freshAll = byEmployerTaste(rows.filter((j) => j.fresh), limit, classOf);
+  const backAll = byEmployerTaste(rows.filter((j) => !j.fresh), limit, classOf);
+  const freshTake = Math.min(freshAll.length, Math.max(limit - backAll.length, Math.ceil(limit * FRESH_SHARE)));
+  return [...freshAll.slice(0, freshTake), ...backAll.slice(0, limit - freshTake)];
+}
+
+// HIS KIND OF EMPLOYER IS READ FIRST (2026-11-01). The day's per-site
+// allowance went to employers the curator turns down without reading: Quest
+// Global took 488 reads and Trane had 141 waiting (both ruled out in his taste
+// quiz), while 1,727 fit-70+ postings had never been fetched at all. The
+// background reader now skips ruled-out employers and reads stars, big names,
+// conglomerates and his named funded startups (F-948) before unknown ones, keeping the
+// pre-read order within each class. A preset with no taste gate ('any')
+// changes nothing.
+const TASTE_RANK = { any: 0, star: 0, name: 1, role: 2, vc: 2, other: 3, backup: 4 };
+export function byEmployerTaste(rows, limit, classOf = employerClass) {
+  return rows.map((j, i) => ({ j, i, k: classOf(j.company) }))
+    .filter((x) => x.k !== 'out')
+    .sort((a, b) => (TASTE_RANK[a.k] ?? 3) - (TASTE_RANK[b.k] ?? 3) || a.i - b.i)
+    .slice(0, limit)
+    .map((x) => x.j);
 }
 
 // ── run ─────────────────────────────────────────────────────────────
@@ -822,6 +1230,8 @@ function selectJobs(opts) {
 // means "never examined", not "clear".
 
 
+/** Enriched rows are written in groups of this many as they arrive (or every 15 s). */
+export const SAVE_EVERY = Number(process.env.JARVIS_ENRICH_SAVE_EVERY) || 8;
 const PER_SERVICE = Number(process.env.JARVIS_ENRICH_PER_SERVICE) || 3;
 const withService = makeHostLimiter(PER_SERVICE);
 
@@ -832,7 +1242,26 @@ const withService = makeHostLimiter(PER_SERVICE);
 // host after a few hundred, Workday with 122 rate-limits across one long pass.
 // A concurrency cap cannot express that, because it forgets a request the
 // moment it finishes.
-const pacer = makePacer(pacePath(STORE_DIR));
+// A run over a hand-picked list (--ids-file) gets the small targeted reserve,
+// so the auto worker spending the day's allowance cannot starve it.
+// Per employer site on Workday, iCIMS and Oracle, under a platform ceiling;
+// his numbers, in settings.json (F-979).
+let PACE_LIMITS = paceLimits({});
+try { PACE_LIMITS = paceLimits(readSettings()); } catch { /* defaults */ }
+const withTenant = makeHostLimiter(PACE_LIMITS.tenantConcurrency);
+// A hand-picked list (--ids-file) has its own reserve and is never "backlog".
+const TARGETED = process.argv.includes('--ids-file');
+const pacer = makePacer(pacePath(STORE_DIR), { reserve: TARGETED ? TARGETED_RESERVE : 0, limits: PACE_LIMITS });
+
+// A SITE THAT REFUSES US COOLS DOWN, PER HOST (2026-11-03, refusals.mjs).
+const REFUSALS_FILE = refusalsPath(STORE_DIR);
+const refusalGate = makeRefusalGate(loadRefusals(REFUSALS_FILE));
+
+// A PHENOM PAGE NOT FOUND COOLS DOWN FOR A DAY (F-1048 follow-up, 2026-11-12).
+// It takes no strike (readPhenomPage), so without this it would be fetched
+// again on every 3-minute pass. Kept as id → time of the miss.
+const PHENOM_MISSES_FILE = path.join(STORE_DIR, 'phenom-misses.json');
+const phenomMisses = loadPhenomMisses(PHENOM_MISSES_FILE);
 
 /** Thrown when a service is out of budget: skipped, never counted against the row. */
 class Paced extends Error {
@@ -843,11 +1272,22 @@ class Paced extends Error {
   }
 }
 
-/** Spend one request against a service, or refuse. */
-function spend(url) {
-  const service = serviceOf(url);
-  if (!pacer.take(service)) throw new Paced(service);
-  return service;
+/** Spend one request against a service, or refuse. An older row leaves the new postings' share alone (F-1000). */
+function spend(url, job = null) {
+  const keys = paceKeys(url, serviceOf);
+  const backlog = !TARGETED && !!job && !isNewPosting(job);
+  if (!pacer.take(keys, { backlog })) {
+    const site = keys.tenant || keys.service;
+    // Refused only by the hold: the day is not spent, it is kept for new postings.
+    throw new Paced(backlog && pacer.allows(keys) ? `${site} (kept for new postings until ${PACE_LIMITS.freshReleaseUtc}:00 UTC)` : site);
+  }
+  return keys;
+}
+
+/** One request: counted against the day, at most PER_SERVICE in flight per platform and 2 per employer site. */
+function paced(url, fn, job = null) {
+  const { service, tenant } = spend(url, job);
+  return withService(service, () => (tenant ? withTenant(tenant, fn) : fn()));
 }
 
 async function pool(items, worker, concurrency) {
@@ -862,12 +1302,36 @@ async function pool(items, worker, concurrency) {
   return results;
 }
 
+/**
+ * A LOCKED STORE IS WAITED OUT, NOT A CRASH (2026-11-03). A board scan holds
+ * the store's write lock for long stretches; the enricher's write-back threw
+ * "database is locked" and the process exited, losing what it had read. It
+ * retries for up to two minutes, then gives up loudly.
+ */
+async function withStoreLockPatiently(fn, { waitMs = Number(process.env.JARVIS_ENRICH_LOCK_WAIT_MS) || 120_000 } = {}) {
+  // Exponential backoff under one overall cap (review, 2026-11-03), matched on
+  // SQLite's own code (SQLITE_BUSY = 5, SQLITE_LOCKED = 6), not on wording.
+  const until = Date.now() + waitMs;
+  let delay = 1000;
+  for (;;) {
+    try { return await withStoreLock(fn); }
+    catch (e) {
+      if (!isLockError(e) || Date.now() + delay > until) throw e;
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, 20_000);
+    }
+  }
+}
+export function isLockError(e) {
+  return [5, 6].includes(Number(e?.errcode)) || /^SQLITE_(?:BUSY|LOCKED)/.test(String(e?.code || ''));
+}
+
 async function runBatch(jobs, T) {
 
   // The workers mutate these copies; the write-back reads them by id.
   const byId = new Map(jobs.map(j => [j.id, j]));
 
-  let ok = 0, failed = 0, gone = 0, newBlocks = 0;
+  let ok = 0, failed = 0, gone = 0, newBlocks = 0, freshRead = 0;
 
 
   // WHY A READ FAILED, NOT JUST THAT IT DID (F-423). This reported a bare
@@ -894,17 +1358,72 @@ async function runBatch(jobs, T) {
   // Rows whose failure was the HOST refusing us (403/429/5xx/timeout) rather
   // than anything about the posting. They are retried, never struck.
   const refusedIds = new Set();
+  // Rows no detail URL can be built for. Nothing was fetched and nothing will
+  // be on the next pass either — the same URL goes into the same deriver — so
+  // they take all three strikes at once. F-761 put ~8,900 Phenom teasers that
+  // link to boards with no reader (SuccessFactors, Taleo, Okta…) into the
+  // read queue; three passes each would have spent ~27,000 batch slots on
+  // rows that never cost a request.
+  const unreachableIds = new Set();
   const goneIds = [];
-  const tick = () => { T.done++; if (T.done % 5 === 0 || T.done === T.total) writeProgress({ running: true, total: T.total, done: T.done, ok: T.ok + ok, failed: T.failed + failed, gone: T.gone + gone, startedAt: T.startedAt }); };
+  // SAVED AS IT GOES (2026-11-03). Enriched rows were held until every fetch in
+  // the batch returned and written in one block, so a run stopped by a timeout
+  // or the memory reaper lost every body it had read (a 590 s cap lost a whole
+  // 400-row batch twice in one night). A read body is a fact about one posting
+  // and needs no batch-level check, so it is written in small groups as soon as
+  // it arrives; gone and failed rows still wait for the batch (the mass-expiry
+  // breaker needs the whole batch to judge them).
+  const saved = new Set();
+  let pendingSave = [];
+  let lastFlush = Date.now();
+  const writeEnriched = (id) => {
+    const src = byId.get(id);
+    if (!src || saved.has(id)) return;
+    updateJob(id, {
+      title: src.title,
+      location: src.location,
+      ...(src.team ? { team: src.team } : {}),
+      description: src.description,
+      postedAt: src.postedAt,
+      enrichedAt: src.enrichedAt,
+      enrichFails: 0,
+    }, { rederive: true });
+    saved.add(id);
+  };
+  const flushSaves = async (force = false) => {
+    if (!pendingSave.length || (!force && pendingSave.length < SAVE_EVERY && Date.now() - lastFlush < 15_000)) return;
+    const ids = pendingSave; pendingSave = []; lastFlush = Date.now();
+    // A failed flush is said and its rows go back in line: the next arrival
+    // retries them, and the batch's final write takes whatever is left.
+    try { await withStoreLockPatiently(async () => { for (const id of ids) writeEnriched(id); }, { waitMs: 30_000 }); }
+    catch (e) { console.error(`  ! save of ${ids.length} bodies deferred: ${String(e?.message || e).slice(0, 120)}`); pendingSave.unshift(...ids); lastFlush = 0; }
+  };
+  const tick = () => { T.done++; if (T.done % 5 === 0 || T.done === T.total) writeProgress({ running: true, total: T.total, done: T.done, ok: T.ok + ok, failed: T.failed + failed, gone: T.gone + gone, paced: T.paced, pacedServices: [...T.pacedServices], startedAt: T.startedAt }); };
   await pool(jobs, async (job) => { try {
     const deriver = detailFor(job.source);
     const spec = deriver(job.url, job);
-    if (!spec) { failed++; note(`no detail URL for source ${job.source}`, job.company); failedIds.push(job.id); return; }
+    if (!spec) { failed++; note(`no detail URL for source ${job.source}`, job.company); failedIds.push(job.id); unreachableIds.add(job.id); return; }
+    const target = spec.html || spec.api;
+    // A site cooling down after refusing us: untouched, like a paced row.
+    if (target && !refusalGate.allow(target)) { T.paced++; T.pacedServices.add(`${hostKey(target)} (refusing us; asked again later)`); return; }
     try {
       let text = '';
       if (spec.html) {
         // JSON-LD path: exact title + location come along with the description.
-        const jp = jobPostingFromHtml(await withService(spend(spec.html), () => fetchHtml(spec.html)));
+        let jp;
+        if (spec.phenomGuess) {
+          // Not found under any locale the site names: retried on the next
+          // pass like a refusal, never a strike. A posting that is really gone
+          // leaves through the scan, which stops listing it.
+          jp = (await readPhenomPage(spec.html, { applyUrl: spec.applyUrl, fetchAt: (u) => paced(u, () => fetchHtmlAt(u), job) }))?.jp;
+          if (!jp) { failed++; phenomMisses[job.id] = new Date().toISOString(); note('Phenom page not found under its locale (no strike; asked again in 24 h)', job.company); return; }
+          delete phenomMisses[job.id];
+        } else {
+          let page = await paced(spec.html, () => fetchHtmlAt(spec.html), job);
+          const other = spec.locale ? localeVariant(page.url, spec.locale) : null;
+          if (other) page = await paced(other, () => fetchHtmlAt(other), job);
+          jp = jobPostingFromHtml(page.text);
+        }
         if (!jp) { failed++; note('page had no JobPosting data', job.company); failedIds.push(job.id); return; }
         text = htmlToText(jp.description || '');
         if (jp.title) job.title = String(jp.title).trim();
@@ -916,14 +1435,25 @@ async function runBatch(jobs, T) {
           if (!Number.isNaN(ts)) job.postedAt = ts;
         }
       } else {
-        const data = await withService(spend(spec.api), () => fetchJson(spec.api, job.source));
+        const data = await paced(spec.api, () => fetchJson(spec.api, job.source), job);
         text = htmlToText(spec.pick(data));
         if (spec.team) {
           const t = spec.team(data);
           if (t) job.team = t;
         }
+        // The posting's own title wins over the one a list wrote (2026-11-03):
+        // Simplify renames postings ("Memory Design Engineer New Grad - …"),
+        // and a renamed requisition keeps its old URL slug.
+        if (spec.title) {
+          const t = String(spec.title(data) || '').trim();
+          if (t) job.title = t;
+        }
       }
       if (!text || text.length < 40) { failed++; note('description too short to use', job.company); failedIds.push(job.id); return; }
+      // Headings with nothing under them (F-760): a translated template, not a
+      // posting. Structural — the next read returns the same page — so it
+      // strikes, and the stored body (if any) is left as it was.
+      if (hollowBody(text)) { failed++; note('every requirement section empty', job.company); failedIds.push(job.id); return; }
       job.description = text;
       // No structured team? Parse the description ("Group/Division: …").
       if (!job.team) {
@@ -939,12 +1469,20 @@ async function runBatch(jobs, T) {
       job.fit = slimFit(scoreFit(job, getProfile()));
       job.enrichedAt = new Date().toISOString();
       enrichedIds.push(job.id);
+      pendingSave.push(job.id);
+      await flushSaves();
       if (!before && job.triage.flags.hardBlock) {
         newBlocks++;
         console.log(`  ⛔ NEW BLOCK: ${job.title} (${job.company}) — ${job.triage.visa.block.reason}`);
       }
       ok++;
+      if (SCREEN_NEW.has(job.id)) freshRead++;
+      if (target) refusalGate.answered(target);
     } catch (err) {
+      if (target && !err?.paced) {
+        if (isPolicyRefusal(err?.httpStatus)) refusalGate.refused(target);
+        else if (err?.gone || (err?.httpStatus >= 400 && err.httpStatus < 500 && err.httpStatus !== 429)) refusalGate.answered(target);
+      }
       // A posting the ATS has taken down is not a failed fetch — it is an
       // answer. Counting it as a failure meant the same dead req was retried
       // three times, reported as "unreachable", and left sitting in the deck
@@ -978,7 +1516,7 @@ async function runBatch(jobs, T) {
   // rewrote the whole store and a scan that added jobs meanwhile would have
   // them erased — this worker runs every three minutes and was the likeliest
   // thief. Row-level writes make that impossible, so the dance is gone.
-  await withStoreLock(async () => {
+  await withStoreLockPatiently(async () => {
     // Persist failure counts so permanently-broken postings stop being retried
     // by the auto worker after 3 strikes.
     //
@@ -1003,7 +1541,7 @@ async function runBatch(jobs, T) {
     for (const id of failedIds) {
       if (refusedIds.has(id)) continue;
       const job = getJob(id);
-      if (job) updateJob(id, { enrichFails: (job.enrichFails || 0) + 1 });
+      if (job) updateJob(id, { enrichFails: unreachableIds.has(id) ? Math.max(3, (job.enrichFails || 0) + 1) : (job.enrichFails || 0) + 1 });
     }
     // Taken down at the source. Stamped, never deleted — the row, its score and
     // its quotes stay exactly where they were, and isDeck() drops it out of the
@@ -1028,24 +1566,16 @@ async function runBatch(jobs, T) {
     } else {
       for (const id of goneIds) updateJob(id, { goneAt: new Date().toISOString() }, { rederive: true });
     }
-    for (const id of enrichedIds) {
-      const src = byId.get(id);
-      if (!src) continue;
-      // rederive: a posting whose body has just been read for the first time
-      // was scored on its title alone. Leaving the old score in place is how
-      // derived data goes stale, which is this system's characteristic failure.
-      updateJob(id, {
-        title: src.title,
-        location: src.location,
-        ...(src.team ? { team: src.team } : {}),
-        description: src.description,
-        postedAt: src.postedAt,
-        enrichedAt: src.enrichedAt,
-      }, { rederive: true });
-    }
+    // rederive: a posting whose body has just been read for the first time
+    // was scored on its title alone. Leaving the old score in place is how
+    // derived data goes stale, which is this system's characteristic failure.
+    // A read that worked clears the strikes (enrichFails: 0): left standing,
+    // old strikes keep a readable posting out of the liveness sweep for good.
+    // Most rows were already saved as they arrived; this writes the rest.
+    for (const id of enrichedIds) writeEnriched(id);
   });
   // Roll this batch into the run totals; the driver prints the summary.
-  T.ok += ok; T.failed += failed; T.gone += gone; T.newBlocks += newBlocks;
+  T.ok += ok; T.failed += failed; T.gone += gone; T.newBlocks += newBlocks; T.freshRead += freshRead;
 }
 
 
@@ -1096,7 +1626,7 @@ async function main() {
 
   const T = {
     total: Number.isFinite(want) ? want : 0, done: 0,
-    ok: 0, failed: 0, gone: 0, newBlocks: 0,
+    ok: 0, failed: 0, gone: 0, newBlocks: 0, freshRead: 0,
     failReasons: new Map(),
     failWho: new Map(),
     paced: 0,
@@ -1170,6 +1700,14 @@ async function main() {
   console.log(`  New work-auth blocks surfaced from description text: ${T.newBlocks}`);
   reportBlindSpot();
   pacer.flush();
+  try {
+    const { state, cooled, cleared } = refusalGate.finish();
+    saveRefusals(REFUSALS_FILE, state);
+    for (const c of cooled) console.log(`  Refusing: ${c.host} answered only 403s; asked again after ${new Date(c.until).toLocaleString()} (time ${c.times}), with a few probes each night`);
+    if (cleared.length) console.log(`  Answering again: ${cleared.join(', ')}`);
+  } catch (e) { console.log(`  (refusal record not saved: ${String(e?.message || e).slice(0, 80)})`); }
+  // Re-read before writing: a second enrich run may have added its own misses.
+  try { writeFileSync(PHENOM_MISSES_FILE, JSON.stringify(prunePhenomMisses({ ...loadPhenomMisses(PHENOM_MISSES_FILE), ...phenomMisses }))); } catch { /* a convenience, never a reason to fail */ }
   const spent = pacer.spent().slice(0, 4);
   if (spent.length) console.log(`  Today so far: ${spent.map(([s, n]) => `${s} ${n}`).join(', ')}`);
 }
@@ -1278,6 +1816,8 @@ const USAGE = `
     --fit <value>         
     --force               
     --ids-file <path>     only the posting ids listed in this file, one per line
+    --refresh <days>      with --ids-file: also re-read a body last read more than <days> ago
+                          (employers edit postings after we read them — F-627)
     --limit <value>       
     --relevance <value>
     --source <a,b>        only these ATSes (greenhouse, ashby, workday, …)
@@ -1287,7 +1827,7 @@ const USAGE = `
 `;
 
 // F-163: not one command in this project handled --help, so --help RAN them.
-guardArgs({ usage: USAGE, flags: ["--all","--auto","--company","--fit","--force","--id","--ids-file","--limit","--relevance","--source","--stale","--status"], valued: ["--company","--fit","--id","--ids-file","--limit","--relevance","--source","--stale","--status"] });
+guardArgs({ usage: USAGE, flags: ["--all","--auto","--company","--fit","--force","--id","--ids-file","--limit","--refresh","--relevance","--source","--stale","--status"], valued: ["--company","--fit","--id","--ids-file","--limit","--refresh","--relevance","--source","--stale","--status"] });
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // WHATEVER ENDS THIS RUN, THE FILE SAYS SO. Ctrl-C, a SIGTERM from the

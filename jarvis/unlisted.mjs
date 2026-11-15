@@ -91,3 +91,55 @@ export function readPicksAndBoards(db) {
     WHERE status IN ('inbox','queued','interested') AND gone_at IS NULL`).all();
   return { picks, boards: readBoards(db, picks) };
 }
+
+/**
+ * HIS PICKS ALREADY MARKED GONE, read again (F-959 follow-up, 2026-11-03).
+ * Every sweep skipped them, so a posting retired on a bad day or reposted on
+ * the same URL never came back. Applied rows are included: knowing a posting
+ * he applied to is open again is worth knowing.
+ */
+export function readGonePicksAndBoards(db) {
+  const picks = db.prepare(`SELECT id, company, title, url, last_seen, source, applied_at, gone_at FROM jobs
+    WHERE status IN ('inbox','queued','interested','applied') AND gone_at IS NOT NULL`).all();
+  return { picks, boards: readBoards(db, picks) };
+}
+
+/**
+ * Which gone picks come back. Pure. Only on the ATS's own word that the
+ * posting is ACTIVE, and never one its own fresh board still leaves out —
+ * the next sweep's listing check would retire it again, and a card that
+ * flickers between open and closed is worse than either.
+ * @param verdicts Map id -> { result } from checkLivenessViaApi
+ */
+// …and only one its board has listed AGAIN since it was retired: a
+// GlobalFoundries row last listed in August answered "active" from Workday
+// while its board (no longer read daily) could not vouch for it either way.
+export function revivedPicks(picks, boards, verdicts, { now = Date.now() } = {}) {
+  const unlisted = new Set(unlistedPicks(picks, boards, { now }).map((u) => u.id));
+  const listedSince = (p) => p.last_seen && p.gone_at && Date.parse(p.last_seen) > Date.parse(p.gone_at);
+  return picks.filter((p) => verdicts.get(p.id)?.result === 'active' && !unlisted.has(p.id) && listedSince(p)).map((p) => p.id);
+}
+
+/**
+ * Which gone picks to ask this run: least recently asked first (F-960
+ * review). A fixed order with a limit rechecked the same first N forever.
+ * @param checked { id: ISO time last asked }
+ */
+export function rotateGonePicks(picks, checked = {}, limit = Infinity) {
+  const when = (p) => Date.parse(checked[p.id] || '') || 0;
+  return [...picks].sort((a, b) => when(a) - when(b) || String(a.id).localeCompare(String(b.id))).slice(0, limit);
+}
+
+/**
+ * ANY ROW MARKED GONE THAT ITS BOARD HAS LISTED AGAIN (2026-11-03). The scanner
+ * refreshes last_seen every time a board lists a posting, but clears gone_at
+ * only when the posted date moves on, so 298 rows sat closed while their board
+ * listed them for days (Electra Aero's Airframe Design Engineer, open on its
+ * Greenhouse API). The deck sweep asks these the same question as the picks.
+ */
+export function readGoneListedAgain(db) {
+  const picks = db.prepare(`SELECT id, company, title, url, last_seen, source, applied_at, gone_at FROM jobs
+    WHERE gone_at IS NOT NULL AND status NOT IN ('inbox','queued','interested','applied','hidden')
+      AND julianday(last_seen) - julianday(gone_at) > 1`).all();
+  return { picks, boards: readBoards(db, picks) };
+}

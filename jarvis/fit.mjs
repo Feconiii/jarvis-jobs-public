@@ -209,14 +209,25 @@ const SENIOR_RE = screen.fitSeniorTitle;
 const ENTRY_RE = screen.fitEntryTitle;
 
 /** The discipline word of a primary role ("automation" of "automation engineer"), when an engineer's title carries it. */
-function primaryDiscipline(title, p) {
+function primaryDiscipline(title, p, job = {}) {
   if (!screen.disciplineTitle.test(title)) return null;
+  // "Robot Framework Test Engineer", "Robotic Process Automation Engineer":
+  // the discipline's word, another line of work (F-1044 review).
+  if (screen.disciplineNotTitle?.test(title)) return null;
   const words = new Set(p.primaryRoles.map((r) => r.split(/\s+/)[0]).filter((w) => w.length > 4));
   // Mechatronics is robotics work by another name (the preset's aliases).
   for (const [w, also] of Object.entries(screen.disciplineAliases || {})) {
     if (words.has(w)) for (const a of also) words.add(a);
   }
-  for (const w of words) if (new RegExp(`\\b${w}`).test(title)) return w;
+  for (const w of words) if (new RegExp(`\\b${w}`).test(title)) return w.replace(/\(.*$/, '');
+  // A word that is the discipline only in that field's postings: "Manipulation"
+  // at a robotics employer, never "Data Manipulation" anywhere else.
+  // The field is read with the word taken out of the title, since the word is
+  // itself one of that field's terms.
+  for (const [w, field] of Object.entries(screen.disciplineInField || {})) {
+    const re = new RegExp(`\\b${w}`, 'gi');
+    if (words.has(field) && re.test(title) && classifyField({ ...job, title: String(job.title || '').replace(re, ' ') }).key === field) return w;
+  }
   return null;
 }
 
@@ -226,19 +237,20 @@ function scoreRole(job, p) {
   const why = [];
   let pts = 0;
 
-  const hitPrimary = p.primaryRoles.filter(r => title.includes(r));
+  // "RPA Automation Engineer" is software work under a primary role's name.
+  const hitPrimary = screen.disciplineNotTitle?.test(title) ? [] : p.primaryRoles.filter(r => title.includes(r));
   const hitSecondary = p.secondaryRoles.filter(r => title.includes(r));
 
   if (hitPrimary.length) {
     pts = 28;
     why.push(`Title is a primary target role (${hitPrimary[0]})`);
-  } else if (primaryDiscipline(title, p)) {
+  } else if (primaryDiscipline(title, p, job)) {
     // "Tools and Automation Mechatronics Engineer" (Apple, 2026-10-16) — the
     // work he calls a perfect fit — is not the literal string "automation
     // engineer", so it scored as a generic discipline title, 16 of 28. A
     // primary discipline word in an engineer's title is that role.
     pts = 25;
-    why.push(`Title names a primary target discipline (${primaryDiscipline(title, p)})`);
+    why.push(`Title names a primary target discipline (${primaryDiscipline(title, p, job)})`);
   } else if (hitSecondary.length) {
     pts = 21;
     why.push(`Title is a secondary target role (${hitSecondary[0]})`);
@@ -519,7 +531,11 @@ export function scoreFit(job, p) {
   const hb = job.triage?.flags?.hardBlock;
   if (hb) {
     const reason = job.triage?.visa?.block?.reason || 'Work-authorisation restriction';
-    blockers.push(reason);
+    // THE POSTING'S OWN SENTENCE, NOT ONLY A LABEL (F-773). The fill panel
+    // shows this when he presses fill on a blocked posting; "No sponsorship"
+    // alone gives him nothing to check against the page.
+    const quote = String(job.triage?.visa?.block?.quote || '').replace(/\s+/g, ' ').trim();
+    blockers.push(quote ? `${reason} — "${quote.length > 180 ? `${quote.slice(0, 177)}…` : quote}"` : reason);
   }
   // A `never`/`no` rule is your decision, so it is surfaced exactly like a
   // work-auth block instead of quietly subtracting points.
@@ -548,7 +564,14 @@ export function scoreFit(job, p) {
   // A title-only job has no skills evidence either way. Leaving its score at
   // face value would let unread postings outrank fully-read ones purely by
   // having fewer chances to lose points.
-  if (confidence !== 'full') score = Math.round(score * 0.85);
+  // A title that IS one of his target roles is evidence on its own, though:
+  // Lam Research "Mechatronics Engineer 2", unread the morning it was found,
+  // scored 81 and was cut to 69 (2026-10-30) while its read twins sat at
+  // 83-100. Such a title takes a small discount, enough that a read twin
+  // still ranks first; any other title keeps the full one.
+  const roleDim = dims.find(([name]) => name === 'role')?.[1];
+  const titleIsTarget = (roleDim?.pts ?? 0) >= 25;
+  if (confidence !== 'full') score = Math.round(score * (titleIsTarget ? 0.95 : 0.85));
 
   const band = blockers.length ? { key: 'blocked', label: 'Blocked' } : bandFor(score);
 

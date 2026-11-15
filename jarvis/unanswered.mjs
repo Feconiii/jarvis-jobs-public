@@ -407,7 +407,7 @@ export function answerability(row, { planForm, profile }) {
       // A TICK AND AN UPLOAD ARE THE EXCEPTIONS: they answer their question
       // without carrying a value. Tesla's required consent checkbox is planned
       // `check`, and it was being reported as unanswered for that reason alone.
-      if (action === 'check' || action === 'upload') return { kind: action, value: '' };
+      if (action === 'check' || action === 'uncheck' || action === 'upload' || action === 'upload-letter' || action === 'upload-portfolio') return { kind: action, value: '' };
       return String(value).trim() ? { kind: action, value } : null;
     } catch { return null; }
   };

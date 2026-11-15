@@ -119,7 +119,8 @@ test('the starter preferences are the preset’s', () => {
 test('THE SHARE EXPORT LEAVES OUT HIS OWN MATERIAL', () => {
   for (const f of ['voice-dna.md', 'jarvis/preferences.md', 'jarvis/resume-pool.json', 'jarvis/FAULTS.md',
     'jarvis/RESUME-AUDIT-2026-09-22.md', 'portfolio/build.mjs', 'graphify-out/GRAPH_REPORT.md',
-    '.claude/skills/outreach/SKILL.md', 'Piston.SLDPRT', 'CLAUDE.md']) assert.ok(excluded(f), f);
+    '.claude/skills/outreach/SKILL.md', 'Piston.SLDPRT', 'CLAUDE.md', 'jarvis/COMMANDS.md', 'jarvis/COVERAGE.md',
+    'jarvis/OUTREACH.md', 'jarvis/notes/discovery-progress.md']) assert.ok(excluded(f), f);
   for (const f of ['jarvis/triage.mjs', 'jarvis/presets/finance-data/screen.mjs', 'providers/greenhouse.mjs',
     'package.json', 'config/profile.example.yml', 'jarvis/RESUME-RULES.md']) assert.ok(!excluded(f), f);
 });
@@ -136,6 +137,15 @@ test('the exported suite drops only the tests that check his own files', { skip:
   assert.ok(!kept.includes('node jarvis/resume.test.mjs'));
   assert.ok(kept.includes('node jarvis/resume-for-job.test.mjs') === false);
   for (const from of Object.keys(SHARE_FILES)) assert.ok(existsSync(path.join(ROOT, from)), `${from} is what the export writes`);
+});
+
+test('an exported copy that ships the LinkedIn MCP ships its read-only guard too', () => {
+  if (!existsSync(path.join(ROOT, '.mcp.json')) || !/linkedin/.test(readFileSync(path.join(ROOT, '.mcp.json'), 'utf8'))) return;
+  // Here the share file; in an exported copy, the settings file it became.
+  const from = SCRIPTS['jarvis:share'] ? Object.entries(SHARE_FILES).find(([, tos]) => tos.includes('.claude/settings.json'))?.[0] : '.claude/settings.json';
+  assert.ok(from && existsSync(path.join(ROOT, from)), 'the export writes a .claude/settings.json');
+  const hooks = JSON.parse(readFileSync(path.join(ROOT, from), 'utf8')).hooks?.PreToolUse || [];
+  assert.ok(hooks.some((h) => h.matcher === 'mcp__linkedin__.*' && h.hooks.some((c) => c.command.includes('jarvis/linkedin-mcp-guard.mjs'))));
 });
 
 test('a public export renames by the rules, in order, and names what survived', () => {

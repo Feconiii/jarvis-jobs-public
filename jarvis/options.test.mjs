@@ -302,5 +302,22 @@ t('a kind is never forced on a list that names none', '$90000/year', ['Yes', 'No
 t('North/Street read as N/St, the row without an apartment first', '123 North Main Street', ['123 N Main St, Apt (61), Springfield, WA 12345', '123 N Main St, Springfield, WA 12345', '123 W Main St, Pasco, WA 99301'], 1);
 t('a different street number is not the address', '123 North Main Street', ['1 N Browne St, Springfield, WA 99201'], -1);
 
+// F-810: Oracle Recruiting Cloud's City lookup rows are "City, County, ST"
+// (First Solar, 2026-10-16). "Springfield" chose "Cheney, Springfield, WA".
+const ORACLE_CITY = ['Springfield, Springfield, WA', 'Airway Heights, Springfield, WA', 'Chattaroy, Springfield, WA', 'Cheney, Springfield, WA', 'City Of Springfield Valley, Springfield, WA'];
+t('F-810: a bare city is the row that starts with it, not one in its county', 'Springfield', ORACLE_CITY, 0);
+t('F-810: "City, State" against "City, County, ST"', 'Springfield, Washington', ORACLE_CITY, 0);
+t('F-810: another city in the same county is still its own row', 'Cheney', ORACLE_CITY, 3);
+t('F-810: a yes is never read as a place', 'No', ['Yes, I will require sponsorship', 'No, I will not'], 1);
+t('F-810: Oracle\'s state list is codes', 'Washington', ['WA', 'AK', 'AL', 'AR', 'AS', 'AZ', 'CA', 'CO'], 0);
+// F-883: Oceaneering's City list put "Springfield Valley" above "Springfield".
+t('F-883: Springfield is not Springfield Valley', 'Springfield', ['Springfield Valley, Springfield, WA', 'Springfield, Springfield, WA'], 1);
+t('F-883: …and Springfield Valley is not Springfield', 'Springfield Valley', ['Springfield, Springfield, WA', 'Springfield Valley, Springfield, WA'], 1);
+// F-886: a qualifier in front changes the thing (Ford's Oracle Education Level, 2026-10-23).
+t('F-886: "Bachelor\'s" is not "Post Bachelor\'s", even alone', "Bachelor's", ["Post Bachelor's or equivalent"], -1);
+t('F-886: …and takes the plain row when both are there', "Bachelor's", ["Post Bachelor's or equivalent", "Bachelor's or equivalent"], 1);
+t('F-886: a "Non-…" answer still takes its "Non-…" row', 'Non-Hispanic or Latino', ['Hispanic or Latino', 'Non-Hispanic or Latino'], 1);
+t('F-886: a pay band "Under $60,000" is not a qualifier', '$55,000', ['Under $60,000', '$60,000 - $80,000'], 0);
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

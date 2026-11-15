@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSpec, loadPool } from './resume-variants.mjs';
-import { applyPlan, reserveFor, withBullet, withoutOneBullet, mergeInsteadOf, isOwnCompany, ownCompanyTitle, MIN_AMAT, MIN_AMAT_JUSTIFIED, MAX_BULLETS, shortenOneBullet, shortenOneProject, shortenBulletEnding, dropsProtected, protectedPhrases } from './resume-plan.mjs';
+import { applyPlan, reserveFor, withBullet, withoutOneBullet, ensureProofs, mergeInsteadOf, isOwnCompany, ownCompanyTitle, MIN_AMAT, MIN_AMAT_JUSTIFIED, MAX_BULLETS, shortenOneBullet, shortenOneProject, shortenBulletEnding, dropsProtected, protectedPhrases } from './resume-plan.mjs';
 
 const pool = loadPool();
 const base = () => buildSpec('manufacturing', pool);
@@ -17,7 +17,9 @@ test('a good proposal is applied in full — titles, order, projects, coursework
     coursework: ['System Dynamics and Control', 'Mechanical Design', 'Circuit Analysis', 'Python Programming', 'Machine Design'],
     skills: [{ key: 'automation', items: ['RoboDK', 'Universal Robots', 'Python'] }, { key: 'cad', items: ['SolidWorks', 'GD&T'] }, 'process'],
   }, { pool, job: OTHER });
-  assert.deepEqual(notes, []);
+  // The plan does not name the rover, so it is left off (his rule, 2026-11-04) — the only note.
+  assert.deepEqual(notes.filter((n) => !/^rover: left off/.test(n)), []);
+  assert.ok(!spec.experience.some((e) => e.orgKey === 'rover'));
   assert.equal(spec.experience[0].title, 'Robotics Automation Engineer Intern');
   assert.equal(spec.experience[0].group, 'Automation Technology Group', 'the group survives a title change');
   assert.equal(spec.experience[1].title, 'Process Improvement Intern');
@@ -154,6 +156,18 @@ test('A SPILL COSTS WORDS BEFORE IT COSTS CLAIMS: the longest full-form bullet t
   assert.equal(n, full.length);
 });
 
+test('a tailored page keeps its argument: no small-work filler, no Applied Materials line it argued off (2026-10-26)', () => {
+  const b = base();
+  const r = reserveFor(b, pool, ['makerspace.supervise'], { tailored: true, amatCapped: true });
+  assert.ok(r.includes('makerspace.supervise'), 'the plan\'s own reserve is offered (after any Acme Steel line still waiting — his order)');
+  assert.ok(!r.some((k) => k.startsWith('amat.')), 'amat was argued down; the filler does not put it back');
+  assert.ok(!r.includes('acme.packaging') && !r.includes('acme.docs'), 'small work is not reached for');
+  const reserved = reserveFor(b, pool, ['acme.docs', 'amat.neuro-t'], { tailored: true, amatCapped: true });
+  assert.ok(!reserved.includes('acme.docs') && !reserved.includes('amat.neuro-t'), 'not even from the model\'s own reserve');
+  const family = reserveFor(b, pool, []);
+  assert.ok(family.includes('acme.packaging') || b.experience.some((e) => e.bullets.some((x) => x.provenanceKey === 'acme.packaging')), 'a family base fills as before');
+});
+
 test('the reserve is what is left, in order, never the surplus line and never the other half of a pair', () => {
   const b = base();
   const r = reserveFor(b, pool, ['acme.docs', 'amat.cobot-cell', 'nope.x', 'acme.surplus']);
@@ -243,8 +257,8 @@ test('OVER BUDGET, THE EMPHASISED ORG IS THE LAST TO LOSE A LINE', () => {
 
 // -- THE PHRASE THE POSTING ASKED FOR (F-436) ---------------------------
 
-// The 6 DOF arm (2026-09-15): "for coordinated motion across a 420 mm working
-// reach" is in the full wording; the short form says "over a 420 mm reach".
+// The 6 DOF arm (2026-09-15): "for coordinated motion across a 65 cm working
+// reach" is in the full wording; the short form says "over a 65 cm reach".
 test('A PROJECT PRINTS IN FULL - the short form belongs to the fit loop, not to the default', () => {
   const { spec } = applyPlan(base(), { projects: ['robotic-arm'] }, { pool, job: OTHER });
   const arm = spec.projects[0];
@@ -332,8 +346,11 @@ test('a tight page says the RoboDK and rack bullets as one instead of dropping e
   assert.ok(out, 'a cut from Applied Materials merges when both halves are on the page');
   assert.deepEqual(keysOf(out.spec, 'amat'), ['vision-fixture', 'cobot-cell', 'neuro-t', 'iiot', 'amr'], 'the merged bullet takes the first half\'s place; nothing else moves');
   assert.equal(mergeInsteadOf(b, 'acme.robotic-line', pool), null, 'a cut from another organisation is left alone');
-  assert.equal(mergeInsteadOf(out.spec, 'amat.amr', pool), null, 'nothing left to merge');
-  const oneHalf = { ...b, experience: b.experience.map((e) => (e.orgKey === 'amat' ? { ...e, bullets: e.bullets.filter((x) => x.provenanceKey !== 'amat.cobot-rack') } : e)) };
+  // Next the fixture and the vision model are said as one (2026-10-27), then nothing is left.
+  const out2 = mergeInsteadOf(out.spec, 'amat.amr', pool);
+  assert.deepEqual(keysOf(out2.spec, 'amat'), ['vision-system', 'cobot-cell', 'iiot', 'amr'], 'the fixture and the vision model become one bullet');
+  assert.equal(mergeInsteadOf(out2.spec, 'amat.amr', pool), null, 'nothing left to merge');
+  const oneHalf = { ...b, experience: b.experience.map((e) => (e.orgKey === 'amat' ? { ...e, bullets: e.bullets.filter((x) => x.provenanceKey !== 'amat.cobot-rack' && x.provenanceKey !== 'amat.neuro-t') } : e)) };
   assert.equal(mergeInsteadOf(oneHalf, 'amat.amr', pool), null, 'both halves must be on the page');
 });
 
@@ -344,5 +361,62 @@ test('the combined cobot bullet never sits beside either half', () => {
     }, { pool, job: OTHER });
     const amat = keysOf(spec, 'amat');
     assert.ok(amat.includes(pair[0]) && !amat.includes('cobot-cell'), `${pair[0]} is kept, cobot-cell is not printed beside it`);
+  }
+});
+
+test('a line cited as proof of a duty or must-have is put on the page, and cut last (2026-10-27)', () => {
+  const b = base();
+  const cov = [
+    { id: 'R1', need: 'duty', proof: 'acme.docs' },
+    { id: 'R2', need: 'must', proof: 'project: piston-fea' },
+    { id: 'R3', need: 'nice', proof: 'acme.packaging' },
+    { id: 'R4', need: 'must', proof: 'skills: Python' },
+  ];
+  const { spec, added, protect } = ensureProofs(b, cov, pool);
+  assert.ok(keysOf(spec, 'acme').includes('docs'), 'the cited bullet is on the page');
+  assert.ok(!added.includes('acme.packaging'), 'a nice-to-have does not force a line on');
+  assert.ok(spec.projects.some((p) => p.key === 'piston-fea') && spec.projects.length === 2, 'the cited project takes an uncited one\'s place');
+  assert.ok(added.includes('acme.docs') && added.includes('project:piston-fea'));
+  assert.deepEqual([...protect], ['acme.docs']);
+  // Cutting: everything else in Acme Steel goes before the cited line.
+  let cur = spec; const gone = [];
+  for (let i = 0; i < 6; i++) { const out = withoutOneBullet(cur, protect); if (!out.dropped) break; gone.push(out.dropped); cur = out.spec; if (out.dropped === 'acme.docs') break; }
+  const acmeGone = gone.filter((k) => k.startsWith('acme.'));
+  assert.ok(!acmeGone.length || acmeGone[acmeGone.length - 1] === 'acme.docs' || !acmeGone.includes('acme.docs'), 'acme.docs is never cut while another Acme Steel line could be');
+});
+
+test('a project whose pool entry names what the posting asks for is put on the page (Coherent CAM)', () => {
+  const b = { ...base(), projects: [] };
+  const { spec, added } = ensureProofs(b, [], pool, 'CAM (MasterCam, SurfCam, GibbsCam) and CMM experience');
+  assert.ok(spec.projects.some((p) => p.key === 'cnc-cardholder'));
+  assert.ok(added.includes('project:cnc-cardholder'));
+  const none = ensureProofs({ ...base(), projects: [] }, [], pool, 'Design camera mounts in SolidWorks');
+  assert.ok(!none.added.includes('project:cnc-cardholder'), '"camera" is not CAM');
+});
+
+test('the Mars Rover Team goes on only when the plan asks for it (his rule, 2026-11-04)', () => {
+  for (const family of ['manufacturing', 'robotics', 'design', 'process']) {
+    let b;
+    try { b = buildSpec(family, pool); } catch { continue; }   // a family this pool does not have
+    if (!b.experience.some((e) => e.orgKey === 'rover')) continue;
+    const silent = applyPlan(b, { experience: { amat: keysOf(b, 'amat') } }, { pool, job: OTHER }).spec;
+    assert.ok(!silent.experience.some((e) => e.orgKey === 'rover'), `${family}: a plan that says nothing about the rover leaves it off`);
+    const asked = applyPlan(buildSpec(family, pool), { experience: { amat: keysOf(b, 'amat'), rover: ['gripper'] } }, { pool, job: OTHER }).spec;
+    assert.deepEqual(keysOf(asked, 'rover'), ['gripper'], `${family}: a plan that names it keeps it`);
+  }
+});
+
+test('an untailored build (no plan) leaves the rover off too, and still reads as the family base (first mate, 2026-11-04)', () => {
+  for (const family of ['manufacturing', 'robotics', 'design', 'process']) {
+    let b;
+    try { b = buildSpec(family, pool); } catch { continue; }
+    if (!b.experience.some((e) => e.orgKey === 'rover')) continue;
+    for (const plan of [null, undefined, {}, { titles: {} }]) {
+      const { spec, notes, changed } = applyPlan(buildSpec(family, pool), plan, { pool, job: OTHER });
+      assert.ok(!spec.experience.some((e) => e.orgKey === 'rover'), `${family}: no plan, no rover`);
+      assert.ok(notes.some((n) => /^rover: left off/.test(n)), 'said so in the notes');
+      assert.ok(!changed.includes('experience:rover'), 'not counted as tailoring: the NOT TAILORED warning still shows');
+      for (const e of spec.experience) if (e.orgKey !== 'rover') assert.deepEqual(keysOf(spec, e.orgKey), keysOf(b, e.orgKey), `${family}: ${e.orgKey} unchanged`);
+    }
   }
 });

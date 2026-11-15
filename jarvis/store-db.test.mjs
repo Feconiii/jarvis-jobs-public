@@ -221,6 +221,8 @@ console.log('\n🧪 a pruned body is not immediately re-downloaded');
   const url = 'https://acme.wd1.myworkdayjobs.com/x/retired';
   S.upsertJobs([{ url, title: 'Retired Engineer', company: 'Acme', source: 'workday', description: JD_GOOD }]);
   const id = S.jobId(url);
+  // JD_GOOD is short enough to be a list teaser (F-761), so say it was read.
+  S.updateJob(id, { enrichedAt: '2026-10-18T00:00:00.000Z' });
   const queued = () => S.query({ needsRead: true }, { limit: 500 }).rows.some(j => j.id === id);
   ok('a job that already has a body is not queued for reading', !queued());
   S.dropDescription(id);
@@ -237,6 +239,19 @@ console.log('\n🧪 hidden companies and scan history persist');
   eq('the scan is recorded', S.getScans(5)[0].postingsCaptured, 5);
   for (let i = 0; i < 25; i++) S.recordScan({ at: `2026-08-12T00:00:${String(i).padStart(2, '0')}Z` });
   ok('only the last 20 runs are kept', S.getScans(50).length === 20);
+  // F-1025: the Overview's list without the per-company tables, kept until a new scan.
+  const perCompany = ['Acme', 'Beta', null, { company: '' }, 'Gamma', 'Delta'].map((c) => (typeof c === 'string' ? { company: c, found: 1 } : c));
+  S.recordScan({ at: '2026-08-13T00:00:00Z', postingsCaptured: 9, added: 2, updated: 3, companiesScanned: 6, perCompany });
+  const first = S.recentScanSummaries(12);
+  eq('the newest summary first, its counts kept', [first[0].at, first[0].postingsCaptured, first[0].added, first[0].updated], ['2026-08-13T00:00:00Z', 9, 2, 3]);
+  eq('three names and the count of named companies, as the full record gave', [first[0].firstCompanies, first[0].companyCount], [['Acme', 'Beta', 'Gamma'], 4]);
+  ok('no per-company table in it', !('perCompany' in first[0]));
+  ok('asked again with no new scan, the same rows', S.recentScanSummaries(12)[0] === first[0]);
+  S.recordScan({ at: '2026-08-14T00:00:00Z', postingsCaptured: 1, perCompany: [] });
+  eq('a new scan is seen at once', S.recentScanSummaries(12)[0].at, '2026-08-14T00:00:00Z');
+  eq('one asked for, one given', S.recentScanSummaries(1).length, 1);
+  eq('more asked for than were kept, all of them read again', S.recentScanSummaries(15).length, 15);
+  eq('…in order, newest first', S.recentScanSummaries(15)[1].at, '2026-08-13T00:00:00Z');
 }
 
 console.log('\n🧪 a board that puts the posting id in the query string');
@@ -375,6 +390,18 @@ console.log('\n🧪 a retired posting says so, and is not dropped');
   ok('a retired posting stays in the queue he put it in', queued.some((j) => j.id === id));
   ok('and the row he sees carries the flag too',
     queued.find((j) => j.id === id)?.goneAt === '2026-09-02T00:00:00Z');
+
+  // F-1015: the board lists it again, posted AFTER the mark — a repost, live.
+  const url2 = 'https://boards.greenhouse.io/acme/jobs/repost-1';
+  S.upsertJobs([{ url: url2, title: 'Etch Equipment Engineer', company: 'Acme', location: 'Austin, TX', source: 'greenhouse', description: JD_GOOD }]);
+  const id2 = S.jobId(url2);
+  S.updateJob(id2, { goneAt: '2026-09-08T00:00:00Z' }, { rederive: true });
+  S.upsertJobs([{ url: url2, title: 'Etch Equipment Engineer', company: 'Acme', location: 'Austin, TX', source: 'greenhouse', postedAt: '2026-10-20T00:00:00Z' }]);
+  eq('a posting re-posted after it was marked gone is live again', S.getListItem(id2).goneAt ?? null, null);
+  // …but the same listing with no newer date keeps a mark (his browser may have set it).
+  S.updateJob(id2, { goneAt: '2026-10-25T00:00:00Z' }, { rederive: true });
+  S.upsertJobs([{ url: url2, title: 'Etch Equipment Engineer', company: 'Acme', location: 'Austin, TX', source: 'greenhouse', postedAt: '2026-10-20T00:00:00Z' }]);
+  eq('a listing posted before the mark leaves it', S.getListItem(id2).goneAt, '2026-10-25T00:00:00Z');
 }
 
 console.log('\n🧪 a live posting carries no gone flag');
@@ -600,6 +627,192 @@ console.log('\n🧪 store: an unread backlog is read new-grad postings first (F-
   eq('…which the relevance order never did', order('relevance'), ['mid', 'low', 'ncg']);
   h.close?.();
   try { rmSync(dir4, { recursive: true, force: true }); } catch { /* tmp, it can wait */ }
+}
+
+console.log('\n🧪 store: a list teaser is not a read (F-761), and a sweep skips what cannot be read');
+{
+  const { queryJobs } = await import('./db.mjs');
+  const dir5 = mkdtempSync(path.join(tmpdir(), 'jarvis-thin-'));
+  const h = openDb(path.join(dir5, 'jobs.db'));
+  const add = (id, { source = 'workday', hasDesc = 1, len = 0, enrichedAt = null, fails = 0, team = 'x' } = {}) => h.prepare(
+    `INSERT INTO jobs (id, url, title, company, team, source, status, has_desc, desc_len, enriched_at, enrich_fails, first_seen, last_seen)
+     VALUES (?, ?, 'Manufacturing Engineer', 'Acme', ?, ?, 'new', ?, ?, ?, ?, '2026-10-01', '2026-10-03')`,
+  ).run(id, `https://example.test/${id}`, team, source, hasDesc, len, enrichedAt, fails);
+  // HPE / Thermo Fisher, measured: 314–373 characters of list summary.
+  add('teaser', { source: 'phenom', len: 340 });
+  add('teaser-wd', { len: 373 });
+  add('read-short', { len: 340, enrichedAt: '2026-10-17T00:00:00.000Z' });
+  add('full', { len: 4200 });
+  add('unread', { hasDesc: 0 });
+  add('struck', { hasDesc: 0, fails: 3 });
+  add('gh-noteam', { source: 'greenhouse', len: 4200, team: '' });
+  add('gh-noteam-read', { source: 'greenhouse', len: 4200, team: '', enrichedAt: '2026-10-17T00:00:00.000Z' });
+  const unread = new Set(queryJobs(h, { needsRead: true }, { limit: 50 }).rows.map((r) => r.id));
+  ok('a Phenom teaser that nothing has read in full is queued', unread.has('teaser'));
+  ok('…and so is a Workday one (not only Phenom-to-Workday links)', unread.has('teaser-wd'));
+  ok('a short body that WAS read in full is not queued again (no re-read loop)', !unread.has('read-short'));
+  ok('a full body is not queued', !unread.has('full'));
+  ok('a row with no body still is', unread.has('unread'));
+  ok('three strikes still retire a row from reading', !unread.has('struck'));
+  ok('a Greenhouse posting with no team is read once…', unread.has('gh-noteam'));
+  ok('…and not again once read (it has no departments to give)', !unread.has('gh-noteam-read'));
+  const sweep = new Set(queryJobs(h, { readable: true }, { limit: 50 }).rows.map((r) => r.id));
+  ok('the liveness sweep skips a row three reads could not produce a body for', !sweep.has('struck'));
+  ok('…and still checks the rest', sweep.has('full') && sweep.has('unread'));
+  h.close?.();
+  try { rmSync(dir5, { recursive: true, force: true }); } catch { /* tmp, it can wait */ }
+
+  // Through the store: when the posting was read travels in its own column.
+  const url = 'https://acme.wd1.myworkdayjobs.com/x/teaser';
+  S.upsertJobs([{ url, title: 'Process Engineer', company: 'Acme', source: 'workday', description: 'Summary line from the list API. '.repeat(10) }]);
+  const id = S.jobId(url);
+  const queued = () => S.query({ needsRead: true }, { limit: 500 }).rows.some((j) => j.id === id);
+  ok('a scanned teaser is queued for reading', queued());
+  S.updateJob(id, { description: 'The whole posting. '.repeat(12), enrichedAt: '2026-10-18T01:00:00.000Z' }, { rederive: true });
+  eq('enrichedAt round-trips through its column', S.getJob(id).enrichedAt, '2026-10-18T01:00:00.000Z');
+  ok('a read short posting leaves the queue', !queued());
+  S.upsertJobs([{ url, title: 'Process Engineer', company: 'Acme', source: 'workday' }]);
+  ok('a re-scan does not put it back', !queued());
+}
+
+console.log('\n🧪 store: a Phenom row struck out for having no reader gets its page once (2026-11-12)');
+{
+  const sf = 'https://career4.successfactors.com/career?company=acmeP&career_job_req_id=287881';
+  const page = 'https://jobs.acme.test/us/en/job/ACMEUS287881EXTERNALENUS/mechanical-engineer';
+  S.upsertJobs([{ url: sf, title: 'Mechanical Engineer', company: 'Acme Phenom', source: 'phenom', description: 'Teaser. '.repeat(10) }]);
+  const id = S.jobId(sf);
+  S.updateJob(id, { enrichFails: 3 });
+  eq('the row starts struck out', S.getJob(id).enrichFails, 3);
+  S.upsertJobs([{ url: sf, title: 'Mechanical Engineer', company: 'Acme Phenom', source: 'phenom', description: 'Teaser. '.repeat(10), detailApi: page }]);
+  eq('its page arrives with the next scan', S.getJob(id).detailApi, page);
+  eq('…and the strikes it took for having no route are cleared', S.getJob(id).enrichFails, 0);
+  S.updateJob(id, { enrichFails: 3 });
+  S.upsertJobs([{ url: sf, title: 'Mechanical Engineer', company: 'Acme Phenom', source: 'phenom', description: 'Teaser. '.repeat(10), detailApi: page }]);
+  eq('strikes earned on the page itself stand: cleared once, not every scan', S.getJob(id).enrichFails, 3);
+
+  const gh = 'https://boards.greenhouse.io/acme/jobs/555';
+  S.upsertJobs([{ url: gh, title: 'Mechanical Engineer', company: 'Acme GH', source: 'greenhouse', description: 'Teaser. '.repeat(10) }]);
+  const gid = S.jobId(gh);
+  S.updateJob(gid, { enrichFails: 3 });
+  S.upsertJobs([{ url: gh, title: 'Mechanical Engineer', company: 'Acme GH', source: 'greenhouse', description: 'Teaser. '.repeat(10), detailApi: 'https://boards-api.greenhouse.io/v1/boards/acme/jobs/555' }]);
+  eq('a Greenhouse row had a route from its url, so its strikes stand', S.getJob(gid).enrichFails, 3);
+}
+
+console.log('\n🧪 store: a hollow body can be taken off a live row (F-760)');
+{
+  const url = 'https://join.example.test/job/Oak-Brook-Design-Engineer-IL-60521/1367648455/';
+  S.upsertJobs([{ url, title: 'Design Engineer', company: 'CNH', source: 'successfactors', location: 'Oak Brook, IL, US',
+    description: 'Chi siamo\n\nInnovazione.\n\nScopo del ruolo\n\nMaggiori Responsabilità\n\nEsperienza Richiesta\n\nQualifiche preferenziali\n\nTrasparenza salariale\n\nLo stipendio annuale per questo ruolo è di USD $19,57 - $35,02.' }]);
+  const id = S.jobId(url);
+  ok('it went in with a body', S.getJob(id).hasDesc);
+  S.clearDescription(id);
+  const j = S.getJob(id, { description: true });
+  eq('the body is gone', j.description, '');
+  eq('has_desc says so', j.hasDesc, false);
+  ok('the row is not marked pruned (it is live)', S.query({ pruned: true }, { limit: 500 }).rows.every((r) => r.id !== id));
+  eq('the row itself stays', j.title, 'Design Engineer');
+}
+
+console.log('\n🧪 store: a degree flag rescreen-degrees wrote survives a re-write (F-769)');
+{
+  const url = 'https://example.com/jobs/f769-eligibility';
+  S.upsertJobs([{ url, title: 'Software Engineer II', company: 'Acme', location: 'Austin, TX', description: JD_GOOD }]);
+  const id = S.jobId(url);
+  const note = JSON.stringify({ wanted: ['the title is another discipline’s work'], quote: 'Software Engineer II' });
+  // What rescreen-degrees.mjs does: a bare column write.
+  S.db().prepare('UPDATE jobs SET f_degree_mismatch = 1, degree_note = ?, deck = 0 WHERE id = ?').run(note, id);
+  S.updateJob(id, { userNote: 'touched' }, { rederive: true });
+  const row = S.db().prepare('SELECT f_degree_mismatch, degree_note, deck FROM jobs WHERE id = ?').get(id);
+  eq('a re-derived write keeps the flag', row.f_degree_mismatch, 1);
+  eq('…and its reason', JSON.parse(row.degree_note).wanted, ['the title is another discipline’s work']);
+  eq('…and the row stays out of the deck', row.deck, 0);
+
+  // A degree.mjs flag is triage's own, so a fixed rule may clear it.
+  const url2 = 'https://example.com/jobs/f769-degree';
+  S.upsertJobs([{ url: url2, title: 'Manufacturing Engineer', company: 'Acme', location: 'Austin, TX', description: JD_GOOD }]);
+  const id2 = S.jobId(url2);
+  S.db().prepare('UPDATE jobs SET f_degree_mismatch = 1, degree_note = ? WHERE id = ?').run(JSON.stringify({ wanted: ['electrical'], quote: 'BSEE' }), id2);
+  S.updateJob(id2, { userNote: 'touched' }, { rederive: true });
+  eq('a degree.mjs flag is re-derived as usual', S.db().prepare('SELECT f_degree_mismatch FROM jobs WHERE id = ?').get(id2).f_degree_mismatch, 0);
+}
+
+console.log('\n🧪 store: the reasons his rules blocked a row are stored with the flag (2026-11-03)');
+{
+  const url = 'https://example.com/jobs/fit-blockers';
+  S.upsertJobs([{ url, title: 'Yard Hostler', company: 'Acme', location: 'Austin, TX', description: JD_GOOD }]);
+  const id = S.jobId(url);
+  const job = S.getJob(id, { description: true });
+  S.putJob({ ...job, fit: { ...(job.fit || {}), score: 40, blockers: ['Not one of the roles you asked for (engineer, engineering…)'] } });
+  const row = S.db().prepare('SELECT fit_blocked, fit_blockers FROM jobs WHERE id = ?').get(id);
+  eq('the flag', row.fit_blocked, 1);
+  eq('…and its reason, as a list', JSON.parse(row.fit_blockers), ['Not one of the roles you asked for (engineer, engineering…)']);
+  eq('the reason reads back onto the job', S.getJob(id).fit.blockers, ['Not one of the roles you asked for (engineer, engineering…)']);
+  S.putJob({ ...S.getJob(id, { description: true }), fit: { score: 70, blockers: [] } });
+  eq('an unblocked row stores none', S.db().prepare('SELECT fit_blockers FROM jobs WHERE id = ?').get(id).fit_blockers, null);
+}
+
+console.log('\n🧪 an employer\'s own field: 80% of at least 20 described postings (audit 2026-11-12)');
+{
+  const mk = (co, n) => Array.from({ length: n }, (_, i) => ({
+    url: `https://jobs.example.com/${co.replace(/\W/g, '')}/${i}`, title: `Mechanical Engineer ${i}`, company: co,
+    location: 'Boston, MA', description: 'Design mechanisms. SolidWorks, GD&T, fixture design.',
+  }));
+  S.upsertJobs([...mk('Robo Field Co', 22), ...mk('Small Robo Co', 5), ...mk('Mixed Co', 20)]);
+  const set = S.db().prepare('UPDATE jobs SET field = ?, has_desc = 1 WHERE id = ?');
+  const idsOf = (co) => S.db().prepare('SELECT id FROM jobs WHERE company = ? ORDER BY id').all(co).map(r => r.id);
+  idsOf('Robo Field Co').forEach((id, i) => set.run(i < 20 ? 'robotics' : 'other', id));
+  idsOf('Small Robo Co').forEach((id) => set.run('robotics', id));
+  idsOf('Mixed Co').forEach((id, i) => set.run(i < 10 ? 'robotics' : 'industrial', id));
+  eq('20 of 22 robotics: a robotics employer', S.employerFields('Robo Field Co'), ['robotics']);
+  eq('5 postings are too few to say', S.employerFields('Small Robo Co'), []);
+  eq('half and half: no field of its own', S.employerFields('Mixed Co'), []);
+  eq('an employer the store has never seen: none', S.employerFields('Nobody Inc'), []);
+  // A read that fails is not remembered as "no field" for 12 hours.
+  S.db().exec('ALTER TABLE jobs RENAME TO jobs_away');
+  let during;
+  try { during = S.employerFields('Late Robo Co'); } finally { S.db().exec('ALTER TABLE jobs_away RENAME TO jobs'); }
+  eq('a failed read answers none…', during, []);
+  S.upsertJobs(mk('Late Robo Co', 20));
+  idsOf('Late Robo Co').forEach((id) => set.run('robotics', id));
+  eq('…and is asked again next time, not cached', S.employerFields('Late Robo Co'), ['robotics']);
+}
+
+console.log('\n🧪 a paged read with `stable` breaks ties on id (week-fixes J4)');
+{
+  // The mail matcher pages a filter 2000 rows at a time. Rows tied on the sort
+  // (same fit score, same first-seen) have no defined order between pages, so
+  // a row can fall in the gap. `stable` adds the id as the last sort key.
+  S.upsertJobs(Array.from({ length: 8 }, (_, i) => ({
+    url: `https://jobs.example.com/tieco/${i}`, title: `Mechanical Engineer ${i}`, company: 'Tie Co', location: 'Boston, MA',
+  })));
+  S.db().prepare("UPDATE jobs SET fit_score = 50, first_seen = '2026-11-13T00:00:00.000Z' WHERE company = 'Tie Co'").run();
+  const byRowid = S.db().prepare("SELECT id FROM jobs WHERE company = 'Tie Co' ORDER BY rowid").all().map(r => r.id);
+  const sorted = [...byRowid].sort();
+  ok('(the rows went in out of id order, so the test can tell)', JSON.stringify(byRowid) !== JSON.stringify(sorted));
+  const paged = [];
+  for (let offset = 0; offset < 8; offset += 2) paged.push(...S.query({ company: ['Tie Co'] }, { limit: 2, offset, stable: true }).rows.map(j => j.id));
+  eq('every page in id order, none skipped or repeated', paged, sorted);
+}
+
+console.log('\n🧪 the scan clock reads the last FULL scan without parsing records, and imports never erase it (week-fixes J3)');
+{
+  const { isFullScan } = await import('./scan-clock.mjs');
+  S.db().exec('DELETE FROM scans');
+  S.recordScan({ at: '2026-11-13T00:00:00.000Z', full: true, perCompany: [{ company: 'A', provider: 'greenhouse' }] });
+  for (let i = 0; i < 21; i++) S.recordScan({ at: `2026-11-13T01:${String(i).padStart(2, '0')}:00.000Z`, full: false, perCompany: [{ company: 'B', provider: 'browser-assist' }] });
+  eq('twenty-one imports after it: the full scan is still the clock', S.lastFullScanRecordAt?.(), '2026-11-13T00:00:00.000Z');
+  eq('…because its record outlives the twenty', S.db().prepare("SELECT count(*) AS n FROM scans WHERE at = '2026-11-13T00:00:00.000Z'").get().n, 1);
+  eq('the other readers still get twenty', S.getScans(20).length, 20);
+  // The SQL agrees with isFullScan on every shape a record has had.
+  const shapes = [{ full: true }, { full: false }, {}, { perCompany: [] }, { perCompany: [{ provider: 'browser-assist' }] },
+    { perCompany: [{ provider: 'browser-assist' }, { provider: 'lever' }] }, { perCompany: [null] }, { perCompany: [{}] },
+    { full: 'yes', perCompany: [{ provider: 'browser-assist' }] }, { full: false, perCompany: [{ provider: 'lever' }] }];
+  for (const shape of shapes) {
+    S.db().exec('DELETE FROM scans');
+    S.recordScan({ at: '2026-11-13T05:00:00.000Z', ...shape });
+    eq(`full is ${isFullScan(shape)} for ${JSON.stringify(shape)}`, S.lastFullScanRecordAt?.() ?? null, isFullScan(shape) ? '2026-11-13T05:00:00.000Z' : null);
+  }
+  S.db().exec('DELETE FROM scans');
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

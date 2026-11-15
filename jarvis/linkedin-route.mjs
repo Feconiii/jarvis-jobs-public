@@ -63,7 +63,7 @@ export async function routeFor(url, { fetchImpl = fetch } = {}) {
 
 async function main(argv) {
   const write = argv.includes('--write');
-  const { db } = await import('./store.mjs');
+  const { db, setApplyRoute } = await import('./store.mjs');
   const { approve } = await import('./picks.mjs');
   const h = db();
   const rows = h.prepare(`SELECT id, company, title, status, url FROM jobs
@@ -71,11 +71,11 @@ async function main(argv) {
       AND status IN ('inbox', 'queued', 'interested') ORDER BY status, company`).all();
   console.log(`\n  ${rows.length} LinkedIn postings on your lists. Asking LinkedIn how each one takes an application…\n`);
   const seen = { 'easy-apply': [], offsite: [], closed: [], unknown: [] };
-  const mark = h.prepare('UPDATE jobs SET apply_route = ? WHERE id = ?');
   for (const r of rows) {
     const route = await routeFor(r.url);
     seen[route || 'unknown'].push(r);
-    if (write && route) mark.run(route, r.id);
+    // Through the store's writer, under its lock (F-968).
+    if (write && route) await setApplyRoute(r.id, route);
     await new Promise((res) => setTimeout(res, 1200));
   }
   const line = (r) => `    ${r.status.padEnd(10)} ${r.company} — ${r.title}`;

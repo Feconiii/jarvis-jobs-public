@@ -63,7 +63,13 @@ const SCREEN = `
   -- never consulted. f_hard_block covers the visa classifiers only.
   AND fit_blocked = 0
   AND f_senior = 0
-  AND fit_score >= @minFit
+  -- A NEW-GRAD POSTING IS NOT CUT ON KEYWORD OVERLAP ALONE (F-765). The fit
+  -- score is taste; Formlabs' "3D Print Optimization Engineer - June 2027 New
+  -- Grads" scored 66 and never reached the reader. 8 of the 69 new-grad roles
+  -- he applied to scored under 70. A caller may let new-grad wording in at a
+  -- lower floor (newGradFit; the curator reads those last); by default the
+  -- floor is the same for every row.
+  AND (fit_score >= @minFit OR (f_newgrad = 1 AND fit_score >= @newGradFit))
   -- FULL-TIME NEW GRAD, NOT INTERNSHIPS.
   --
   -- His own rules said so and this screen did not read them. preferences.md:
@@ -106,7 +112,15 @@ const SCREEN = `
   AND (apply_route IS NULL OR apply_route <> 'easy-apply')
   -- Read in full and rejected once already. The reason is on the row.
   AND (pick_note IS NULL OR pick_note NOT LIKE 'Not curated%')
-  AND (posted_at IS NULL OR posted_at >= date('now', @window))
+  -- NEW TO THE STORE IS NEW TO HIM (F-765). The window read the employer's
+  -- own posting date, so a requisition that had been open for months was
+  -- outside the pool the day the store first saw it: CircuitHub's factory-
+  -- automation ME (posted 2026-01-15, first seen 09-09), Mesh Optical's
+  -- early-career manufacturing engineer (posted 02-16, first seen 10-04) and
+  -- Droyd were never offered to the reader. The later of the two dates counts:
+  -- a posting the employer just put up, or one the scanner just found.
+  AND (max(COALESCE(posted_at, ''), COALESCE(first_seen, '')) = ''
+    OR max(COALESCE(posted_at, ''), COALESCE(first_seen, '')) >= date('now', @window))
 `;
 
 // WHERE IS THIS, AND WHAT IF THE STORE DOES NOT SAY.
@@ -236,7 +250,50 @@ const HAS_REQUIREMENTS = /\b(qualifications?|requirements?|what\s+you'?ll\s+(?:d
  *
  * @returns the sentence that bars it, or null
  */
-const LICENCE_REVIEW = /export\s+licens\w*\s+(review|process)|may\s+(?:need|have\s+to|require|be\s+required\s+to)[^.]{0,60}\blicen[cs]e|deemed\s+export|license\s+(?:may|might)\s+be\s+required/i;
+// Samsung Austin Semiconductor (F-1045): "contingent on either the applicant
+// verifying that the applicant falls under the "U.S. Person" definition … or
+// the employer timely obtaining any necessary export license" — a U.S. person
+// OR a licence, the same door as the review line. 24 of its postings were kept
+// out of his picks; he applied to its CVD Equipment Engineer on his own.
+// The alternative has to be the EMPLOYER obtaining the licence, with no
+// negation: "or we cannot obtain an export license" and a bare "or obtaining
+// an export license" beside a citizen demand excuse nothing (review, 11-12).
+// "Deemed export" excuses only as an alternative ("or otherwise eligible for
+// deemed export licensing", Hermeus), never in the same breath as a hard
+// demand: "This role requires a U.S. person (deemed export)." bars, and so
+// does "a U.S. citizen or permanent resident (deemed export)": the "or" has to
+// open the alternative itself (eligible for / to obtain).
+const LICENCE_REVIEW = /export\s+licens\w*\s+(review|process)|may\s+(?:need|have\s+to|require|be\s+required\s+to)[^.]{0,60}\blicen[cs]e|\bor\s*,?\s*(?:if\s+not\s*,\s*)?(?:otherwise\s+)?(?:be\s+)?eligible\s+(?:for|to\s+(?:obtain|receive))\s+(?:an?\s+|the\s+)?deemed\s+export|license\s+(?:may|might)\s+be\s+required|\bor\s+(?:the\s+)?(?:employer|company|we)\s+(?:timely\s+|successfully\s+)?obtain(?:s|ing)?\s+(?:any\s+|an?\s+|the\s+)?(?:necessary\s+|required\s+|applicable\s+)?export\s+licen[cs]e/i;
+const LICENCE_REFUSED = /\b(?:cannot|can\s*not|can't|unable|will\s+not|won't|never|not\s+able|do(?:es)?\s+not|don't|doesn't)\b[^.]{0,40}\b(?:obtain|apply\s+for|sponsor|file)\b[^.]{0,40}\blicen[cs]e/i;
+// The refusal can sit in a sentence of its own ("The company does not file
+// export licenses for foreign nationals."), which leaves the excuse empty. Any
+// sentence of the body that refuses an EXPORT licence counts; a driver's
+// licence the applicant cannot obtain does not.
+const refusesExportLicence = (body) => String(body || '').split(/[.!?\n]+/)
+  .some((s) => LICENCE_REFUSED.test(s) && /\bexport\b/i.test(s));
+const licenceAlternative = (quote, body) => LICENCE_REVIEW.test(quote) && !LICENCE_REFUSED.test(quote)
+  && !refusesExportLicence(body);
+// "U.S. Persons include citizens, permanent residents…" / "This status includes…"
+// defines the term and demands nothing (TSMC Arizona, which he applied to;
+// Hermeus; Vast). It never bars on its own. A definition has a defining verb
+// AND a list of statuses: "U.S. persons are considered exclusively." and
+// "U.S. persons are hired for this role." are demands, not definitions.
+const DEFINES_ONLY = /^\W*(?:(?:the\s+term\s+)?["“]?U\.?\s?S\.?\s+persons?["”]?|this\s+status|such\s+persons?)\s+(?:include|includes|means|mean|consists?\s+of|(?:are|is)\s+defined\s+as)\b/i;
+const STATUS_LIST = /\b(?:citizens?|residents?|green\s+card|asylees?|asylum|refugees?)\b/i;
+const NO_DEMAND = /\b(?:must|required?|requires|only|eligible|need(?:s|ed)?|shall)\b/i;
+const definesOnly = (quote) => DEFINES_ONLY.test(quote) && STATUS_LIST.test(quote) && !NO_DEMAND.test(quote);
+// A STATUS SENTENCE THAT DEMANDS NOTHING DOES NOT BAR (First Mate's review of
+// the fill stop, 2026-11-12): "Sponsorship available. U.S. citizens and green
+// card holders welcome to apply." names the statuses and turns no one away.
+// A sentence bars only with restrictive wording beside them: only, must,
+// required, limited to, exclusively, contingent on… ITAR keeps its own rule
+// above, where the regulation itself is the bar, and so does a sentence in
+// export terms ("U.S. persons are hired for this role."): only the plain
+// citizens/residents wording needs the restrictive word.
+const EXPORT_TERMS = /\bU\.?\s?S\.?\s+persons?\b|\bexport|\bdeemed\b|\bEAR\b/i;
+const demands = (q) => !q.trim() || EXPORT_TERMS.test(q) || RESTRICTS.test(q);
+const RESTRICTS =/\b(?:only|must|required?|requires|requirements?|limited\s+to|restricted\s+to|exclusively|solely|need(?:s|ed)?|shall|mandatory|contingent|cannot|can\s*not|unable|not\s+eligible|ineligible|no\s+(?:visa|sponsorship)|will\s+not)\b/i;
+const PART_810 = /\b(?:10\s*C\.?F\.?R\.?\s*(?:Part\s*)?810|Part\s+810)\b/i;
 export function exportBar(title, text) {
   // A U.S. person (citizen, green card) IS what these postings ask for, so
   // nothing here bars them.
@@ -244,13 +301,20 @@ export function exportBar(title, text) {
   const body = String(text || '');
   const itar = body.match(/[^.\n]{0,160}\b(?:ITAR|International\s+Traffic\s+in\s+Arms)\b[^.\n]{0,160}/i);
   if (itar) return itar[0].replace(/\s+/g, ' ').trim();
+  // DOE 10 CFR Part 810 (Kairos Power, F-959): nuclear export control with a
+  // general-authorization country list and a licence for everyone else. Its
+  // "Are you a U.S. citizen…?" form question is a licence question, like the
+  // EAR review line above, so it is a caution and not a bar.
+  if (PART_810.test(body)) return null;
   let v;
   try { v = classifyVisa(title, body); } catch { return null; }
+  // EVERY status sentence (F-1045 review): one licence alternative excuses
+  // only itself, never a hard "must be a U.S. person" elsewhere in the text.
   for (const w of v?.warnings || []) {
     if (w.key !== 'us_person' && w.key !== 'export_authorization') continue;
-    const quote = String(w.quote || '');
-    if (LICENCE_REVIEW.test(quote)) continue;
-    return quote.replace(/\s+/g, ' ').trim() || w.key;
+    const quotes = (w.quotes?.length ? w.quotes : [w.quote]).map((q) => String(q || ''));
+    const hard = quotes.find((q) => demands(q) && !licenceAlternative(q, body) && !definesOnly(q));
+    if (hard !== undefined) return hard.replace(/\s+/g, ' ').trim() || w.key;
   }
   return null;
 }
@@ -465,7 +529,9 @@ export function rank(rows, { perCompany = 3, limit = 40 } = {}) {
   };
 }
 
-export function loadCandidates(dbPath = DB_PATH, { minFit = 70, days = 60, withDescriptions = true, interns = false, gradAnyway = false } = {}) {
+export function loadCandidates(dbPath = DB_PATH, { minFit = 70, newGradFit = null, days = 60, withDescriptions = true, interns = false, gradAnyway = false } = {}) {
+  const fitFloor = Number(minFit) || 70;
+  const ngFloor = Number.isFinite(Number(newGradFit)) && newGradFit != null ? Math.min(fitFloor, Number(newGradFit)) : fitFloor;
   const db = openDb(dbPath);
   // THE DEPARTMENT'S RECORD, LEFT-JOINED. The two LCA tables are written by
   // `lca-import.mjs` and may not exist at all on a store that has never loaded
@@ -486,7 +552,7 @@ export function loadCandidates(dbPath = DB_PATH, { minFit = 70, days = 60, withD
       jobs.fit_score, jobs.fit_band, jobs.role_kind, jobs.level, jobs.level_years, jobs.tier, jobs.adapter, jobs.location_bucket,
       jobs.f_newgrad, jobs.f_intern, jobs.f_senior, jobs.f_stretch, jobs.f_visa_good, jobs.sponsors_h1b,
       jobs.salary_min, jobs.salary_max, jobs.salary_interval, jobs.desc_len${lcaCols}
-    FROM jobs ${lcaJoin} WHERE ${SCREEN.replace('@minFit', String(Number(minFit) || 70)).replace('@window', `'-${Number(days) || 60} day'`)
+    FROM jobs ${lcaJoin} WHERE ${SCREEN.replace('@minFit', String(fitFloor)).replace('@newGradFit', String(ngFloor)).replace('@window', `'-${Number(days) || 60} day'`)
     .replace('@internClause', interns ? 'OR f_intern = 1' : '')
     .replace('@gradClause', withGrad ? 'OR 1 = 1' : '')}`;
   const rows = db.prepare(sqlFor(gradAnyway)).all();
@@ -605,6 +671,12 @@ export function loadCandidates(dbPath = DB_PATH, { minFit = 70, days = 60, withD
  *
  * Deliberately additive and reversible: it only moves postings OUT of `new`, so
  * nothing he has already decided about is touched, and `--undo` puts them back.
+ *
+ * THE STORE'S SANCTIONED PICK WRITER (F-968, 2026-11-04). It writes jobs.db
+ * itself, by design: nothing derives from what it sets, it stays synchronous so
+ * curate's locked-write retry works (F-730), and it takes a store path for
+ * tests. Any change here is a change to the daily search; prove it with a
+ * scheduled run.
  */
 export function approve(ids, notes = {}, { dbPath = DB_PATH, undo = false, interns = false } = {}) {
   const db = openDb(dbPath);
@@ -638,6 +710,25 @@ export function approve(ids, notes = {}, { dbPath = DB_PATH, undo = false, inter
       refused.push(id);
       return false;
     });
+  }
+  // A COMPANY HE HID IS NOT FILED EITHER (F-956). The board leaves a hidden
+  // employer out of every pile, so a pick there sits in his inbox unseen: eight
+  // hand-filed picks did on 2026-11-02. rank() already refuses them; this is
+  // the door that bypassed it.
+  if (!undo) {
+    let hidden = new Set();
+    try {
+      const row = db.prepare("SELECT v FROM meta WHERE k = 'hiddenCompanies'").get();
+      hidden = new Set((row ? JSON.parse(row.v) : []).map((c) => String(c).toLowerCase().trim()));
+    } catch { /* no list */ }
+    if (hidden.size) {
+      const co = db.prepare('SELECT company FROM jobs WHERE id = ?');
+      ids = ids.filter((id) => {
+        if (!hidden.has(String(co.get(id)?.company || '').toLowerCase().trim())) return true;
+        refused.push(id);
+        return false;
+      });
+    }
   }
 
   let moved = 0;

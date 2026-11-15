@@ -384,5 +384,65 @@ console.log('\n🧪 an Oracle form is named by its own tenant (F-714)');
   ok('no posting, no title invented', oracleMetaFrom({ items: [] }), null);
 }
 
+console.log('\n🧪 the direct rung for browser-assist rows (F-762)');
+{
+  const { classifyDirectStatus } = await import('../liveness-api.mjs');
+  const { pickDirectRows, sweepHostDirect, holdWholeHost, urlShape } = await import('./liveness-sweep.mjs');
+  ok('410 is gone', classifyDirectStatus(410)?.result, 'expired');
+  ok('404 alone decides nothing', classifyDirectStatus(404), null);
+  ok('404 beside a 200 from the same host is gone', classifyDirectStatus(404, { hostAnswers: true })?.result, 'expired');
+  ok('403 is a refusal, never gone (Tesla)', JSON.stringify(classifyDirectStatus(403, { hostAnswers: true })), JSON.stringify({ refused: true }));
+  ok('200 decides nothing (a soft 404 looks the same)', classifyDirectStatus(200), null);
+  ok('a redirect decides nothing', classifyDirectStatus(302), null);
+
+  const tesla = Array.from({ length: 6 }, (_, i) => ({ id: `t${i}`, source: 'browser-assist', url: `https://www.tesla.com/careers/search/job/-${i}` }));
+  const joby = Array.from({ length: 10 }, (_, i) => ({ id: `j${i}`, source: 'browser-assist', url: `https://careers-jobyaviation.icims.com/jobs/${3700 + i}/job` }));
+  const sym = [
+    { id: 's1', source: 'browser-assist', url: 'https://www.symbotic.com/careers/open-positions/R7179' },
+    { id: 's2', source: 'browser-assist', url: 'https://www.symbotic.com/careers/open-positions/R6971' },
+    { id: 's3', source: 'browser-assist', url: 'https://www.symbotic.com/careers/open-positions/R4962' },
+  ];
+  const picked = pickDirectRows([...tesla, ...joby, ...sym, { id: 'gh', source: 'greenhouse', url: 'https://boards.greenhouse.io/x/jobs/1' }], 6);
+  ok('round-robin across hosts: Tesla cannot crowd out Joby and Symbotic', picked.map((j) => j.id[0]).join(''), 'tjstjs');
+  ok('…and only browser-assist rows', picked.some((j) => j.id === 'gh'), false);
+
+  const stub = (map) => { const asked = []; return { asked, status: async (u) => { asked.push(u); return map(u); } }; };
+  const nap = async () => {};
+  {
+    const s = stub(() => 403);
+    const r = await sweepHostDirect(tesla, { status: s.status, sleep: nap });
+    ok('Tesla: 403 → asked once, then left alone', s.asked.length, 1);
+    ok('Tesla: nothing retired', r.gone.length, 0);
+  }
+  {
+    const s = stub(() => 410);
+    const r = await sweepHostDirect(joby, { status: s.status, sleep: nap });
+    ok('Joby: every posting 410 → every one gone', r.gone.length, 10);
+    ok('Joby: a whole host of 410s is a shut-down board, not held', holdWholeHost(r.asked, r.gone), false);
+  }
+  {
+    const s = stub((u) => (/R7179|R6971/.test(u) ? 404 : 200));
+    const r = await sweepHostDirect(sym, { status: s.status, sleep: nap });
+    ok('Symbotic: the two 404s beside a live 200 are gone', r.gone.map((g) => g.job.id).join(','), 's1,s2');
+  }
+  {
+    // Symbotic, measured 2026-10-18: its own page for R6971 is dead while
+    // Workday still lists the requisition. A 404 with nothing live beside it
+    // at the same address pattern is never a verdict.
+    const s = stub(() => 404);
+    const r = await sweepHostDirect(sym.slice(0, 2), { status: s.status, sleep: nap });
+    ok('lone 404s (no live posting at the same address pattern): nothing retired', r.gone.length, 0);
+    const s2 = stub((u) => (u.includes('/R7179') ? 404 : 200));
+    const r2 = await sweepHostDirect([sym[0], { id: 'x', source: 'browser-assist', url: 'https://www.symbotic.com/about/team' }], { status: s2.status, sleep: nap });
+    ok('…and a 200 from a different kind of page does not count', r2.gone.length, 0);
+    ok('the address pattern blanks the ids', urlShape('https://careers-jobyaviation.icims.com/jobs/3726/job'), 'careers-jobyaviation.icims.com/jobs/*/job');
+  }
+  {
+    // A whole host 404ing with a 200 somewhere is still held when every one checked is dead.
+    const dead = Array.from({ length: 9 }, (_, i) => ({ job: { id: `m${i}` }, verdict: { status: 404 } }));
+    ok('every posting on a host 404ing is a URL bug: held', holdWholeHost(9, dead), true);
+  }
+}
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

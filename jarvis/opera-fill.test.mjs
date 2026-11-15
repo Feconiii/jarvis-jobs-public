@@ -78,3 +78,78 @@ test('read back says when a tab lost its message', async () => {
   const [line] = await readBack(cdp, [{ targetId: 'T', name: 'Riley' }]);
   assert.match(line, /^Riley: EMPTY/);
 });
+
+import { draftMarks, sentState, sessionRows, waitForSend, FRESH_DAYS } from './opera-fill.mjs';
+
+const DRAFT = `Hi Sam,
+
+I saw your post asking engineers to share their projects with you, so I wanted to send mine.
+
+I recently applied for the Manufacturing Engineer role in Austin:
+https://jobs.ashbyhq.com/fab2/71ad6a06
+
+I'm a senior Mechanical Engineering student at Lakeside graduating in May 2027.
+
+Portfolio: https://alexrivera.example
+Resume attached.`;
+
+test('draft marks are long prose lines, never links or the sign-off lines', () => {
+  const m = draftMarks(DRAFT);
+  assert.ok(m.length >= 2 && m.length <= 3);
+  for (const x of m) {
+    assert.ok(x.length >= 40 && x.length <= 60, x);
+    assert.doesNotMatch(x, /https?:|^Portfolio|^Resume/);
+  }
+});
+
+test('send states: waiting, sent, already sent, unclear', () => {
+  assert.equal(sentState({ inBox: true, onPage: 0 }), 'waiting');
+  assert.equal(sentState({ inBox: false, onPage: 2 }), 'sent');
+  assert.equal(sentState({ inBox: true, onPage: 1 }), 'already');
+  assert.equal(sentState({ inBox: false, onPage: 0 }), 'cleared');
+});
+
+test('a session takes recent drafts only, unless he names the person', () => {
+  const now = Date.parse('2026-10-23T12:00:00Z');
+  const rows = [
+    { name: 'New', created_at: '2026-10-20T00:00:00Z' },
+    { name: 'Old', created_at: '2026-09-15T00:00:00Z' },
+  ];
+  const s = sessionRows(rows, [], now);
+  assert.deepEqual(s.rows.map((r) => r.name), ['New']);
+  assert.deepEqual(s.stale.map((r) => r.name), ['Old']);
+  assert.equal(sessionRows(rows, ['old'], now).rows.length, 2);
+  assert.ok(FRESH_DAYS >= 14);
+});
+
+function sendCdp(states, { closeAfter = Infinity } = {}) {
+  let i = 0;
+  return {
+    send: async (method) => {
+      if (method === 'Target.getTargets') return { targetInfos: i >= closeAfter ? [] : [{ targetId: 'T' }] };
+      if (method === 'Target.attachToTarget') return { sessionId: 'S' };
+      if (method === 'Runtime.evaluate') return { result: { value: states[Math.min(i++, states.length - 1)] } };
+      return {};
+    },
+  };
+}
+
+test('a send is seen once the box empties and the text is in the thread', async () => {
+  const cdp = sendCdp([{ inBox: true, onPage: 0 }, { inBox: true, onPage: 0 }, { inBox: false, onPage: 3 }]);
+  assert.equal(await waitForSend(cdp, 'T', ['x'], { everyMs: 1 }), 'sent');
+});
+
+test('a closed tab is a skip, never a send', async () => {
+  const cdp = sendCdp([{ inBox: true, onPage: 0 }], { closeAfter: 2 });
+  assert.equal(await waitForSend(cdp, 'T', ['x'], { everyMs: 1 }), 'closed');
+});
+
+test('an emptied box with no message in the thread is not marked sent', async () => {
+  const cdp = sendCdp([{ inBox: false, onPage: 0 }]);
+  assert.equal(await waitForSend(cdp, 'T', ['x'], { everyMs: 1 }), 'cleared');
+});
+
+test('no answer within the limit is a timeout, not a send', async () => {
+  const cdp = sendCdp([{ inBox: true, onPage: 0 }]);
+  assert.equal(await waitForSend(cdp, 'T', ['x'], { everyMs: 1, timeoutMs: 30 }), 'timeout');
+});

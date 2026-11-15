@@ -20,7 +20,7 @@
 // importing the raw table here typed "A,B" into a box whenever a rule offered two.
 import { yesNo } from './_answers.mjs';
 import { wdValue } from './_workday-keys.mjs';
-import { chooseOption, resolveLabel } from './_form.mjs';
+import { chooseOption, resolveLabel, typedAnswer } from './_form.mjs';
 import { workEntries, educationEntries, hasAnyExperience } from './_experience.mjs';
 // `record` is aliased: this module already has a record() for review entries.
 import { time, record as recordMs } from './_timing.mjs';
@@ -554,6 +554,18 @@ export async function fieldManifest(page, ids) { // exported for workday-form.te
   }), ids).catch(() => ids.map((fid) => ({ fid, label: '', kind: 'text' }))));
 }
 
+/** His skills line as separate skills: a list, or "a, b; c" text (F-267). */
+export function skillList(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(/\s*[,;\n]\s*/);
+  const seen = new Set();
+  return raw.map((s) => String(s ?? '').trim()).filter((s) => {
+    const k = s.toLowerCase();
+    if (!s || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 async function fillCurrentPage(page, profile, result) {
   const done = new Set();
   // Two passes: whatever rendered late still gets filled and reported.
@@ -584,11 +596,31 @@ async function fillCurrentPage(page, profile, result) {
     let value = wdValue(fid, profile);
     if (value === null) continue; // intentionally left blank (e.g. extension)
     let review = false;
+    let typed = null;   // what a text box gets: the planner's typed form (F-1014)
     if (value === undefined) {
       const r = resolveLabel(label, profile);
-      if (r.kind === 'answer') { value = r.value; review = r.review; }
+      if (r.kind === 'answer') { value = r.value; review = r.review; typed = typedAnswer(r); }
       else if (r.kind === 'unknown') { if (label) result.needsInput.push({ label, why: 'no answer in apply-profile.yml' }); continue; }
       else continue;
+    }
+    // THE SKILLS BOX TAKES MANY ANSWERS, NOT ONE OF MANY (F-267). Every other
+    // list here is alternatives ("How Did You Hear": the first the tenant has),
+    // so the whole comma-joined skills line went into the search as one term
+    // and matched nothing. Each skill is searched and added on its own, the
+    // way the extension fills it; three misses in a row end the walk.
+    if (fid === 'formField-skills' && kind === 'prompt') {
+      const skills = skillList(value);
+      const added = [], missed = [];
+      let inARow = 0;
+      for (const s of skills) {
+        if (inARow >= 3 || added.length >= 12) break;
+        let r = { ok: false };
+        try { r = await time('wd:skill', () => pickPromptOnce(page, fid, s, [s])); } catch { /* one miss */ }
+        if (r.ok) { added.push(String(r.chosen || s).trim()); inARow = 0; } else { missed.push(s); inARow += 1; }
+      }
+      if (added.length) result.filled.push({ label: label || fid, value: added.join(', ') });
+      if (!added.length) result.needsInput.push({ label: label || fid, why: `no skill from apply-profile.yml was in this tenant's list (tried ${missed.slice(0, 5).join(', ')})` });
+      continue;
     }
     // A value may be a list of acceptable answers (see formField-source).
     const wantList = Array.isArray(value) ? value : [value];
@@ -609,7 +641,11 @@ async function fillCurrentPage(page, profile, result) {
         ok = p.ok; options = p.options;
         if (p.chosen) shownValue = String(p.chosen).trim();
       }
-      else ok = await time('wd:text', () => fillText(page, fid, wantList[0]));
+      else {
+        const text = typed ?? wantList[0];
+        ok = await time('wd:text', () => fillText(page, fid, text));
+        shownValue = String(text);
+      }
     } catch (e) {
       result.needsInput.push({ label: label || fid, why: `fill failed (${e.message.split('\n')[0].slice(0, 40)}) — do it manually` });
       continue;

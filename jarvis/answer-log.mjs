@@ -23,10 +23,11 @@
 //   node jarvis/answer-log.mjs --company intuitive   one employer
 //   node jarvis/answer-log.mjs --grep sponsor        questions matching a pattern
 //   node jarvis/answer-log.mjs --since 2026-09-24 --last 200
-import { chooseOption } from './apply/_form.mjs';
-import { appendFileSync, existsSync, readFileSync, renameSync, statSync, mkdirSync } from 'fs';
+import { chooseOption, WORK_AUTH_WORDS_RE } from './apply/_form.mjs';
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, mkdirSync, openSync, readSync, closeSync, writeFileSync } from 'fs';
 import path from 'path';
 import { STORE_DIR } from './store.mjs';
+import { isHarnessPage } from './harness-pages.mjs';
 
 export const ANSWER_LOG = path.join(STORE_DIR, 'answer-log.jsonl');
 const MAX_BYTES = 25 * 1024 * 1024;   // then rotated to answer-log.1.jsonl
@@ -37,10 +38,10 @@ const SEEN_MS = 30 * 60 * 1000;
 // fixture pages served at localhost:4300/__jarvis_fixture_*, through the live
 // dashboard, and every run wrote "First Name: Anna Maria Alex" rows into his log —
 // rows that the replay counts and the past-answer reuse could hand back.
-const LOCAL_PAGE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//i;
-
+// F-1029: the harness's own posting address too, and any row marked harness
+// (harness-pages.mjs holds the list the tests use).
 function append(rows, file = ANSWER_LOG) {
-  rows = rows.filter((r) => !LOCAL_PAGE.test(String(r?.pageUrl || '')));
+  rows = rows.filter((r) => !isHarnessPage(r?.pageUrl) && r?.harness !== true);
   if (!rows.length) return 0;
   try {
     mkdirSync(path.dirname(file), { recursive: true });
@@ -68,11 +69,21 @@ const host = (u) => { try { return new URL(String(u)).host; } catch { return '';
  * @returns (label, company) => { answer, company, at } | null
  */
 // Self-identification follows his profile's policy, never a past form (F-618).
-const PAST_NEVER = /\b(otp|one[- ]time|verification|passcode|password|captcha|security\s+code|pin)\b|\bdate\b|\bsignature\b|\bsign\s+(here|below)\b|\bupload\b|\bresume\b|\bcover\s+letter\b|\bveteran|\bdisabilit|\bgender\b|\brace\b|\bethnic|\bhispanic|\blatin[oax]\b|\bsexual\s+orientation|\bpronoun|\btransgender|\bsex\b/i;
-const PAST_ENTRY = /^(title|job title|company|employer|from|to|start|end|description|summary|experience summary|headline|location|office location|i currently (work|attend)[a-z ]*|school|school location|degree|field of study|major|city|state|country|country code|date completed|gpa|industry|suffix)\s*\*?$/i;
+// …AND SO DOES WORK AUTHORIZATION (his answer, 2026-11-04): "authorized to work
+// … without restrictions?" is No, and his 2026-09-26 Yes on Intuitive's form
+// must never come back as "your own earlier answer". Sponsorship, visa,
+// citizenship and authorization questions follow the rules in _answers.mjs only.
+const PAST_NEVER = new RegExp(`${/\b(otp|one[- ]time|verification|passcode|password|captcha|security\s+code|pin)\b|\bdate\b|\bsignature\b|\bsign\s+(here|below)\b|\bupload\b|\bresume\b|\bcover\s+letter\b|\bveteran|\bdisabilit|\bgender\b|\brace\b|\bethnic|\bhispanic|\blatin[oax]\b|\bsexual\s+orientation|\bpronoun|\btransgender|\bsex\b/.source}|${WORK_AUTH_WORDS_RE.source}`, 'i');
+// (Review, 2026-11-04: narrow on purpose. "I authorize a background check",
+// "any dietary or travel restrictions?" and "opt in to texts" are still his
+// to have answered from a past form.)
+// …and UKG's spellings of the same row boxes (F-800): "Company / Organization",
+// "Year (YYYY)", "From month", "To year", "School Name", "Level of Education /
+// Degree" were learned from UKG's own resume parse and put into every row.
+const PAST_ENTRY = /^(title|job title|company|employer|employer name|company\s*\/\s*organi[sz]ation|organi[sz]ation|from|to|start|end|((from|to|start|end)(\s+date)?\s+)?(month|year|day)(\s*\(\s*(mm|yyyy|dd)\s*\))?|description|summary|experience summary|headline|location|office location|i currently (work|attend)[a-z ]*|school|school name|school location|degree|level of education(\s*\/\s*degree)?|field of study|major|minor|city|state|country|country code|date completed|gpa|industry|suffix)\s*\*?$/i;
 const normQ = (s) => String(s || '').toLowerCase().replace(/[“”"'’]/g, '').replace(/\s+/g, ' ').replace(/^\s*\d+[a-z]?\)\s*\*?\s*/, '').trim();
 const normCo = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '').replace(/(inc|llc|corp|corporation|company|co|ltd|technologies|technology)$/, '');
-let PAST = { mtime: 0, stamp: '', index: null };
+let PAST = { file: '', rotStamp: '', size: 0, byQ: null, index: null };
 // Words a question is made of that do not change what it asks.
 const SHAPE_STOP = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'to', 'for', 'in', 'at', 'on', 'by', 'with', 'any', 'its', 'your', 'you', 'are', 'is', 'be', 'been', 'have', 'has', 'do', 'does', 'did', 'will', 'would', 'currently', 'please', 'this', 'that', 'our', 'us', 'we', 'company', 'organization', 'employer', 'select', 'one', 'following', 'which', 'if', 'as', 'from', 'all', 'apply', 'e', 'g', 'eg', 'ie', 'i']);
 const NEGATION = /\b(not|never|no|without|non|nor|unable|cannot|can't|don't|haven't|won't|isn't)\b/g;
@@ -91,37 +102,103 @@ export function shapeOf(q, company = '') {
   return { key: tokens.length >= 3 ? tokens.join(' ') : '', tokens, neg, nums };
 }
 const jaccard = (a, b) => { const A = new Set(a); const B = new Set(b); let n = 0; for (const x of A) if (B.has(x)) n += 1; return n / (A.size + B.size - n || 1); };
+/**
+ * The bytes appended to `file` since `from`, up to the last whole line.
+ * `end` is where the next read starts (a half-written last line waits);
+ * `rest` is that unterminated line. Cut at a newline byte, so a character
+ * of several bytes is never split.
+ */
+function readAppended(file, from, size) {
+  if (size <= from) return { text: '', end: from, rest: '' };
+  const fd = openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(size - from);
+    const n = readSync(fd, buf, 0, buf.length, from);
+    const got = buf.subarray(0, n);
+    const nl = got.lastIndexOf(0x0a);
+    if (nl < 0) return { text: '', end: from, rest: got.toString('utf-8') };
+    return { text: got.subarray(0, nl).toString('utf-8'), end: from + nl + 1, rest: got.subarray(nl + 1).toString('utf-8') };
+  } finally { closeSync(fd); }
+}
+
+/**
+ * HIS ANSWERS, READ ONCE (S1, 2026-11-06). Every plan appends to this log, so
+ * a cache keyed by its size was stale on every step and the whole log (15 MB,
+ * ~100-150 ms, more when the machine pages) was parsed again per /api/plan.
+ * Now only what was appended is read; a rotation reads both files again.
+ */
 export function pastAnswers({ file = ANSWER_LOG } = {}) {
-  let mtime = 0;
-  let stamp = '';
-  try { const st = statSync(file); mtime = st.mtimeMs; stamp = `${file}|${st.mtimeMs}|${st.size}`; } catch { return () => null; }
-  // Keyed by file and size too: two logs written in the same millisecond are two logs.
-  if (PAST.index && PAST.stamp === stamp) return PAST.index;
-  const byQ = new Map();   // normQ → Map(normCo → { answer, company, at })
-  for (const f of [file.replace(/\.jsonl$/, '.1.jsonl'), file]) {
-    if (!existsSync(f)) continue;
-    for (const line of readFileSync(f, 'utf-8').split('\n')) {
-      if (!line || !line.includes('"kind":"final"')) continue;
-      let r; try { r = JSON.parse(line); } catch { continue; }
-      if (!['you answered', 'changed'].includes(r.status)) continue;
+  let st;
+  try { st = statSync(file); } catch { return () => null; }
+  const rotated = file.replace(/\.jsonl$/, '.1.jsonl');
+  let rotStamp = '';
+  try { const r = statSync(rotated); rotStamp = `${r.ino}|${r.mtimeMs}|${r.size}`; } catch { /* none yet */ }
+  // THE SAME FILE, ONLY LONGER. The file id changes when the log is replaced
+  // (NTFS gives a new one on a rename over it or a delete and re-create; its
+  // birth time does not, Windows carries that over). A rewrite IN PLACE keeps
+  // the id, so the bytes just before where the last read stopped must still be
+  // the same bytes.
+  let same = !!PAST.index && PAST.file === file && PAST.rotStamp === rotStamp && PAST.ino === st.ino && st.size >= PAST.size;
+  if (same && st.size === PAST.size && st.mtimeMs === PAST.mtimeMs) return PAST.index;
+  if (same && tailBefore(file, PAST.size) !== PAST.tail) same = false;
+  const byQ = same ? PAST.byQ : new Map();   // normQ → Map(normCo → { answer, company, at })
+  let grew = false;
+  if (!same && existsSync(rotated)) {
+    for (const line of readFileSync(rotated, 'utf-8').split('\n')) if (takePast(byQ, line)) grew = true;
+  }
+  const { text, end, rest } = readAppended(file, same ? PAST.size : 0, st.size);
+  for (const line of text.split('\n')) if (takePast(byQ, line)) grew = true;
+  // A whole read takes an unterminated last line when it is a complete record,
+  // as the full parse always did; the offset stays before it, so the line is
+  // read again once it ends. A read of what was appended waits for its newline.
+  if (!same && rest && takePast(byQ, rest)) grew = true;
+  const tail = tailBefore(file, end);
+  if (same && !grew) { Object.assign(PAST, { size: end, mtimeMs: st.mtimeMs, tail }); return PAST.index; }
+  PAST = { file, rotStamp, ino: st.ino, mtimeMs: st.mtimeMs, size: end, tail, byQ, index: indexOf(byQ) };
+  return PAST.index;
+}
+
+/** The last bytes before `end`, to tell an appended log from one rewritten in place. */
+function tailBefore(file, end) {
+  if (end <= 0) return '';
+  const n = Math.min(64, end);
+  const fd = openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(n);
+    const got = readSync(fd, buf, 0, n, end - n);
+    return buf.subarray(0, got).toString('hex');
+  } finally { closeSync(fd); }
+}
+
+/** One log line into the index; true when it added an answer. Later lines win, as in a full read. */
+function takePast(byQ, line) {
+      if (!line || !line.includes('"kind":"final"')) return false;
+      let r; try { r = JSON.parse(line); } catch { return false; }
+      if (!['you answered', 'changed'].includes(r.status)) return false;
       // "CHANGED" WHEN JARVIS PRESSED is not evidence he chose it: the menu's
       // own pick differs in wording from the plan, and a WRONG pick became
       // "his answer". HP's veteran question, answered by the export rule on
       // 2026-09-26, was picked as "…a veteran, just not a protected veteran",
       // then reused the next day and landed on "…protected veterans" (F-618).
-      if (r.status === 'changed' && r.by !== 'you') continue;
+      if (r.status === 'changed' && r.by !== 'you') return false;
       const answer = String(r.answer ?? '').trim();
-      if (!answer || answer.length > 150 || answer === 'unchecked' || /file\(s\) attached/i.test(answer)) continue;
-      if (PAST_NEVER.test(String(r.label || '')) || /^(file|upload)$/i.test(String(r.type || ''))) continue;
+      if (!answer || answer.length > 150 || answer === 'unchecked' || /file\(s\) attached/i.test(answer)) return false;
+      if (PAST_NEVER.test(String(r.label || '')) || /^(file|upload)$/i.test(String(r.type || ''))) return false;
       // The rows of an employment or education entry belong to that entry
       // ("I currently work here" was ticked for one job, not for every job).
-      if (PAST_ENTRY.test(String(r.label || '').trim())) continue;
-      const q = normQ(r.label); if (q.length < 8) continue;
+      if (PAST_ENTRY.test(String(r.label || '').trim())) return false;
+      const q = normQ(r.label); if (q.length < 8) return false;
       const co = normCo(r.company || host(r.pageUrl));
       if (!byQ.has(q)) byQ.set(q, new Map());
-      byQ.get(q).set(co, { answer, company: r.company || host(r.pageUrl), at: r.at });
-    }
-  }
+      // A CORRECTION is his answer over the engine's (F-1036): the planner lets
+      // it beat a rule next time, for his history questions at this employer.
+      const corrected = r.status === 'changed' && r.by === 'you';
+      byQ.get(q).set(co, { answer, company: r.company || host(r.pageUrl), at: r.at, ...(corrected ? { corrected: true, engine: r.engine ?? null } : {}) });
+      return true;
+}
+
+/** The lookup over his answers: exact wording, then the same question's shape. */
+function indexOf(byQ) {
   // THE SAME QUESTION IN OTHER WORDS (step 3 of "how do we make this robust",
   // 2026-10-03). Exact wording found 11 of his 320 hand answers from his
   // others: the employer's name sits inside most questions ("…worked for John
@@ -180,7 +257,6 @@ export function pastAnswers({ file = ANSWER_LOG } = {}) {
     for (const p of pools) { const got = decideFrom(p, company, { shape: k }); if (got) return { ...got, fuzzy: true }; }
     return null;
   };
-  PAST = { mtime, stamp, index };
   return index;
 }
 
@@ -234,6 +310,8 @@ export function logReport({ pageUrl = '', job = null, body = {}, file = ANSWER_L
     reachedReview: !!body.reachedReview,
     left: list(body.unanswered).map((u) => (typeof u === 'string' ? u : `${u.label || ''}${u.why ? ` — ${u.why}` : ''}`).slice(0, 600)),
     stoppedBecause: String(body.stoppedBecause || body.note || '').slice(0, 300),
+    // Why no resume went on, as the opener saw it (F-896).
+    ...(body.resumeNote ? { resumeNote: String(body.resumeNote).slice(0, 400) } : {}),
   };
   return append([row], file);
 }
@@ -269,6 +347,8 @@ export function logRequest({ job = null, what = '', question = '', request = '',
 }
 
 const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const words = (s) => String(s ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join(' ');
+const hasWords = (hay, needle) => { const n = words(needle); return !!n && ` ${words(hay)} `.includes(` ${n} `); };
 
 /** The engine's last word on each question for this job or site, from the log's tail. */
 function plannedFor({ job, pageUrl, file, now }) {
@@ -356,6 +436,14 @@ export function logSnapshot({ pageUrl = '', job = null, stage = 'step', button =
     const same = (a, b) => { if (!choice) return false; try { return !!a && !!b && chooseOption(a, [b]) === 0; } catch { return false; } };
     if (!plan) status = 'not planned';
     else if (had != null && final && norm(final) === norm(had)) status = 'already there';
+    // AN UPLOAD HAS NO TEXT ANSWER (F-820). The file Jarvis attached read back
+    // as "1 file(s) attached" against an empty engine value and was logged
+    // "you answered" — 21 of 22 Ashby "his corrections" were Jarvis's own
+    // resume, and the platform's correction rate counted them.
+    else if (/^upload/.test(String(plan.action || ''))) status = final ? 'kept' : 'cleared';
+    // An untick (F-871: Paylocity's "Currently Working Here" on an ended job)
+    // is kept when the box went out unticked.
+    else if (plan.action === 'uncheck') status = !final || final === 'unchecked' ? 'kept' : 'changed';
     else if (plan.action === 'unknown' || plan.action === 'skip' || (!engine && plan.action !== 'check')) status = final && final !== 'unchecked' ? 'you answered' : 'left blank';
     // A ticked box reads as "checked" or, from an older extension, as its own
     // label; either is the tick the plan asked for.
@@ -364,7 +452,19 @@ export function logSnapshot({ pageUrl = '', job = null, stage = 'step', button =
     else if (plan.action === 'essay') status = norm(final).slice(0, 300) === norm(engine).slice(0, 300) ? 'kept' : 'edited';
     // A date part typed "06" reads back "6".
     else if (f.datePart && /^\d+$/.test(final) && /^\d+$/.test(engine)) status = Number(final) === Number(engine) ? 'kept' : 'changed';
-    else status = norm(final) === norm(engine) || norm(final).includes(norm(engine)) && norm(engine).length > 2 || same(engine, final) ? 'kept' : 'changed';
+    // A LOCATION BOX THAT SUGGESTS (F-821). Jarvis types "Springfield, Washington",
+    // Lever's lookup offers "Springfield, WA, USA" and Jarvis takes it: the same
+    // city in the list's words. Every Lever "correction" since 2026-09-30 was
+    // that row, read back and compared as text.
+    else if (/location|\bcity\b|where\b.{0,30}\b(live|located|based)/i.test(String(f.label || '')) && engine.includes(',')
+      && norm(final.split(',')[0]) === norm(engine.split(',')[0])) status = 'kept';
+    // …or any spelling on the plan's own ladder (F-822): Greenhouse's phone
+    // country reads back "+1", which is on the ladder the plan offered
+    // ("United States of America / United States / USA / +1").
+    // Containment is by WHOLE WORDS (F-822): squashed, "female" contains
+    // "male", and a Gender changed from Male to Female was logged as kept.
+    else status = norm(final) === norm(engine) || hasWords(final, engine) && norm(engine).length > 2 || same(engine, final)
+      || (choice && Array.isArray(plan.values) && plan.values.some((v) => norm(v) === norm(final))) ? 'kept' : 'changed';
     const sig = `final|${pageUrl}|${f.label}|${f.key || nth}|${f.datePart || ''}|${final}`;
     if (SEEN.has(sig) && now - SEEN.get(sig) < SEEN_MS) continue;
     SEEN.set(sig, now);
@@ -403,7 +503,47 @@ export function readLog({ company = '', grep = '', since = '', last = 40, change
   return rows.slice(-last);
 }
 
-if (process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\\/g, '/')}`) {
+/**
+ * THE HARNESS'S LINES, TAKEN OUT AGAIN (F-1029). Lines a test wrote through
+ * the live dashboard before its pages were refused (harness-pages.mjs): out of
+ * the answer log, its rotation and plans.jsonl. Every removed line is kept,
+ * with the file it came from, in `answer-log-pruned-<time>.jsonl`, so nothing
+ * is lost. Each file is replaced whole (a temp file, then a rename), so run it
+ * while the dashboard is stopped: a plan appended between the read and the
+ * rename would be lost.
+ */
+export function pruneHarness({ dir = STORE_DIR, write = false, now = new Date() } = {}) {
+  const names = ['answer-log.jsonl', 'answer-log.1.jsonl', 'plans.jsonl'];
+  const removed = []; const perFile = {};
+  const plans = [];
+  for (const name of names) {
+    const file = path.join(dir, name);
+    if (!existsSync(file)) continue;
+    const text = readFileSync(file, 'utf-8');
+    const nl = text.includes('\r\n') ? '\r\n' : '\n';
+    const lines = text.split(/\r?\n/);
+    const keep = []; let n = 0;
+    for (const line of lines) {
+      let r = null; if (line.trim()) { try { r = JSON.parse(line); } catch { r = null; } }
+      if (r && (isHarnessPage(r.pageUrl) || r.harness === true)) { removed.push({ file: name, line }); n += 1; } else keep.push(line);
+    }
+    perFile[name] = { lines: lines.filter((l) => l.trim()).length, removed: n };
+    if (n) plans.push({ file, body: keep.join(nl) });
+  }
+  const out = { removed: removed.length, perFile, savedTo: null };
+  if (!write || !removed.length) return out;
+  const stamp = now.toISOString().replace(/[:.]/g, '-');
+  out.savedTo = path.join(dir, `answer-log-pruned-${stamp}.jsonl`);
+  writeFileSync(out.savedTo, removed.map((x) => JSON.stringify(x)).join('\n') + '\n');   // first: the lines are safe before any file changes
+  for (const p of plans) { writeFileSync(`${p.file}.prune-tmp`, p.body); renameSync(`${p.file}.prune-tmp`, p.file); }
+  return out;
+}
+
+if (process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\\/g, '/')}` && process.argv.includes('--prune-harness')) {
+  const r = pruneHarness({ write: process.argv.includes('--write') });
+  for (const [f, c] of Object.entries(r.perFile)) console.log(`${f}: ${c.lines} lines, ${c.removed} from a test harness`);
+  console.log(r.savedTo ? `removed ${r.removed}; every one is kept in ${r.savedTo}` : `${r.removed} would be removed. Re-run with --write, with the dashboard stopped.`);
+} else if (process.argv[1] && import.meta.url === `file:///${process.argv[1].replace(/\\/g, '/')}`) {
   const arg = (f) => { const i = process.argv.indexOf(f); return i !== -1 ? process.argv[i + 1] : ''; };
   const rows = readLog({ company: arg('--company'), grep: arg('--grep'), since: arg('--since'), last: Number(arg('--last')) || 40, changes: process.argv.includes('--changes') });
   if (!rows.length) { console.log('no answers recorded that match'); process.exit(0); }

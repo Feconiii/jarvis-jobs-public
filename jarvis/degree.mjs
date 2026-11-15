@@ -101,7 +101,15 @@ const OPEN_ENDED_RE = new RegExp([
 
 // A requirement that offers a bachelor's route anywhere in it. "BS or MS in X"
 // is open to him; "Master's degree in X" is not.
-const BACHELOR_OK_RE = /(?:\b(?:bachelor'?s?|BS|BA|BSc|undergraduate|four[- ]year degree)\b|\bB\.\s?(?:Sc|S|A|Eng)(?![a-z]))/i;
+//
+// F-757: "Baccalaureate degree" and HP's "Four-year or Graduate Degree in
+// Manufacturing Engineering, Mechanical Engineering…" are bachelor's routes and
+// read as Master's-only. "post-baccalaureate experience" — the tail of
+// GlobalFoundries' Master's-degree requirements — is not one.
+const BACHELOR_PHRASES = String.raw`(?<!post[- ]?)\bbaccalaureate\b` +
+  String.raw`|\b(?:4|four)(?:\s*\(4\))?[- ]year\s+(?:(?:college|university|undergraduate|technical|academic|bachelor[’']?s?)\s+)?degree\b` +
+  String.raw`|\b(?:4|four)(?:\s*\(4\))?[- ]year\s+or\s+(?:graduate|advanced|higher)\s+degree\b`;
+const BACHELOR_OK_RE = new RegExp(String.raw`(?:\b(?:bachelor[’']?s?|BS|BA|BSc|undergraduate)\b|\bB\.\s?(?:Sc|S|A|Eng)(?![a-z])|` + BACHELOR_PHRASES + ')', 'i');
 
 // A requirement that names ONLY a graduate degree.
 const GRADUATE_ONLY_RE = /(?:\b(?:master'?s?|MS|MSc|PhD|doctorate|doctoral|graduate degree|advanced degree)\b|\bM\.\s?(?:S|Sc|Eng)\.(?!\w)|\bPh\.\s?D\.?(?!\w))/i;
@@ -112,16 +120,17 @@ const GRADUATE_ONLY_RE = /(?:\b(?:master'?s?|MS|MSc|PhD|doctorate|doctoral|gradu
 // nothing is. `aboveLevel` is the one question every level check asks.
 const LEVEL = /^(phd|doctor)/i.test(person.degreeLevel) ? 'phd'
   : /^master/i.test(person.degreeLevel) ? 'master' : 'bachelor';
-const MASTER_OK_RE = /(?:\b(?:bachelor'?s?|BS|BA|BSc|undergraduate|four[- ]year degree|master'?s?|MS|MSc|MA|MBA|MEng)\b|\bB\.\s?(?:Sc|S|A|Eng)(?![a-z])|\bM\.\s?(?:S|Sc|A|Eng|B\.?A)\.?(?![a-z]))/i;
+const MASTER_OK_RE = new RegExp(String.raw`(?:\b(?:bachelor[’']?s?|BS|BA|BSc|undergraduate|master'?s?|MS|MSc|MA|MBA|MEng)\b|\bB\.\s?(?:Sc|S|A|Eng)(?![a-z])|\bM\.\s?(?:S|Sc|A|Eng|B\.?A)\.?(?![a-z])|` + BACHELOR_PHRASES + ')', 'i');
 const DOCTORATE_ONLY_RE = /(?:\b(?:PhD|doctorate|doctoral)\b|\bPh\.\s?D\.?(?!\w))/i;
 /** A route at or below his level, somewhere in `s`. */
 const LEVEL_OK_RE = LEVEL === 'master' ? MASTER_OK_RE : BACHELOR_OK_RE;
 // Words that look like a degree token and are not one — "MS Office", "MS Excel"
 // — blanked before the level is read. The preset's (`notADegree`); the finance
-// one sets it because nearly every finance posting asks for MS Excel. The
-// hardware preset leaves it null so his screening is unchanged (measured
-// 2026-10-16: it would clear 7 of 20,000 stored rows for him, every one a
-// false level block — turning it on there is his call).
+// one set it first because nearly every finance posting asks for MS Excel. The
+// hardware preset sets it too since 2026-10-18 (F-755): every stored row it
+// clears for him was a false level block ("Experience with MS Office, in
+// particular MS Excel"; "Developer (CRM MS Dynamics)"). A preset may still
+// leave it null to blank nothing.
 const NOT_A_DEGREE = screen.notADegree ? new RegExp(screen.notADegree.source, screen.notADegree.flags.replace('g', '') + 'g') : null;
 /** Does `s` ask only for a degree above the one he will hold? */
 function aboveLevel(s) {

@@ -52,9 +52,11 @@
 // is minutes per hundred. Run it periodically rather than waiting on it; the
 // sweep is idempotent and resumes where it left off.
 
-import { query, updateJob, getJob, db as storeDb } from './store.mjs';
-import { readPicksAndBoards, readDeckAndBoards, unlistedPicks, UNLISTED_DAYS } from './unlisted.mjs';
-import { checkLivenessViaApi, isAtsPosting } from '../liveness-api.mjs';
+import { query, updateJob, getJob, db as storeDb, STORE_DIR } from './store.mjs';
+import { readPicksAndBoards, readDeckAndBoards, readGonePicksAndBoards, readGoneListedAgain, revivedPicks, rotateGonePicks, unlistedPicks, UNLISTED_DAYS } from './unlisted.mjs';
+import { readFileSync, writeFileSync } from 'fs';
+import path from 'path';
+import { checkLivenessViaApi, isAtsPosting, classifyDirectStatus, directStatus } from '../liveness-api.mjs';
 import { chromium } from 'playwright';
 import { checkUrlLiveness, newLivenessPage } from '../liveness-browser.mjs';
 
@@ -158,6 +160,80 @@ function isDefinitelyGone(verdict) {
  */
 export function isSuspectWholeSource(checked, dead) {
   return checked >= 8 && dead === checked;
+}
+
+const hostOf = (url) => { try { return new URL(url).host.toLowerCase(); } catch { return ''; } };
+
+/** A posting URL with its id segments blanked: /jobs/3726/job → /jobs/* /job, per host. */
+export function urlShape(url) {
+  try {
+    const u = new URL(url);
+    return `${u.host.toLowerCase()}${u.pathname.split('/').map((seg) => (/\d/.test(seg) ? '*' : seg.toLowerCase())).join('/')}`;
+  } catch { return ''; }
+}
+
+/**
+ * Rows no API answers for and a browser never reaches unattended (F-762):
+ * `source: browser-assist` (Tesla, Joby's iCIMS board, Symbotic's own site).
+ * Picked round-robin across hosts, so Tesla's 8,000 rows cannot crowd out
+ * Joby's and Symbotic's, stalest first within each host.
+ */
+export function pickDirectRows(rows, limit) {
+  const byHost = new Map();
+  for (const j of rows) {
+    if (j.source !== 'browser-assist' || isAtsPosting(j.url)) continue;
+    const h = hostOf(j.url);
+    if (!h) continue;
+    if (!byHost.has(h)) byHost.set(h, []);
+    byHost.get(h).push(j);
+  }
+  const lists = [...byHost.values()];
+  const out = [];
+  for (let i = 0; out.length < limit && lists.some((l) => i < l.length); i++) {
+    for (const l of lists) if (i < l.length && out.length < limit) out.push(l[i]);
+  }
+  return out;
+}
+
+/**
+ * The direct rung over one host's rows (F-762). One request at a time, `gapMs`
+ * apart; the first refusal (403, 429, 5xx, no answer) ends that host for the
+ * run — Tesla answers every server request 403 and must be asked once, not
+ * eight thousand times. A 404 counts only when another posting of the SAME
+ * URL SHAPE on that host answered 200 in the same pass: then the address
+ * pattern still works and this requisition is the one that went. A front page
+ * answering 200 is not enough — Symbotic's own careers pages 404 R6971, which
+ * its Workday board still lists (checked 2026-10-18).
+ *
+ * @returns {Promise<{gone: {job, verdict}[], asked: number, undecided: number, refusedAt: number|null}>}
+ */
+export async function sweepHostDirect(jobs, { status = directStatus, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), gapMs = 1000 } = {}) {
+  const seen = [];
+  let refusedAt = null;
+  for (let i = 0; i < jobs.length; i++) {
+    if (i) await sleep(gapMs);
+    const s = await status(jobs[i].url);
+    if (classifyDirectStatus(s)?.refused) { refusedAt = s; break; }
+    seen.push({ job: jobs[i], s });
+  }
+  const liveShapes = new Set(seen.filter((x) => x.s === 200).map((x) => urlShape(x.job.url)));
+  const gone = [];
+  for (const { job, s } of seen) {
+    const v = classifyDirectStatus(s, { hostAnswers: liveShapes.has(urlShape(job.url)) });
+    if (v?.result === 'expired') gone.push({ job, verdict: v });
+  }
+  return { gone, asked: seen.length, undecided: jobs.length - gone.length, refusedAt };
+}
+
+/**
+ * The whole-host guard for the direct rung. A host where EVERY posting checked
+ * 404s is a URL bug until shown otherwise (the 123 SmartRecruiters postings);
+ * a host answering 410 for every one is a board that was shut down on purpose
+ * (Joby's iCIMS tenant), and that is retired.
+ */
+export function holdWholeHost(checked, gone) {
+  if (!isSuspectWholeSource(checked, gone.length)) return false;
+  return gone.some((g) => g.verdict.status !== 410);
 }
 
 async function main() {
@@ -315,6 +391,49 @@ async function main() {
     console.log('');
   }
 
+  // THE DIRECT RUNG (F-762): browser-assist rows, one plain GET each, only
+  // when no browser runs (with --browser they went through the page load
+  // above). A 410 retires; a 404 retires only beside a 200 from the same host;
+  // a 403 retires nothing and ends that host for the run.
+  if (!opts.browser) {
+    const direct = pickDirectRows(rows, opts.limit);
+    if (direct.length) {
+      const byHost = new Map();
+      for (const j of direct) {
+        const h = hostOf(j.url);
+        if (!byHost.has(h)) byHost.set(h, []);
+        byHost.get(h).push(j);
+      }
+      console.log(`Direct check of ${direct.length} browser-assist posting(s) on ${byHost.size} host(s) — 410 is gone, 404 only beside a 200 from the same host, a 403 decides nothing.`);
+      const hosts = [...byHost.entries()];
+      const lanes = Math.max(1, Math.min(opts.concurrency, hosts.length));
+      const results = [];
+      await Promise.all(Array.from({ length: lanes }, async () => {
+        for (;;) {
+          const next = hosts.shift();
+          if (!next) return;
+          const [h, jobs] = next;
+          const r = await sweepHostDirect(jobs).catch(() => ({ gone: [], undecided: jobs.length, refusedAt: null }));
+          results.push({ h, jobs, ...r });
+        }
+      }));
+      for (const r of results) {
+        const checkedHere = r.jobs.length;
+        if (r.refusedAt !== null) console.log(`   ${r.h}: answered ${r.refusedAt || 'nothing'} — not asked again this run; nothing retired from a refusal.`);
+        if (holdWholeHost(r.asked ?? 0, r.gone)) {
+          console.log(`   ${r.h}: every posting 404s (${r.gone.length}/${checkedHere}) — a URL bug until shown otherwise; left alone.`);
+          unknown += checkedHere;
+          continue;
+        }
+        const already = new Set(toWrite.map((j) => j.id));
+        for (const g of r.gone) if (!already.has(g.job.id)) toWrite.push(g.job);
+        unknown += checkedHere - r.gone.length;
+        if (r.gone.length) console.log(`   ${r.h}: ${r.gone.length} of ${checkedHere} gone (${[...new Set(r.gone.map((g) => g.verdict.status))].join('/')})`);
+      }
+      console.log('');
+    }
+  }
+
   // THE BOARD STOPPED LISTING IT (jarvis/unlisted.mjs, 2026-09-24): for the
   // picks no API can answer for, absence from a freshly read board is the
   // evidence that is left. The deck too since 2026-10-16 (see unlisted.mjs).
@@ -361,6 +480,50 @@ async function main() {
     }
     if (retired.length > 40) console.log(`  … and ${retired.length - 40} more`);
     console.log('');
+  }
+
+  // HIS GONE PICKS, ASKED AGAIN (2026-11-03). Each --picks run rechecks the
+  // picks already marked gone; one the ATS calls active, and its own board
+  // still lists, comes back. The rest stay closed (shown folded on the
+  // dashboard, never deleted). Nothing is reported unless something changed.
+  let revived = [];
+  // The deck sweep asks the same of every other row its board listed again.
+  if (!opts.company && !opts.source) {
+    try {
+      const { picks: gonePicks, boards } = (opts.picks ? readGonePicksAndBoards : readGoneListedAgain)(storeDb());
+      const checkedFile = path.join(STORE_DIR, opts.picks ? 'gone-recheck.json' : 'gone-recheck-deck.json');
+      let checked = {};
+      try { checked = JSON.parse(readFileSync(checkedFile, 'utf8')); } catch { /* first run */ }
+      const ask = rotateGonePicks(gonePicks.filter((p) => isAtsPosting(p.url)), checked, opts.limit);
+      const verdicts = new Map();
+      const q = [...ask];
+      await Promise.all(Array.from({ length: Math.max(1, Math.min(3, opts.concurrency)) }, async () => {
+        for (let p; (p = q.shift());) verdicts.set(p.id, await checkLivenessViaApi(p.url).catch(() => null));
+      }));
+      if (!opts.dryRun) {
+        const at = new Date().toISOString();
+        for (const p of ask) if (verdicts.get(p.id)) checked[p.id] = at;
+        const live = new Set(gonePicks.map((p) => p.id));
+        for (const id of Object.keys(checked)) if (!live.has(id)) delete checked[id];
+        try { writeFileSync(checkedFile, JSON.stringify(checked)); } catch { /* next run starts over */ }
+      }
+      const back = new Set(revivedPicks(ask, boards, verdicts));
+      revived = ask.filter((p) => back.has(p.id));
+      if (!opts.dryRun) {
+        for (const p of revived) {
+          for (let tries = 0; ; tries += 1) {
+            try { updateJob(p.id, { goneAt: null }, { rederive: true }); break; } catch (e) {
+              if (e?.errcode !== 5 || tries >= 20) throw e;
+              await new Promise((r) => setTimeout(r, 15000));
+            }
+          }
+        }
+      }
+      console.log(`Rechecked ${ask.length} of ${gonePicks.length} ${opts.picks ? "pick(s) already marked gone" : "closed row(s) their board listed again"}`
+        + `${revived.length ? `: ${revived.length} open again` : ': all still closed or undecided'}.`);
+      for (const p of revived) console.log(`  · back: ${p.company} — ${String(p.title).slice(0, 60)}`);
+      console.log('');
+    } catch (e) { console.log(`(gone-pick recheck skipped: ${e.message})`); }
   }
 
   const checked = gone + active + unknown;

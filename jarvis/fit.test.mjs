@@ -86,6 +86,14 @@ check('skills cannot be judged without a description',
 const read = scoreFit(job({ title: 'Manufacturing Engineer', description: LONG + ' solidworks cnc' }), P);
 checkTrue('a fully-read posting outranks its title-only twin', read.score > titleOnly.score);
 
+// An unread posting whose title is one of his target roles stays high: Lam
+// Research "Mechatronics Engineer 2" was 81 before the discount and shown as
+// 69 (2026-10-30). Only a small cut for a target title, the full one otherwise.
+const mechatronics = scoreFit(job({ title: 'Mechatronics Engineer 2', description: '' }), P);
+checkTrue('an unread target-title posting stays in the strong band', mechatronics.score >= 75);
+const vague = scoreFit(job({ title: 'Engineer 2', description: '' }), P);
+checkTrue('an unread generic title still takes the full discount', vague.score < mechatronics.score);
+
 // A hard block is never folded into the number — it is stated.
 const blocked = scoreFit(job({
   title: 'Manufacturing Engineer',
@@ -94,6 +102,13 @@ const blocked = scoreFit(job({
 }), P);
 check('blocked jobs get the blocked band', blocked.band, 'blocked');
 check('the blocker reason is surfaced verbatim', blocked.blockers, ['ITAR: requires US person status']);
+// F-773: with the posting's own sentence beside it, so the panel can quote it.
+const quoted = scoreFit(job({
+  title: 'Manufacturing Engineer',
+  triage: { flags: { hardBlock: true }, experience: { level: 'entry', years: null },
+    visa: { block: { reason: 'No sponsorship', quote: 'We will not sponsor individuals for employment visas, now or in the future.' } }, locationBucket: 'us' },
+}), P);
+check('…and the posting\'s sentence travels with it', quoted.blockers, ['No sponsorship — "We will not sponsor individuals for employment visas, now or in the future."']);
 
 // F-438. Applied Intuition "Mechanical Engineer - New Grad (December 2026)"
 // carried f_grad_mismatch = 1 AND fit_score 99 / strong / not blocked at the
@@ -215,6 +230,17 @@ check('Cupertino is in the Bay Area hub', dim(touch, 'location').points, 6);
 const yearsBody = 'Minimum requirement of a bachelors degree and 5+ years of experience. ' + LONG;
 check('…but a degree with years stated is not that', dim(scoreFit(job({ title: 'Automation Engineer', description: yearsBody }), P), 'seniority').points === 17, false);
 check('"automation" with no engineer in the title is not a primary role', dim(scoreFit(job({ title: 'Automation Technician' }), P), 'role').points === 25, false);
+
+console.log('\n🧪 fit: robot / robotic / humanoid / manipulation titles are the robotics discipline (F-1044)');
+for (const title of ['Robot Field Engineer', 'Robotic System Integration Engineer', 'Humanoid Engineer, Manipulation']) {
+  check(`"${title}" is a primary discipline, not a weak signal`, dim(scoreFit(job({ title }), P), 'role').points, 25);
+}
+check('…but still only in an engineer\'s title', dim(scoreFit(job({ title: 'Robot Operator' }), P), 'role').points === 25, false);
+for (const title of ['Robot Framework Test Engineer', 'Robotic Process Automation (RPA) Engineer', 'RPA Automation Engineer', 'Data Manipulation Engineer']) {
+  check(`"${title}" is another line of work, not robotics`, dim(scoreFit(job({ title, description: 'Python scripts and reports for the finance team. ' + LONG }), P), 'role').points < 25, true);
+}
+const optimus = 'Train manipulation policies for the humanoid robot. Robotics hardware, grasping, teleoperation. ' + LONG;
+check('"Manipulation" in a robotics posting is the robotics discipline (Tesla Optimus)', dim(scoreFit(job({ title: 'AI Engineer, Manipulation, Optimus', company: 'Tesla', description: optimus }), P), 'role').points, 25);
 
 console.log('\n🧪 fit: real profile loads');
 const real = loadProfile();

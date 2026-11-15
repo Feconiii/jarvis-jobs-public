@@ -32,7 +32,7 @@
    */
   function render(report = {}) {
     const {
-      filled = 0, checked = 0, holdsResume = false, sawUpload = false, unanswered = [], kept = [], written = [],
+      filled = 0, checked = 0, holdsResume = false, sawUpload = false, unanswered = [], optionalBlank = [], kept = [], written = [],
       readForm = null, steps = 0, stoppedBecause = '', resumeNote = '', staleExtension = '', appliedBefore = null,
       armed = false, waiting = false,
     } = report;
@@ -96,6 +96,11 @@
         : (filled || 0) + (checked || 0) === 0
           ? '<div style="margin-top:9px;color:#8b949e">the form here was already answered — nothing to add</div>'
           : '<div style="margin-top:9px;color:#7ee787">nothing left unanswered</div>');
+    }
+    // OPTIONAL AND BLANK (F-803): shown, so he can add one if he wants, and
+    // never counted as left for him.
+    if (optionalBlank.length) {
+      rows.push(`<div style="margin-top:9px;color:#8b949e">optional, left blank: ${optionalBlank.slice(0, 8).map((u) => esc(String(u)).slice(0, 60)).join(' · ')}${optionalBlank.length > 8 ? ` · …and ${optionalBlank.length - 8} more` : ''}</div>`);
     }
     if (kept.length) {
       rows.push(`<div style="margin-top:9px;color:#8b949e">${kept.length} left as you had ${kept.length === 1 ? 'it' : 'them'}:</div>`);

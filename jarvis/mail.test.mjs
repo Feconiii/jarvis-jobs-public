@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 
 const dir = mkdtempSync(path.join(tmpdir(), 'jarvis-mail-'));
 process.env.JARVIS_DATA_DIR = dir;
@@ -42,6 +43,11 @@ test('F-739: an unfinished application is not a receipt, and "progress with othe
   assert.equal(c('Thank you for Applying to Amazon!', "We've received your application for the Automation Engineer (ID: 10482034) position."), 'received', 'the real receipt still counts');
   assert.equal(c('Amazon application: Status update', 'Thank you for your application for the position of Cloud Hardware Development Engineer (ID: 10530353). After careful consideration and review of your application, we have decided to progress with other candidates for this role.'), 'rejection');
   assert.equal(c('Your recent job application for Mechanical Design Engineer - 40738', 'Dear Anna Maria Alex, We received your job application for Mechanical Design Engineer - 40738. We will review your application and get back to you soon.'), 'received', 'Nokia / Ralliant on Oracle');
+  // Apple's receipt, 2026-10-16 (F-926): no "application" anywhere in it.
+  assert.equal(c('Thanks for your interest in Apple.', "We just received your resume for the following role: Tools and Automation Mechatronics Engineer 200687527. If your skills and experience are a match, you'll hear from one of our recruiters. Apple Worldwide Recruiting"), 'received', 'Apple');
+  assert.match(M.SEARCH, /\bresume\b/, 'and the Gmail search reaches it');
+  assert.equal(c('Zimmer Biomet Careers Account Created', 'Hello, Your Zimmer Biomet Career account has been successfully created. Thank you for your interest in Zimmer Biomet.'), null, 'a new account is not an application');
+  assert.equal(c('Welcome! Thanks for creating an account!', 'Thanks for your interest in an exciting and rewarding career with Veeco! Your account has been created.'), null, 'Veeco');
   // Tesla's interview email, 2026-10-13: the card never reached Interview.
   assert.equal(c('[TESLA] 1st Interview Confirmation (Please Confirm)', 'Hi Alex, Congratulations on making it to the next round! Confirming your interview below for the Manufacturing Engineer, Manufacturing Development role.'), 'interview');
 });
@@ -203,6 +209,36 @@ test('applyMessages moves the cards, oldest email first, remembers every email, 
   assert.equal(M.undoEvent('m3', store, { dbPath }), null, 'and only once');
 });
 
+test('week review F2: undo puts a card back only while it still holds what the email set, with its earlier date', () => {
+  const db3 = path.join(dir, 'undo.db');
+  const jobs = [{ id: 'u1', company: 'Sunday', title: 'Mechanical Engineer', status: 'interested' }, { id: 'u2', company: 'Micron', title: 'Process Engineer', status: 'applied' }];
+  const status = new Map(jobs.map((j) => [j.id, j.status]));
+  const at = new Map([['u1', '2026-09-01T09:00:00.000Z'], ['u2', '2026-09-02T09:00:00.000Z']]);
+  const store = {
+    jobs: () => jobs.map((j) => ({ ...j, status: status.get(j.id) })),
+    getStatus: (id) => status.get(id),
+    statusAt: (id) => at.get(id),
+    setStatus: (id, s, { changedAt } = {}) => { status.set(id, s); at.set(id, changedAt || 'NOW'); },
+  };
+  M.applyMessages([
+    { id: 'f2a', date: '2026-09-05T10:00:00Z', fromName: 'Sunday', fromEmail: 'hiring@sunday.ai', subject: 'Thank you for applying to Sunday', body: 'We have received your application.' },
+    { id: 'f2b', date: '2026-09-06T10:00:00Z', fromName: 'Micron Talent Acquisition', fromEmail: 'no-reply@myworkday.com', subject: 'Micron: schedule your interview', body: 'We would like to schedule an interview.' },
+  ], store, { dbPath: db3 });
+  assert.equal(status.get('u1'), 'applied');
+  assert.equal(status.get('u2'), 'interview');
+  // He moved the Sunday card on by hand after the email: undo must not drag it back.
+  status.set('u1', 'interview'); at.set('u1', '2026-09-10T09:00:00.000Z');
+  const stale = M.undoEvent('f2a', store, { dbPath: db3 });
+  assert.equal(status.get('u1'), 'interview', 'a card that moved on since the email stays where he put it');
+  assert.equal(at.get('u1'), '2026-09-10T09:00:00.000Z', 'and keeps its date');
+  assert.ok(stale?.stale, `the answer says why nothing changed: ${JSON.stringify(stale)}`);
+  // The Micron card still holds what its email set: undo puts it back, with the date it had before.
+  const done = M.undoEvent('f2b', store, { dbPath: db3 });
+  assert.ok(done && !done.stale);
+  assert.equal(status.get('u2'), 'applied');
+  assert.equal(at.get('u2'), '2026-09-02T09:00:00.000Z', 'the earlier status date, not today');
+});
+
 test('A RECEIPT THAT NAMES NO ROLE goes to the application he filled just before it — Peak Energy and OpenAI, 2026-09-24', () => {
   const db2 = path.join(dir, 'fill.db');
   const jobs = [
@@ -305,6 +341,160 @@ test('syncMail: token refresh, search, fetch, apply — against a fake Gmail', a
   const failed = await M.syncMail(store, { dir, dbPath, fetchImpl: fakeGmail });
   assert.equal(failed.ok, false);
   assert.match(failed.error, /not connected/);
+});
+
+test('MICRON AND J&J REJECTIONS FIND THEIR CARDS (F-785, 2026-10-21)', () => {
+  const micron = (id, title, loc, n) => ({ id, company: 'Micron Technology', title, status: 'applied', location: loc, url: `https://careers.micron.com/careers/job/${n}-x?domain=micron.com` });
+  const jobs = [
+    micron('pcvd', 'New College Grad Pcvd Process Engineer Boise Idaho United States Of America', 'Boise, ID,US, US', '44611111'),
+    micron('proc', 'Process Engineer Boise Idaho United States Of America', 'Boise, ID,US, US', '44622222'),
+    micron('etchM', 'New College Grad Dry Etch Process Engineer Manassas Virginia United States Of America', 'Manassas, VA,US, US', '44543481'),
+    micron('etchB', 'New College Grad Dry Etch Process Engineer Boise Idaho United States Of America', 'Boise, ID,US, US', '44543999'),
+    { id: 'jj', company: 'Johnson & Johnson', title: 'Operations Process Engineer (Capital System)', status: 'interested', location: 'Raritan, NJ', url: 'https://jj.wd5.myworkdayjobs.com/x/job/R-098612' },
+    { id: 'jci', company: 'Johnson Controls', title: 'Mechanical Engineer', status: 'applied', location: '', url: '' },
+  ];
+  // Micron's own Workday mailbox, no "Micron" in sender name or subject; a JR
+  // number that is not the careers-site id on the card.
+  const rej = (role, jr) => ({ fromName: '', fromEmail: 'micron@myworkday.com', subject: `Application Status Update for ${role}-JR${jr} -`,
+    body: `Dear Alex, Thank you very much for applying for ${role} role at Micron. At this time, we regret to inform you that we've decided not to move forward with your application.` });
+  assert.equal(M.matchMessage(rej('New College Grad - PCVD Process Engineer', '112000'), jobs).jobId, 'pcvd');
+  assert.equal(M.matchMessage(rej('Process Engineer', '106732'), jobs).jobId, 'proc');
+  assert.ok(M.matchMessage(rej('New College Grad - Dry Etch Process Engineer', '107194'), jobs).unsure, 'two locations, the email names neither: unsure');
+  // A tenant mailbox that is no tracked company names nobody.
+  assert.equal(M.matchMessage({ ...rej('Process Engineer', '1'), fromEmail: 'send-only.sec@myworkday.com', body: '' }, jobs), null);
+
+  const jj = M.matchMessage({ fromName: 'Workday Notification', fromEmail: 'jj@myworkday.com',
+    subject: 'You were not selected for Operations Process Engineer (Capital System) at Johnson & Johnson',
+    body: 'Hello Alex, We are writing to let you know that you were not selected for the role of Operations Process Engineer (Capital System) R-098612.' }, jobs);
+  assert.equal(jj.jobId, 'jj', '"&" in the subject is the "and" in the name');
+});
+
+test('AN EMAIL SKIPPED ONCE IS READ ON THE NEXT CHECK (F-784, 2026-10-21)', async () => {
+  // J&J's "not selected" was never read: each check searched only since the
+  // last one, so a message whose fetch failed once was gone for good.
+  const dir = mkdtempSync(path.join(tmpdir(), 'mail-window-'));
+  writeFileSync(path.join(dir, 'gmail-client.json'), JSON.stringify({ client_id: 'id', client_secret: 's' }));
+  writeFileSync(path.join(dir, 'gmail-token.json'), JSON.stringify({ refresh_token: 'RT' }));
+  const enc = (s) => Buffer.from(s).toString('base64url');
+  const ok = (body) => ({ ok: true, json: async () => body });
+  let flaky = true; const searches = []; let fetched = 0;
+  const gmail = async (u) => {
+    const s = String(u);
+    if (s.includes('oauth2.googleapis.com/token')) return ok({ access_token: 'AT' });
+    if (s.includes('/messages?')) { searches.push(decodeURIComponent(s)); return ok({ messages: s.includes('linkedin') ? [] : [{ id: 'old1' }] }); }
+    if (s.includes('/messages/old1')) {
+      fetched++;
+      if (flaky) return { ok: false, status: 500, json: async () => ({}) };
+      return ok({
+        id: 'old1', internalDate: String(Date.parse('2026-09-14T09:00:00Z')), snippet: '',
+        payload: { headers: [{ name: 'From', value: '"Sunday Recruiting" <talent@sunday.ai>' }, { name: 'Subject', value: 'Interview with Sunday' }],
+          mimeType: 'text/plain', body: { data: enc('Hi Alex, we would like to schedule a phone interview this week.') } },
+      });
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+  const dbFile = path.join(dir, 'x.db');
+  assert.equal((await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } })).ok, true);
+  assert.equal(store.status.get('sun1'), 'applied', 'the fetch failed, nothing moved');
+  flaky = false;
+  await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.equal(store.status.get('sun1'), 'interview', 'the second check read what the first one missed');
+  const days = (q) => (Date.now() / 1000 - Number(q.match(/after:(\d+)/)[1])) / 86400;
+  assert.ok(days(searches.at(-2)) > 100, 'the second check searched the whole window, not since the first');
+  const before = fetched;
+  await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.equal(fetched, before, 'a message already read is not fetched again');
+});
+
+test('THE F-784/F-785 CHANGES DO NOT MISREAD OTHER MAIL (review, 2026-10-22)', () => {
+  // Without "the", the company is not the role.
+  assert.equal(M.roleNamed({ body: 'Thank you for applying to Acme Robotics for the Mechanical Engineer position.' }), 'Mechanical Engineer');
+  assert.equal(M.roleNamed({ body: 'Thanks for applying for New College Grad - PCVD Process Engineer role at Micron.' }), 'New College Grad - PCVD Process Engineer');
+  const acme = [{ id: 'a', company: 'Acme Robotics', title: 'Mechanical Engineer', status: 'applied', location: '', url: '' }];
+  assert.equal(M.matchMessage({ fromName: 'Acme Robotics', fromEmail: 'jobs@acme.com', subject: 'Your application',
+    body: 'Thank you for applying to Acme Robotics for the Mechanical Engineer position.' }, acme).jobId, 'a');
+
+  // A bare id of another length is still another requisition (Amazon runs 7 and 8 digits).
+  const amazon = [
+    { id: 'a', company: 'Amazon', title: 'Mechanical Engineer I', status: 'applied', location: '', url: 'https://www.amazon.jobs/en/jobs/10418150/x' },
+    { id: 'b', company: 'Amazon', title: 'Controls Engineer', status: 'applied', location: '', url: 'https://www.amazon.jobs/en/jobs/10418151/y' },
+  ];
+  const r = M.matchMessage({ fromName: 'Amazon', fromEmail: 'no-reply@amazon.com', subject: 'Update on your application',
+    body: 'Thank you for your interest in the Mechanical Engineer I (ID: 2934567) position. We have decided not to move forward.' }, amazon);
+  assert.ok(r.unsure, 'another requisition with the same title stays unsure');
+  // …and a prefixed id still counts against a Workday card whose link uses it.
+  const wd = [
+    { id: 'w1', company: 'Acme', title: 'Process Engineer', status: 'applied', location: '', url: 'https://acme.wd5.myworkdayjobs.com/x/job/Process-Engineer_R2627688' },
+    { id: 'w2', company: 'Acme', title: 'Test Engineer', status: 'applied', location: '', url: 'https://acme.wd5.myworkdayjobs.com/x/job/Test-Engineer_R2627699' },
+  ];
+  assert.ok(M.matchMessage({ fromName: 'Acme', fromEmail: 'acme@myworkday.com', subject: 'Process Engineer - R2999999',
+    body: 'Thank you for applying for the Process Engineer position.' }, wd).unsure);
+});
+
+test('AN EMAIL OLDER THAN THE POSTING NEVER MOVES IT, AND AN UNPLACED ONE IS PLACED LATER (review, 2026-10-22)', async () => {
+  const dbPath = path.join(mkdtempSync(path.join(tmpdir(), 'mail-pend-')), 'x.db');
+  const card = { id: 'c1', company: 'Sunday', title: 'Mechanical Engineer', status: 'applied', location: '', url: '', firstSeen: '2026-10-10T00:00:00Z' };
+  const store = fakeStore([card]);
+  const old = { id: 'o1', date: '2026-07-01T10:00:00Z', fromName: 'Sunday', fromEmail: 'hiring@sunday.ai', subject: 'Your application to Sunday', body: 'Unfortunately we will not be moving forward with your application.' };
+  M.applyMessages([old], store, { dbPath });
+  assert.equal(store.status.get('c1'), 'applied', 'a July rejection is about an earlier application');
+
+  // A receipt that came before he put the card on his board: placed once it is there.
+  const later = fakeStore([]);
+  const rcpt = { id: 'r1', date: '2026-10-12T10:00:00Z', fromName: 'Sunday', fromEmail: 'hiring@sunday.ai', subject: 'Interview with Sunday', body: 'Hi Alex, we would like to schedule a phone interview this week.' };
+  M.applyMessages([rcpt], later, { dbPath });
+  assert.equal((await M.rematchPending(later, { dbPath })).length, 0, 'still no card');
+  const now = fakeStore([card]);
+  const moved = await M.rematchPending(now, { dbPath });
+  assert.equal(now.status.get('c1'), 'interview');
+  assert.equal(moved.length, 1);
+  assert.equal((await M.rematchPending(now, { dbPath })).length, 0, 'placed once, not again');
+  assert.equal(M.eventsFor('c1', { dbPath }).length, 1);
+});
+
+test('UNPLACED EMAILS ARE ASKED AGAIN ONLY WHEN THE CARDS CHANGED, AND RETIRE PAST THE WINDOW (F-951)', async () => {
+  const dbPath = path.join(mkdtempSync(path.join(tmpdir(), 'mail-fp-')), 'x.db');
+  const now = new Date('2026-11-02T12:00:00Z');
+  let reads = 0;
+  const card = (id, company) => ({ id, company, title: 'Mechanical Engineer', status: 'applied', location: '', firstSeen: '2026-10-01T00:00:00Z', get url() { reads += 1; return ''; } });
+  const mail = { id: 'p1', date: '2026-10-20T10:00:00Z', fromName: 'Lumen', fromEmail: 'jobs@lumen.example', subject: 'Interview with Lumen', body: 'Hi Alex, we would like to schedule a phone interview this week.' };
+  // The cards themselves, not copies: a copy would read the counted field.
+  const live = (cards) => ({ jobs: () => cards, getStatus: (id) => cards.find((c) => c.id === id)?.status, setStatus: (id, st) => { const c = cards.find((x) => x.id === id); if (c) c.status = st; } });
+  const other = live([card('x1', 'Orbit')]);
+  M.applyMessages([mail], other, { dbPath, now });
+  await M.rematchPending(other, { dbPath, now });
+  const before = reads;
+  assert.equal((await M.rematchPending(other, { dbPath, now })).length, 0);
+  assert.equal(reads, before, 'same cards, same matcher: the matcher is not run again');
+  const placed = fakeStore([card('x1', 'Orbit'), card('l1', 'Lumen')]);
+  assert.equal((await M.rematchPending(placed, { dbPath, now })).length, 1, 'a new card: asked again, and placed');
+  // An unplaced email older than the window is retired, card or no card.
+  const old = { id: 'p2', date: '2026-06-01T10:00:00Z', fromName: 'Vesta', fromEmail: 'jobs@vesta.example', subject: 'Interview with Vesta', body: 'Hi Alex, we would like to schedule a phone interview this week.' };
+  M.applyMessages([old], other, { dbPath, now });
+  assert.equal((await M.rematchPending(fakeStore([card('v1', 'Vesta')]), { dbPath, now, days: 120 })).length, 0, 'past the 120-day window: retired');
+  assert.equal(M.eventsFor('v1', { dbPath }).length, 0);
+});
+
+test('GMAIL REFUSING A MESSAGE IS NEVER A QUIET SUCCESS (review, 2026-10-22)', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mail-403-'));
+  writeFileSync(path.join(dir, 'gmail-client.json'), JSON.stringify({ client_id: 'id', client_secret: 's' }));
+  writeFileSync(path.join(dir, 'gmail-token.json'), JSON.stringify({ refresh_token: 'RT' }));
+  const ok = (body) => ({ ok: true, json: async () => body });
+  const gmail = (refusal) => async (u) => {
+    const s = String(u);
+    if (s.includes('oauth2.googleapis.com/token')) return ok({ access_token: 'AT' });
+    if (s.includes('/messages?')) return ok({ messages: s.includes('linkedin') ? [] : [{ id: 'm1' }, { id: 'm2' }] });
+    return refusal;
+  };
+  const store = fakeStore([]);
+  const scope = await M.syncMail(store, { dir, dbPath: path.join(dir, 'a.db'), fetchImpl: gmail({ ok: false, status: 403, json: async () => ({ error: { message: 'Request had insufficient authentication scopes.', errors: [{ reason: 'insufficientPermissions' }] } }) }), retry: { sleep: async () => {} } });
+  assert.equal(scope.ok, false);
+  assert.match(scope.error, /insufficient authentication scopes/);
+  const quota = await M.syncMail(store, { dir, dbPath: path.join(dir, 'b.db'), fetchImpl: gmail({ ok: false, status: 429, json: async () => ({ error: { errors: [{ reason: 'rateLimitExceeded' }] } }) }), retry: { sleep: async () => {} } });
+  assert.equal(quota.ok, true);
+  assert.equal(quota.waiting, 2);
+  assert.match(M.mailStatus({ dir }).lastError, /2 email\(s\) wait/);
 });
 
 test('A DROPPED CONNECTION IS RETRIED, AND ITS CAUSE IS NAMED (F-717, 2026-10-09)', async () => {
@@ -446,10 +636,14 @@ test("LINKEDIN'S COPY IS THE SAME JOB — WeRide's Application Engineer, 2026-10
   const { openDb } = await import('./db.mjs');
   const h = openDb(dbF);
   h.exec("INSERT INTO jobs (id, url, company, title) VALUES ('lever', 'u1', 'WeRide', 'Application Engineer'), ('li', 'u2', 'WeRide', 'Application Engineer')");
-  const folded = M.foldAppliedCopies(fakeStore([lever, li]), { dbPath: dbF });
+  // F-968: a file that is not the store gets no write of mail's own; the adapter's writer does it.
+  assert.deepEqual(M.foldAppliedCopies(fakeStore([lever, li]), { dbPath: dbF }), [], 'not the store, no adapter writer: nothing written');
+  assert.equal(h.prepare("SELECT superseded_by FROM jobs WHERE id = 'li'").get().superseded_by, null);
+  const withWriter = () => ({ ...fakeStore([lever, li]), pointAt: (copy, keep) => h.prepare('UPDATE jobs SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL').run(keep, copy).changes > 0 });
+  const folded = M.foldAppliedCopies(withWriter(), { dbPath: dbF });
   assert.deepEqual(folded.map((f) => f.copyId), ['li']);
   assert.equal(h.prepare("SELECT superseded_by FROM jobs WHERE id = 'li'").get().superseded_by, 'lever');
-  assert.deepEqual(M.foldAppliedCopies(fakeStore([lever, li]), { dbPath: dbF }), [], 'once');
+  assert.deepEqual(M.foldAppliedCopies(withWriter(), { dbPath: dbF }), [], 'once');
 });
 
 test('A RECEIPT FOR A CARD ALREADY MARKED APPLIED is tied to it, not left unsure — Neuralink, Gotion, Lab37, 2026-10-01', () => {
@@ -465,4 +659,575 @@ test('A RECEIPT FOR A CARD ALREADY MARKED APPLIED is tied to it, not left unsure
   assert.equal(M.pickByFill(['robo', 'robo2'], near, '2026-09-30T08:47:00Z', (id) => near.find((j) => j.id === id).status), null);
   // Filled the day before: a receipt today is not evidence for it.
   assert.equal(M.pickByFill(['mech'], jobs, '2026-09-22T09:00:00Z', st), null);
+});
+
+test('SIGN-IN CODES: the code is read from the email, never a year, phone or requisition number (his consent, 2026-10-23)', () => {
+  const x = (subject, body) => M.extractCode({ subject, body });
+  assert.equal(x('Your verification code', 'Your one-time passcode for Texas Instruments is 482913. It expires in 10 minutes.'), '482913');
+  assert.equal(x('Verify your email', 'Enter the code 731044 to continue. Questions? Call 1-800-555-0199'), '731044');
+  assert.equal(x('Oracle', 'Your code is: 5521'), '5521');
+  assert.equal(x('Sign in', '482913 is your verification code'), '482913');
+  assert.equal(x('Application received', 'Thanks for applying to requisition 25001234 in 2026'), null, 'no code phrase, no code');
+  assert.equal(x('Your verification code', 'Valid until 2026.'), null, 'a year is not a code');
+  assert.equal(x('Code', 'Your code for job 12345 is 482913'), '482913', 'the number after "is", not the job number');
+  assert.equal(x('Code', 'Your verification code for job 2026-12345 is 482913'), '482913');
+  assert.equal(x('Code', 'Your one-time code is 4829-13'), null, 'part of a longer number is never taken');
+  // Ford, live 2026-10-24 (F-908): no "verification" anywhere, so the Gmail search must name its words too.
+  assert.equal(x('Confirm your identity', 'We need you to confirm your identity for your job application for using this code: 482913. This code expires in 10 minutes.'), '482913');
+  assert.match(M.CODE_SEARCH, /"confirm your identity"/);
+  assert.match(M.CODE_SEARCH, /"this code"/);
+  const ford = { date: new Date().toISOString(), fromEmail: 'RecruitingNoReply@ford.com', fromName: '', subject: 'Confirm your identity', body: 'using this code: 482913. Sincerely, The Ford Talent Acquisition Team' };
+  assert.equal(M.codeFor([ford], { company: 'Ford Motor', since: Date.now() - 60e3 })?.code, '482913', 'ford.com is Ford Motor');
+  assert.equal(M.codeFor([ford], { company: 'Fordham Labs', since: Date.now() - 60e3 }), null, 'a longer first word is someone else');
+});
+
+test('F-920: two forms at one employer — a code handed to the first is never handed to the second', () => {
+  const now = Date.now();
+  const coh = (code, s) => ({ fromName: 'Coherent Corp', fromEmail: 'x@hcwp.fa.oraclecloud.com', subject: 'Confirm your identity', body: `Your one-time pass code : ${code}`, date: new Date(now - s * 1000).toISOString() });
+  const older = coh('111111', 300);
+  assert.equal(M.codeFor([older], { company: 'Coherent Corp', since: now - 600_000 })?.code, '111111', 'the first form takes it');
+  assert.equal(M.codeFor([older], { company: 'Coherent Corp', since: now - 600_000, taken: new Set(['111111']) }), null, 'the second form waits instead of typing the spent code');
+  assert.equal(M.codeFor([coh('222222', 5), older], { company: 'Coherent Corp', since: now - 600_000, taken: new Set(['111111']) })?.code, '222222', 'and takes its own once it arrives');
+});
+
+test('SIGN-IN CODES: three sign-ins at once never swap codes', () => {
+  const now = Date.parse('2026-10-23T10:00:00Z');
+  const at = (s) => new Date(now - s * 1000).toISOString();
+  const msgs = [
+    { fromName: 'Texas Instruments', fromEmail: 'no-reply@careers.ti.com', subject: 'Your code', body: 'Your verification code is 111111', date: at(5) },
+    { fromName: 'Oceaneering Careers', fromEmail: 'x@ebfr.fa.oraclecloud.com', subject: 'Your code', body: 'Your verification code is 222222', date: at(10) },
+    { fromName: 'Old', fromEmail: 'o@x.com', subject: 'Your code', body: 'Your verification code is 333333', date: at(3600) },
+  ];
+  assert.equal(M.codeFor(msgs, { company: 'Oceaneering', since: now - 60_000 })?.code, '222222');
+  assert.equal(M.codeFor(msgs, { company: 'Texas Instruments', since: now - 60_000 })?.code, '111111');
+  assert.equal(M.codeFor(msgs, { company: 'Ford Motor', since: now - 60_000 }), null, 'two unnamed codes: neither is guessed');
+  assert.equal(M.codeFor(msgs.slice(0, 1), { company: 'Ford Motor', since: now - 60_000 }), null, 'a known employer never gets another employer\'s code');
+  assert.equal(M.codeFor(msgs.slice(0, 1), { since: now - 60_000 })?.code, '111111', 'no employer named: the only code in the window');
+  const jj = [{ fromName: 'Johnson & Johnson Careers', fromEmail: 'x@jnj.com', subject: 'Your code', body: 'Your verification code is 123456', date: at(5) }];
+  assert.equal(M.codeFor(jj, { company: 'Johnson & Johnson', since: now - 60_000 })?.code, '123456', '"&" reads as "and" (F-785)');
+  const oracle = [{ fromName: 'Careers', fromEmail: 'no-reply@oracle.com', subject: 'Confirm your identity', body: 'Your verification code is 777777. https://ebfr.fa.us2.oraclecloud.com/hcmUI/CandidateExperience', date: at(5) }];
+  assert.equal(M.codeFor(oracle, { company: 'Oceaneering', since: now - 60_000, pageHost: 'ebfr.fa.us2.oraclecloud.com' })?.code, '777777', 'the email links the site he is signing in to');
+  assert.equal(M.codeFor(msgs.slice(2), { company: 'Old', since: now - 60_000 }), null, 'older than the request');
+});
+
+// ── F-1043: his applications the inbox check never placed (2026-11-12) ──
+
+test('F-1043 NAMES: Samsung Electronics America signs "Samsung", Matic Robots "Matic", a board slug reads across the email\'s spaces', () => {
+  assert.ok(M.companyNames('Samsung Electronics America').includes('samsung'));
+  assert.ok(M.companyNames('Matic Robots').includes('matic'));
+  assert.deepEqual(M.companyNames('Applied Electronics'), ['applied electronics'], 'a plain word is never a company on its own');
+  const jobs = [
+    { id: 'sam', company: 'Samsung Electronics America', title: 'Metals Equipment Engineer', status: 'interested', url: 'https://x.wd1.myworkdayjobs.com/a/job/Metals_R1' },
+    { id: 'mar', company: 'Marianaminerals', title: 'Mechanical Engineer', status: 'hidden', url: 'https://jobs.ashbyhq.com/marianaminerals/1' },
+  ];
+  const m = (msg) => M.matchMessage({ body: '', ...msg }, jobs);
+  assert.equal(m({ fromName: 'Samsung', fromEmail: 'samsung@myworkday.com', subject: 'Thank you for applying to Samsung' })?.jobId, 'sam');
+  assert.equal(m({ fromName: 'Mariana Minerals Hiring Team', fromEmail: 'no-reply@ashbyhq.com', subject: 'Mariana Minerals Application Update' })?.jobId, 'mar');
+  assert.equal(m({ fromName: 'Mariana', fromEmail: 'x@y.com', subject: 'Mariana is hiring' }), null, 'part of the slug is not the slug');
+});
+
+test('F-1043 THE ROLE, NOT THE NEXT SENTENCE OR THE REQUISITION: HP, Lam and Flex', () => {
+  assert.equal(M.roleNamed({ subject: 'Regarding Requisition Interactive Design Engineer -  HPIQ', body: 'Dear Anna Maria Alex, Thank you for your interest in the HP Inc position of Interactive Design Engineer - HPIQ We will not be moving forward with your application for this role.' }), 'Interactive Design Engineer - HPIQ');
+  assert.equal(M.roleNamed({ subject: 'Lam Research Application Status', body: 'We appreciate the submission of your application for the position of Mechatronics Engineer 2, Req. 199770 at Lam Research.' }), 'Mechatronics Engineer 2');
+  assert.ok(M.emailReqIds('the position of Mechatronics Engineer 2, Req. 199770 at Lam Research').has('199770'), '"Req." with its stop');
+  assert.equal(M.roleNamed({ subject: 'Thank you for applying to Axiom', body: 'We are currently reviewing your application for the position of Mechanical engineer WD233476. If your qualifications match' }), 'Mechanical engineer');
+  assert.equal(M.roleNamed({ subject: 'Symbotic Application', body: 'we have made the decision not to move forward with your candidacy for the R8402 New Grad- Manufacturing Engineer position.' }), 'New Grad- Manufacturing Engineer', 'a requisition in front of the role');
+  assert.equal(M.roleNamed({ subject: 'Update on your application: Manufacturing Engineer 2 at Lam Research', body: 'Thanks for your interest in the Manufacturing Engineer 2 opening at Lam Research, we appreciate your interest.' }), 'Manufacturing Engineer 2');
+});
+
+test('F-1043 A SHORTER NAME THAT HOLDS THE ROLE: "- HPIQ" in the subject is HP Inc.\'s application, from HP\'s own Workday mailbox', () => {
+  const jobs = [
+    { id: 'iq', company: 'HP IQ', title: 'Product Design Engineer', status: 'inbox', url: 'https://job-boards.greenhouse.io/hpiq/jobs/6144518004' },
+    { id: 'ide', company: 'HP Inc.', title: 'Interactive Design Engineer -  HPIQ', status: 'interested', url: 'https://hp.wd5.myworkdayjobs.com/ExternalCareerSite/job/SF/Interactive-Design-Engineer----HPIQ_UNI4821-1' },
+    { id: 'pde', company: 'HP Inc.', title: 'Product Design Engineer - HPIQ', status: 'applied', url: 'https://hp.wd5.myworkdayjobs.com/ExternalCareerSite/job/SF/Product-Design-Engineer---HPIQ_UNI4814-1' },
+  ];
+  const hp = (role) => M.matchMessage({ fromName: 'Workday HRHPI', fromEmail: 'hp@myworkday.com', subject: `Regarding Requisition ${role}`,
+    body: `Dear Anna Maria Alex, Thank you for your interest in the HP Inc position of ${role} We will not be moving forward with your application for this role.` }, jobs);
+  assert.equal(hp('Interactive Design Engineer - HPIQ')?.jobId, 'ide');
+  assert.equal(hp('Product Design Engineer - HPIQ')?.jobId, 'pde', 'HP IQ\'s own "Product Design Engineer" lacks the HPIQ word his application carries');
+  const iqOnly = M.matchMessage({ fromName: 'HP IQ', fromEmail: 'no-reply@greenhouse.io', subject: 'Thank you for applying to HP IQ', body: 'Thank you for applying for the Product Design Engineer role.' }, jobs);
+  assert.equal(iqOnly?.jobId, 'iq', 'the longest name still wins when it holds the role');
+});
+
+test('F-1043 OFF THE BOARD: a receipt from a company with no card is looked up strictly; a rejection\'s requisition is found in a posting\'s own text; the card takes the email\'s date', () => {
+  const db3 = path.join(dir, 'f1043.db');
+  const board = [
+    { id: 'dry-b', company: 'Micron Technology', title: 'New College Grad Dry Etch Process Engineer Boise Idaho United States Of America', status: 'applied', url: 'https://careers.micron.com/careers/job/43538351-new-college-grad-dry-etch' },
+    { id: 'dry-m', company: 'Micron Technology', title: 'New College Grad Dry Etch Process Engineer Manassas Virginia United States Of America', status: 'applied', url: 'https://careers.micron.com/careers/job/44543481-new-college-grad-dry-etch' },
+  ];
+  const offBoard = [
+    { id: 'cob-ai', company: 'Cobot', title: 'Mechanical Engineer, AI Data Collection', status: 'new', url: 'https://www.linkedin.com/jobs/view/1' },
+    { id: 'cob-pd', company: 'Cobot', title: 'Mechanical Engineer, Product Design', status: 'new', url: 'https://www.linkedin.com/jobs/view/2' },
+  ];
+  const status = new Map([...board, ...offBoard].map((j) => [j.id, j.status]));
+  const dated = new Map();
+  const store = {
+    jobs: () => board.map((j) => ({ ...j, status: status.get(j.id) })),
+    getStatus: (id) => status.get(id),
+    setStatus: (id, s, opts) => { status.set(id, s); dated.set(id, opts?.changedAt); },
+    jobsAtCompany: (co) => offBoard.filter((j) => /cobot/i.test(co) && j.company === 'Cobot'),
+    descriptionOf: (id) => (id === 'dry-m' ? 'Req ID: JR100001. Dry etch process engineer in Manassas.' : 'Dry etch process engineer in Boise.'),
+  };
+  const r = M.applyMessages([
+    { id: 'cob1', date: '2026-09-30T14:00:00Z', fromName: 'Cobot', fromEmail: 'no-reply@ashbyhq.com', subject: 'Thank You For Applying - Cobot', body: 'Thank you for applying for the Mechanical Engineer, AI Data Collection role at Cobot.' },
+    { id: 'cob2', date: '2026-10-01T14:00:00Z', fromName: 'Cobot', fromEmail: 'no-reply@ashbyhq.com', subject: 'Thank you for your interest in Cobot', body: 'Thank you for applying. We have received your application.' },
+    { id: 'mu1', date: '2026-10-22T16:00:00Z', fromName: '', fromEmail: 'micron@myworkday.com', subject: 'Application Status Update for New College Grad - Dry Etch Process Engineer-JR100001 - ', body: 'Dear Alex, Thank you very much for applying for New College Grad - Dry Etch Process Engineer role at Micron. At this time, we regret to inform you that we’ve decided not to move forward with your application.' },
+  ], store, { dbPath: db3 });
+  assert.equal(status.get('cob-ai'), 'applied', 'the one Cobot posting the receipt names, still new in the store');
+  assert.equal(status.get('cob-pd'), 'new', 'a receipt naming no role places nothing off the board');
+  assert.equal(dated.get('cob-ai'), '2026-09-30T14:00:00Z', 'applied on the day of the email, not the day it was read');
+  assert.equal(status.get('dry-m'), 'rejected', 'JR100001 is in the Manassas posting\'s own text');
+  assert.equal(status.get('dry-b'), 'applied');
+  assert.deepEqual(r.moved.map((x) => x.jobId).sort(), ['cob-ai', 'dry-m']);
+});
+
+test('F-1043 LINKEDIN EASY APPLY: "your application was sent to" is a receipt and names the company', () => {
+  const subject = 'Alex , your application was sent to Chism Automation';
+  assert.equal(M.classifyMessage({ subject, body: 'Your application was sent to Chism Automation. Mechanical Engineer · Chism Automation' }), 'received');
+  assert.equal(M.emailCompany({ subject: 'Alex , your application was sent to LMK Recruiting Solutions' }), 'LMK Recruiting Solutions');
+  assert.equal(M.emailCompany({ subject: 'Thank You For Applying - Cobot' }), 'Cobot');
+  assert.equal(M.emailCompany({ subject: 'Thank you for applying to Samsung' }), 'Samsung');
+  assert.equal(M.emailCompany({ subject: 'Thank you for your interest in the Mechanical Engineer position' }), '', 'a role is not a company');
+  const card = { id: 'chism', company: 'Chism Automation', title: 'Mechanical Engineer', status: 'interested', url: 'https://chismautomation.com/careers/me' };
+  assert.equal(M.matchMessage({ fromName: 'LinkedIn', fromEmail: 'jobs-noreply@linkedin.com', subject, body: '' }, [card])?.jobId, 'chism');
+});
+
+test('F-1043 syncMail reads the old Easy Apply receipts once more: their "not about an application" rows are dropped before the search', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mail-easy-'));
+  writeFileSync(path.join(dir, 'gmail-client.json'), JSON.stringify({ client_id: 'id', client_secret: 's' }));
+  writeFileSync(path.join(dir, 'gmail-token.json'), JSON.stringify({ refresh_token: 'RT' }));
+  const db4 = path.join(dir, 'easy.db');
+  const store = fakeStore([]);
+  M.applyMessages([{ id: 'li1', date: '2026-10-02T08:43:56Z', fromName: 'Nobody', fromEmail: 'n@n.com', subject: 'Hello', body: 'hi' }], store, { dbPath: db4 });
+  const asked = [];
+  const ok = (body) => ({ ok: true, json: async () => body });
+  const gmail = async (u) => {
+    const s = decodeURIComponent(String(u).replace(/\+/g, ' '));
+    if (s.includes('oauth2.googleapis.com/token')) return ok({ access_token: 'AT', scope: M.SCOPE });
+    if (s.includes('/messages?')) { asked.push(s); return ok({ messages: s.includes('application was sent') ? [{ id: 'li1' }] : [] }); }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  const res = await M.syncMail(store, { dir, dbPath: db4, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.ok(asked.some((q) => q.includes('from:jobs-noreply@linkedin.com')), 'the receipts are asked for by name');
+  assert.equal(M.eventsFor('', { dbPath: db4 }).filter((e) => e.msg_id === 'li1').length, 0, 'the old verdict is gone, so the receipt is read as new mail');
+  asked.length = 0;
+  await M.syncMail(store, { dir, dbPath: db4, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.ok(!asked.some((q) => q.includes('from:jobs-noreply@linkedin.com')), 'once: the next check does not ask again');
+});
+
+test('F-1043 review: a company named only in the subject is looked up by whole words — Matic is never Automatic, Apple never Pineapple', () => {
+  assert.equal(M.sameCompany('Matic Robots', 'matic'), true);
+  assert.equal(M.sameCompany('Automatic Systems Inc', 'matic'), false);
+  assert.equal(M.sameCompany('Pineapple Energy', 'apple'), false);
+  assert.equal(M.sameCompany('Apple', 'apple'), true);
+  assert.equal(M.sameCompany('Samsung Electronics America', 'samsung'), true);
+  const db5 = path.join(dir, 'f1043-words.db');
+  const offBoard = [{ id: 'auto', company: 'Automatic Systems Inc', title: 'Mechanical Engineer', status: 'new', url: 'https://x.com/1' }];
+  const status = new Map([['auto', 'new']]);
+  const store = {
+    jobs: () => [],
+    getStatus: (id) => status.get(id),
+    setStatus: (id, s) => status.set(id, s),
+    jobsAtCompany: () => offBoard,   // a substring lookup, as serve.mjs's once was
+  };
+  M.applyMessages([{ id: 'mat1', date: '2026-10-01T14:00:00Z', fromName: 'Matic', fromEmail: 'no-reply@ashbyhq.com', subject: 'Thank you for applying to Matic', body: 'Thank you for applying for the Mechanical Engineer role at Matic.' }], store, { dbPath: db5 });
+  assert.equal(status.get('auto'), 'new', 'a posting at another company is never moved');
+});
+
+test('his card behind its repost is read as the repost: Zipline Avionics, rejected 10-30, was left unplaced', () => {
+  const avionics = 'Mechanical Test Engineer, Avionics';
+  const rows = new Map([
+    ['old', { id: 'old', company: 'Zipline', title: avionics, status: 'inbox', url: 'https://www.zipline.com/open-roles?gh_jid=7868241003', supersededBy: 'new1' }],
+    ['new1', { id: 'new1', company: 'Zipline', title: avionics, status: 'new', url: 'https://www.zipline.com/open-roles/7868241003?gh_jid=7868241003', supersededBy: null }],
+    ['b730', { id: 'b730', company: 'Zipline', title: 'Test Equipment Design Engineer, Battery and Power Electronics', status: 'applied', url: 'https://www.zipline.com/open-roles/1', supersededBy: null }],
+    ['8389', { id: '8389', company: 'Zipline', title: 'Mechanical Test Equipment Design Engineer, Crash Safety', status: 'applied', url: 'https://www.zipline.com/open-roles/2', supersededBy: null }],
+  ]);
+  const endOf = (id) => { let r = rows.get(id); while (r?.supersededBy) r = rows.get(r.supersededBy); return r || null; };
+  const cards = M.throughReposts([rows.get('old'), rows.get('b730'), rows.get('8389')], endOf);
+  const card = cards.find((c) => c.hiddenCard === 'old');
+  assert.deepEqual([card.id, card.status, card.title, card.url], ['new1', 'inbox', avionics, rows.get('new1').url], "the repost's id and link; his card's title and the further status");
+  assert.equal(cards.length, 3, 'one card per posting');
+  // A rejected card stays rejected behind a "new" repost, so no later email revives it.
+  const rejected = M.throughReposts([{ ...rows.get('old'), status: 'rejected' }], endOf)[0];
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(M.nextStatus(rejected.status, 'interview'), null, 'an interview email cannot revive it');
+  assert.equal(M.throughReposts([{ ...rows.get('old'), status: 'interview' }], endOf)[0].status, 'interview', 'an interview card is not read back as new');
+  // A pointer to another company's row is never followed.
+  const elsewhere = (id) => (id === 'old' ? { ...rows.get('new1'), company: 'Skydio' } : null);
+  assert.equal(M.throughReposts([rows.get('old')], elsewhere).length, 0, 'a repost at another company is not his card');
+  assert.equal(M.throughReposts([rows.get('old')], (id) => (id === 'old' ? { ...rows.get('new1'), company: 'Zipline International Inc.' } : null)).length, 1, 'the same company under its longer name is');
+  // A row already among his cards is not doubled, and a pointer to nowhere is dropped.
+  assert.equal(M.throughReposts([rows.get('old'), { ...rows.get('new1'), status: 'applied' }], endOf).length, 1);
+  assert.equal(M.throughReposts([{ ...rows.get('old'), supersededBy: 'gone' }], () => null).length, 0);
+
+  const status = new Map([...rows].map(([id, r]) => [id, r.status]));
+  const store = { jobs: () => cards.map((c) => ({ ...c, status: status.get(c.id) })), getStatus: (id) => status.get(id), setStatus: (id, s) => status.set(id, s), jobsAtCompany: () => [] };
+  const r = M.applyMessages([{ id: 'zip1', date: '2026-10-30T16:04:43Z', fromName: 'Zipline Recruiting', fromEmail: 'no-reply@appreview.gem.com', subject: 'Update on your Zipline application',
+    body: `Hi Anna Maria Alex, Thank you so much for your interest in the ${avionics} position at Zipline . We have made the decision not to move forward with your candidacy for the ${avionics} position at this time.` }], store, { dbPath: path.join(dir, 'zipline-repost.db') });
+  assert.deepEqual(r.moved.map((x) => [x.jobId, x.from, x.to]), [['new1', 'new', 'rejected']], 'the row he can see is moved');
+  assert.deepEqual([status.get('old'), status.get('b730'), status.get('8389')], ['inbox', 'applied', 'applied'], 'nothing else moves');
+
+  // Through applyMessages, as the dashboard runs it: his card was rejected
+  // BEFORE it closed, its repost is "new", and the store reads the repost's own
+  // status. A later interview email naming that role must not revive it.
+  const st2 = new Map([['old', 'rejected'], ['new1', 'new'], ['b730', 'applied'], ['8389', 'applied']]);
+  const cards2 = () => M.throughReposts([{ ...rows.get('old'), status: st2.get('old') }, rows.get('b730'), rows.get('8389')], endOf);
+  const store2 = { jobs: cards2, getStatus: (id) => st2.get(id), setStatus: (id, s) => st2.set(id, s), jobsAtCompany: () => [] };
+  const invite = { id: 'zip2', date: '2026-11-05T16:00:00Z', fromName: 'Zipline Recruiting', fromEmail: 'no-reply@appreview.gem.com', subject: `Interview invitation: ${avionics} at Zipline`,
+    body: `Hi Alex, we would like to schedule an interview with you for the ${avionics} position at Zipline. Please pick a time for your interview.` };
+  assert.equal(M.classifyMessage(invite), 'interview', 'the email is an interview invitation');
+  const r2 = M.applyMessages([invite], store2, { dbPath: path.join(dir, 'zipline-revive.db') });
+  assert.deepEqual(r2.moved, [], 'a rejected card is not revived through its repost');
+  assert.equal(st2.get('new1'), 'new', 'the repost row is not moved to interview');
+});
+
+test('week review F4: a check that meets a locked store fails whole, says so, and the next check finishes it', async () => {
+  M.saveClient({ client_id: '123-abc.apps.googleusercontent.com', client_secret: 'GOCSPX-secret-value' }, { dir });
+  const url2 = new URL(M.authUrl('http://localhost:4300/oauth/gmail/callback', { dir }));
+  const ok = (body) => ({ ok: true, json: async () => body });
+  const enc = (s) => Buffer.from(s).toString('base64url');
+  const gmail = async (u) => {
+    const s = String(u);
+    if (s.includes('oauth2.googleapis.com/token')) return ok({ access_token: 'AT', refresh_token: 'RT', scope: M.SCOPE });
+    if (s.endsWith('/profile')) return ok({ emailAddress: 'alex@example.test' });
+    if (s.includes('/messages?')) return ok({ messages: [{ id: 'lk1' }] });
+    if (s.includes('/messages/lk1')) {
+      return ok({ id: 'lk1', internalDate: String(Date.parse('2026-09-14T09:00:00Z')), snippet: 'We would like to schedule',
+        payload: { headers: [{ name: 'From', value: '"Sunday Recruiting" <talent@sunday.ai>' }, { name: 'Subject', value: 'Interview with Sunday' }],
+          mimeType: 'text/plain', body: { data: enc('Hi Alex, we would like to schedule a phone interview this week.') } } });
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await M.finishAuth({ code: 'c', state: url2.searchParams.get('state') }, { dir, fetchImpl: gmail });
+  const dbFile = path.join(dir, 'locked.db');
+  const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+  const realSet = store.setStatus;
+  store.setStatus = () => { throw new Error('database is locked'); };   // a scan holding the write lock past busy_timeout
+  const first = await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.equal(first.ok, false);
+  assert.equal(first.busy, true, `a lock is named, so the server checks again in minutes: ${JSON.stringify(first)}`);
+  assert.equal(store.status.get('sun1'), 'applied', 'nothing half-moved');
+  store.setStatus = realSet;
+  const second = await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.equal(second.ok, true, second.error);
+  assert.equal(store.status.get('sun1'), 'interview', 'the email the locked check could not record is read again');
+  const serve = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
+  assert.match(serve, /if \(!r\.ok && \(r\.network \|\| r\.busy\) && !mailRetry\)/, 'the server retries a locked check like a dropped network');
+  M.disconnect({ dir });
+});
+
+test('week-fixes J5: a card moved just before a lock stopped the check keeps its from/to and its undo', async () => {
+  // The move (the store) and its row (mail_events) are two writes. A lock
+  // between them used to leave the card moved and no row: the next check read
+  // the email again, found the card already there, and recorded "no move", so
+  // Undo had nothing to put back.
+  const msg = (id) => ({ id, date: '2026-09-14T09:00:00Z', fromName: 'Sunday Recruiting', fromEmail: 'talent@sunday.ai', subject: 'Interview with Sunday', body: 'Hi Alex, we would like to schedule a phone interview this week.' });
+  {
+    const dbPath = path.join(dir, 'j5-landed.db');
+    const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+    const realSet = store.setStatus;
+    store.setStatus = (id, s, o) => { realSet(id, s, o); throw new Error('database is locked'); };   // the move lands, then the lock
+    assert.throws(() => M.applyMessages([msg('j5a')], store, { dbPath }), /locked/);
+    assert.equal(store.status.get('sun1'), 'interview');
+    store.setStatus = realSet;
+    const again = M.applyMessages([msg('j5a')], store, { dbPath });
+    assert.deepEqual(again.moved.map((m) => [m.jobId, m.from, m.to]), [['sun1', 'applied', 'interview']], 'the move is reported once it is known');
+    assert.equal(M.undoEvent('j5a', store, { dbPath })?.from_status, 'applied', 'the row keeps where the card came from');
+    assert.equal(store.status.get('sun1'), 'applied', 'and Undo puts it back');
+  }
+  {
+    const dbPath = path.join(dir, 'j5-not-landed.db');
+    const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+    const realSet = store.setStatus;
+    store.setStatus = () => { throw new Error('database is locked'); };   // the lock comes first
+    assert.throws(() => M.applyMessages([msg('j5b')], store, { dbPath }), /locked/);
+    assert.equal(store.status.get('sun1'), 'applied', 'nothing half-moved');
+    store.setStatus = realSet;
+    assert.deepEqual(M.applyMessages([msg('j5b')], store, { dbPath }).moved.map((m) => m.to), ['interview'], 'the next check finishes the move');
+    assert.equal(store.status.get('sun1'), 'interview');
+    assert.equal(M.undoEvent('j5b', store, { dbPath })?.from_status, 'applied');
+  }
+  {
+    const dbPath = path.join(dir, 'j5-his.db');
+    const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+    const realSet = store.setStatus;
+    store.setStatus = () => { throw new Error('database is locked'); };
+    assert.throws(() => M.applyMessages([msg('j5c')], store, { dbPath }), /locked/);
+    store.setStatus = realSet;
+    store.status.set('sun1', 'rejected');   // he moved it himself in between
+    assert.deepEqual(M.applyMessages([msg('j5c')], store, { dbPath }).moved, [], 'his move stands');
+    assert.equal(store.status.get('sun1'), 'rejected');
+  }
+  {
+    // The card moved, the lock hit the clearing of the mark, and he pressed
+    // Undo before the next check: his undo stands.
+    const dbPath = path.join(dir, 'j5-undone.db');
+    const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+    M.applyMessages([msg('j5d')], store, { dbPath });
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("UPDATE mail_events SET pending = 'moving' WHERE msg_id = 'j5d'").run();
+    raw.close();
+    assert.equal(M.undoEvent('j5d', store, { dbPath })?.from_status, 'applied');
+    assert.deepEqual(M.applyMessages([], store, { dbPath }).moved, [], 'an undone row is not moved again');
+    assert.equal(store.status.get('sun1'), 'applied');
+  }
+  {
+    // The same order in rematchPending: an email placed on a later check.
+    const dbPath = path.join(dir, 'j5-rematch.db');
+    M.applyMessages([msg('j5e')], fakeStore([]), { dbPath });   // no card yet: kept for later
+    const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+    const realSet = store.setStatus;
+    store.setStatus = (id, s, o) => { realSet(id, s, o); throw new Error('database is locked'); };
+    await assert.rejects(() => M.rematchPending(store, { dbPath, force: true }), /locked/);
+    store.setStatus = realSet;
+    const moved = [...M.applyMessages([], store, { dbPath }).moved, ...M.resolveUnsure(store, { dbPath }), ...await M.rematchPending(store, { dbPath, force: true })];
+    assert.deepEqual(moved.map((m) => [m.from, m.to]), [['applied', 'interview']]);
+    assert.equal(M.undoEvent('j5e', store, { dbPath })?.from_status, 'applied', 'Undo still knows where it came from');
+  }
+});
+
+test('week review F3: the mail matcher reads every card, not the first 2000 of a filter', () => {
+  const serve = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
+  const at = serve.indexOf('const mailStore = {');
+  const jobs = serve.slice(at, serve.indexOf('const endOf', at));
+  assert.ok(at > 0 && jobs.length > 0, 'mailStore.jobs is where it was');
+  assert.doesNotMatch(jobs, /query\(f, \{ limit: 2000 \}\)\.rows/, 'one capped page silently drops the cards past it');
+  assert.match(jobs, /offset \+= PAGE/, 'paged to the end');
+  assert.match(jobs, /if \(rows\.length < PAGE\) break;/, 'stops on the short page, not at a cap');
+  assert.match(jobs, /stable: true/, 'ties broken on id, so no card falls between two pages (week-fixes J4)');
+});
+
+// ── F-1052: the mail check never waits on the server's thread for another process's lock ──
+// A second process (a scan, the enricher) holding the store's write lock, for
+// real: BEGIN IMMEDIATE on the same file. When it lets go it first leaves a
+// marker file, then commits, so "the marker is not there yet" means "the lock
+// was still held" at that moment, with no timing threshold in the test.
+import { spawn } from 'node:child_process';
+async function holdLock(file, { ms = 0 } = {}) {
+  const marker = `${file}.released-${randomTag()}`;
+  const child = spawn(process.execPath, ['-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const { writeFileSync } = require('node:fs');
+    const d = new DatabaseSync(${JSON.stringify(file)});
+    d.exec('PRAGMA busy_timeout = 5000');
+    d.exec('BEGIN IMMEDIATE');
+    process.stdout.write('held\\n');
+    const let_go = () => { writeFileSync(${JSON.stringify(marker)}, ''); d.exec('COMMIT'); d.close(); process.exit(0); };
+    if (${ms} > 0) setTimeout(let_go, ${ms});
+    process.stdin.on('data', let_go);
+  `], { stdio: ['pipe', 'pipe', 'inherit'] });
+  await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('exit', reject); });
+  let gone = false;
+  const exited = new Promise((r) => child.once('exit', () => { gone = true; r(); }));
+  child.stdin.on('error', () => { /* it let go by itself first */ });
+  return { released: () => existsSync(marker), release: async () => { if (!gone) child.stdin.write('go\n'); await exited; } };
+}
+let tagN = 0;
+const randomTag = () => `${process.pid}-${tagN += 1}`;
+
+async function connectedGmail(messages) {
+  M.saveClient({ client_id: '123-abc.apps.googleusercontent.com', client_secret: 'GOCSPX-secret-value' }, { dir });
+  const url2 = new URL(M.authUrl('http://localhost:4300/oauth/gmail/callback', { dir }));
+  const ok = (body) => ({ ok: true, json: async () => body });
+  const enc = (s) => Buffer.from(s).toString('base64url');
+  const gmail = async (u) => {
+    const s = String(u);
+    if (s.includes('oauth2.googleapis.com/token')) return ok({ access_token: 'AT', refresh_token: 'RT', scope: M.SCOPE });
+    if (s.endsWith('/profile')) return ok({ emailAddress: 'alex@example.test' });
+    if (s.includes('/messages?')) return ok({ messages: s.includes('linkedin') ? [] : messages.map((m) => ({ id: m.id })) });
+    const m = messages.find((x) => s.includes(`/messages/${x.id}`));
+    if (m) {
+      return ok({ id: m.id, internalDate: String(Date.parse(m.date)), snippet: m.body.slice(0, 40),
+        payload: { headers: [{ name: 'From', value: m.from }, { name: 'Subject', value: m.subject }], mimeType: 'text/plain', body: { data: enc(m.body) } } });
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await M.finishAuth({ code: 'c', state: url2.searchParams.get('state') }, { dir, fetchImpl: gmail });
+  return gmail;
+}
+const SUNDAY_INVITE = { id: 'lock1', date: '2026-09-14T09:00:00Z', from: '"Sunday Recruiting" <talent@sunday.ai>', subject: 'Interview with Sunday', body: 'Hi Alex, we would like to schedule a phone interview this week.' };
+
+test('F-1052: a check that meets another process\'s write lock waits for it without stopping the server, then moves the card', async () => {
+  const gmail = await connectedGmail([SUNDAY_INVITE]);
+  const dbFile = path.join(dir, 'f1052-wait.db');
+  M.recentEvents({ dbPath: dbFile });   // the ledger exists, as on his store
+  const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+  // The card moves run inside the store's short-wait section, as the dashboard's adapter gives it.
+  let inside = false; const movedInside = [];
+  store.shortWaits = (fn) => { inside = true; try { return fn(); } finally { inside = false; } };
+  const realSet = store.setStatus;
+  store.setStatus = (id, s, o) => { movedInside.push(inside); realSet(id, s, o); };
+  const lock = await holdLock(dbFile, { ms: 1500 });
+  // A timer the server would run: it must get its turn while the lock is still held.
+  let heldWhenTimerRan = null;
+  const timer = new Promise((r) => setTimeout(() => { heldWhenTimerRan = !lock.released(); r(); }, 300));
+  const r = await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  await timer; await lock.release();
+  assert.equal(heldWhenTimerRan, true, 'the event loop ran while the other process held the lock (the old code sat inside SQLite until it let go)');
+  assert.equal(r.ok, true, r.error);
+  assert.equal(store.status.get('sun1'), 'interview', 'once the lock was free, the email moved its card');
+  assert.deepEqual(movedInside, [true], 'the move ran inside the short-wait section');
+  const serve = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
+  assert.match(serve, /shortWaits: \(fn\) => withBusyTimeout\(MAIL_WAIT_MS, fn\)/, "the dashboard's store gives the check its short wait");
+  M.disconnect({ dir });
+});
+
+// The old code sat inside SQLite for its 30 s busy timeout, twice; 20 s is far past what the fix takes.
+test('F-1052: a lock held past the wait ends the check as busy, quickly, with nothing half-moved', { timeout: 20000 }, async () => {
+  const gmail = await connectedGmail([{ ...SUNDAY_INVITE, id: 'lock2' }]);
+  const dbFile = path.join(dir, 'f1052-busy.db');
+  M.recentEvents({ dbPath: dbFile });
+  const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+  const lock = await holdLock(dbFile);
+  try {
+    const r = await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} }, lockWait: [20, 20] });
+    assert.equal(lock.released(), false, 'it returned while the lock was still held: it did not wait the lock out');
+    assert.equal(r.ok, false);
+    assert.equal(r.busy, true, 'named as a lock, so the server checks again in 5 minutes');
+    assert.match(r.error, /busy|locked/i);
+    assert.equal(store.status.get('sun1'), 'applied', 'nothing moved');
+  } finally { await lock.release(); }
+  const again = await M.syncMail(store, { dir, dbPath: dbFile, fetchImpl: gmail, retry: { sleep: async () => {} } });
+  assert.equal(again.ok, true, again.error);
+  assert.equal(store.status.get('sun1'), 'interview', 'the next check reads the email and moves the card');
+  M.disconnect({ dir });
+});
+
+test('F-1052: with nothing to place, rematchPending writes nothing, so a held lock costs it nothing', async () => {
+  const dbFile = path.join(dir, 'f1052-idle.db');
+  M.recentEvents({ dbPath: dbFile });
+  const lock = await holdLock(dbFile, { ms: 1500 });
+  try {
+    assert.deepEqual(await M.rematchPending(fakeStore([]), { dbPath: dbFile }), []);
+    assert.equal(lock.released(), false, 'it returned while the lock was held (the old code ran a write every check and sat on the lock)');
+  } finally { await lock.release(); }
+});
+
+test('F-1052: inside a mail write section a store write waits only briefly for a lock, and the usual wait comes back after', async () => {
+  const S = await import('./store.mjs');
+  const file = S.dbPath();
+  S.db();
+  const lock = await holdLock(file);
+  try {
+    assert.equal(typeof S.withBusyTimeout, 'function');
+    assert.throws(() => S.withBusyTimeout(0, () => S.db().prepare("UPDATE meta SET v = v WHERE k = 'schema_version'").run()), (e) => e.errcode === 5 || /database is locked/.test(e.message));
+    assert.equal(lock.released(), false, 'it gave up while the lock was held');
+  } finally { await lock.release(); }
+  assert.equal(Number(S.db().prepare('PRAGMA busy_timeout').get().timeout), 30000, 'the connection keeps its usual patience for everything else');
+  assert.throws(() => S.withBusyTimeout(0, async () => {}), /synchronous/, 'an async section is refused');
+  assert.equal(Number(S.db().prepare('PRAGMA busy_timeout').get().timeout), 30000);
+});
+
+test('F-1052 review: his Undo press waits out a lock as before, so the card and its row stay together', async () => {
+  const dbFile = path.join(dir, 'f1052-undo.db');
+  const store = fakeStore([{ ...JOBS[4], status: 'applied' }]);
+  M.applyMessages([{ id: 'undo1', date: '2026-09-14T09:00:00Z', fromName: 'Sunday Recruiting', fromEmail: 'talent@sunday.ai', subject: 'Interview with Sunday', body: 'Hi Alex, we would like to schedule a phone interview this week.' }], store, { dbPath: dbFile });
+  assert.equal(store.status.get('sun1'), 'interview');
+  const lock = await holdLock(dbFile, { ms: 800 });   // longer than the check's quarter second
+  let done;
+  try { done = M.undoEvent('undo1', store, { dbPath: dbFile }); } finally { await lock.release(); }
+  assert.ok(done?.undone_at, 'the row is marked undone (a quarter-second wait threw here, after the card had moved)');
+  assert.equal(store.status.get('sun1'), 'applied');
+  assert.equal(M.undoEvent('undo1', store, { dbPath: dbFile }), null, 'and a second press has nothing to undo');
+});
+
+// ── F-1052, the boot block (2026-11-14) ──────────────────────────────
+// The first check after every boot re-decides each unplaced email, and an
+// email no card matches reads every posting at its company. On his store that
+// was 55 reads for 73 emails (Amazon's 35,414 rows 16 times) in one
+// synchronous run: 14.2 s with every request waiting, 2 s into the check.
+const bootReceipt = (id, co, extra = '') => ({ id, date: '2026-11-01T10:00:00Z', fromName: `${co} Recruiting`, fromEmail: `jobs@${co.toLowerCase()}.example`, subject: `Thank you for applying to ${co}`, body: `We have received your application and will review it.${extra}` });
+const turns = () => {
+  const t = { n: 0, on: true };
+  const spin = () => { if (t.on) { t.n += 1; setImmediate(spin); } };
+  setImmediate(spin);
+  return t;
+};
+
+test('F-1052 boot block: the first rematch after a boot reads each company once and lets the server run between emails', async () => {
+  const dbFile = path.join(dir, 'f1052-boot.db');
+  const now = new Date('2026-11-14T06:00:00Z');
+  const mails = [bootReceipt('b1', 'Vesta'), bootReceipt('b2', 'Vesta'), bootReceipt('b3', 'Orbit'), bootReceipt('b4', 'Vesta'), bootReceipt('b5', 'Orbit'), bootReceipt('b6', 'Vesta')];
+  M.applyMessages(mails, fakeStore([]), { dbPath: dbFile, now });   // no card and no lookup: each kept for later
+  const reads = new Map();
+  const store = { ...fakeStore([]), jobsAtCompany: (co) => { reads.set(co, (reads.get(co) || 0) + 1); return []; } };
+  const t = turns();
+  const stats = {};
+  const moved = await M.rematchPending(store, { dbPath: dbFile, now, stats });
+  t.on = false;
+  assert.deepEqual(moved, []);
+  assert.deepEqual(Object.fromEntries(reads), { Vesta: 1, Orbit: 1 }, 'one read per company per check (the old rematch read Vesta 4 times and Orbit twice)');
+  assert.ok(t.n >= mails.length, `the server ran between the emails (${t.n} turns; the old rematch ran all six in one turn)`);
+  assert.equal(stats.ran, true);
+  assert.equal(stats.rows, 6);
+  assert.equal(stats.companies, 2);
+});
+
+test('F-1052 boot block: a store with a paged reader is read through it, never in one statement, and the email is still placed', async () => {
+  const dbFile = path.join(dir, 'f1052-paged.db');
+  const now = new Date('2026-11-14T06:00:00Z');
+  M.applyMessages([bootReceipt('p1', 'Lumen', ' Requisition 4815162.'), bootReceipt('p2', 'Lumen')], fakeStore([]), { dbPath: dbFile, now });
+  const loads = [];
+  const posting = { id: 'lumen-4815162', company: 'Lumen', title: 'Mechanical Engineer', status: 'new', url: 'https://lumen.example/jobs/4815162', location: '' };
+  const base = fakeStore([]);
+  const store = {
+    ...base,
+    jobsAtCompany: () => { throw new Error('read in one statement'); },
+    loadCompany: async (co) => { loads.push(co); await new Promise((r) => setImmediate(r)); return [posting]; },
+  };
+  const moved = await M.rematchPending(store, { dbPath: dbFile, now });
+  assert.deepEqual(loads, ['Lumen'], 'read once, through the paged reader');
+  assert.deepEqual(moved.map((m) => [m.jobId, m.to]), [['lumen-4815162', 'applied']], 'the receipt naming the posting id moves it, as before');
+  assert.equal(base.status.get('lumen-4815162'), 'applied');
+});
+
+test('F-1052 boot block: the check runs the rematch with awaits, and says what each step took', async () => {
+  const src = readFileSync(new URL('./mail.mjs', import.meta.url), 'utf8');
+  const at = src.indexOf('export async function syncMail');
+  const body = src.slice(at, src.indexOf('\nexport function mailStepsLine', at));
+  assert.match(body, /await rematchPending\(view/, 'the rematch is awaited, outside the synchronous write section');
+  assert.match(body, /await readCompaniesFor\(messages, view\)/, "new emails' companies are read before the writes");
+  const serve = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
+  assert.match(serve, /async loadCompany\(company\)[\s\S]{0,200}jobsUnderCompanies\(hit\)/, "the dashboard's adapter reads a company a page at a time");
+  assert.match(serve, /try \{ trace\(mailStepsLine\(r\)\); \} catch/, 'every check writes its step line to the trace, and a log line never fails the check');
+  assert.equal(M.mailStepsLine({ ok: true, steps: { totalMs: 1000, rematch: { rows: 0, ran: false, ms: 0 } } }), 'mail check ok in 1.0s; rematch: nothing pending');
+  const line = M.mailStepsLine({ ok: true, steps: { totalMs: 3200, gmailMs: 1900, fetched: 0, readMs: 0, lockMs: 2, writeMs: 310, rematch: { ran: true, rows: 73, companies: 22, ms: 1800, longestMs: 120 }, foldMs: 450, linkedinMs: 600, linkedin: { emails: 12, seenMs: 3, applyMs: 40 } } });
+  assert.equal(line, 'mail check ok in 3.2s; gmail 1.9s (0 new); company reads 0.0s; lock wait 0.0s; write section 0.3s; rematch 73 emails, 22 companies read, 1.8s (longest step 0.1s); fold 0.5s; linkedin 12 emails, 0.6s (seen-check 0.0s, apply 0.0s)');
+  assert.match(M.mailStepsLine({ ok: false, busy: true, steps: { totalMs: 30000, rematch: { rows: 73, ran: false, ms: 1 } } }), /^mail check failed \(busy\) in 30\.0s; rematch skipped \(73 emails, nothing changed\)$/);
+});
+
+test('F-1052 boot block: jobsUnderCompanies returns the rows of the one-statement read, a page at a time', async () => {
+  const S = await import('./store.mjs');
+  const d = S.db();
+  const ins = d.prepare('INSERT OR REPLACE INTO jobs (id, url, title, company, location, status, first_seen) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  for (let i = 0; i < 7; i++) ins.run(`juc-a${i}`, `https://a.example/${i}`, `Role ${i}`, 'Paged Co', i % 2 ? 'Austin, TX' : '', 'new', '2026-11-01T00:00:00Z');
+  ins.run('juc-b0', 'https://b.example/0', 'Other role', 'Paged Co Inc', '', 'applied', null);
+  ins.run('juc-c0', 'https://c.example/0', 'Not this one', 'Unpaged', '', 'new', null);
+  const names = ['Paged Co', 'Paged Co Inc'];
+  const one = d.prepare(`SELECT id, company, title, status, url, location, first_seen AS firstSeen FROM jobs WHERE company IN (${names.map(() => '?').join(',')})`).all(...names);
+  let pauses = 0;
+  const paged = await S.jobsUnderCompanies(names, { page: 3, pause: async () => { pauses += 1; } });
+  const key = (r) => JSON.stringify([r.id, r.company, r.title, r.status, r.url, r.location, r.firstSeen]);
+  assert.deepEqual(paged.map(key).sort(), one.map(key).sort(), 'the same rows and fields');
+  assert.equal(paged.length, 8);
+  assert.ok(!('rid' in paged[0]), 'the paging key is not part of a row');
+  assert.ok(pauses >= 3, `awaits between pages and names (${pauses})`);
+  d.prepare("DELETE FROM jobs WHERE id LIKE 'juc-%'").run();
+});
+
+test('F-1052 boot block review: an email whose decision throws is skipped, the rest of the pass still runs, and a lock still ends it', async () => {
+  const dbFile = path.join(dir, 'f1052-skip.db');
+  const now = new Date('2026-11-14T06:00:00Z');
+  M.applyMessages([bootReceipt('s1', 'Vesta'), bootReceipt('s2', 'Lumen', ' Requisition 4815162.')], fakeStore([]), { dbPath: dbFile, now });
+  const posting = { id: 'lumen-s-4815162', company: 'Lumen', title: 'Mechanical Engineer', status: 'new', url: 'https://lumen.example/jobs/4815162', location: '' };
+  const rows = (co) => { if (/vesta/i.test(co)) throw new Error('boom'); return [posting]; };
+  const base = fakeStore([]);
+  const store = { ...base, jobsAtCompany: rows, loadCompany: async (co) => rows(co) };
+  const stats = {};
+  const moved = await M.rematchPending(store, { dbPath: dbFile, now, stats });
+  assert.deepEqual(moved.map((m) => m.jobId), ['lumen-s-4815162'], 'the Lumen receipt is placed although Vesta threw');
+  assert.equal(stats.skipped, 1);
+  const locked = { ...fakeStore([]), jobsAtCompany: () => { throw new Error('database is locked'); }, loadCompany: async () => { throw new Error('database is locked'); } };
+  await assert.rejects(() => M.rematchPending(locked, { dbPath: dbFile, now, force: true }), /locked/, 'a lock is not skipped: the check ends busy');
 });

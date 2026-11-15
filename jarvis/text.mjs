@@ -143,6 +143,62 @@ export function needsCleaning(s) {
 }
 
 /**
+ * The section headings that hold what a posting asks for — purpose,
+ * responsibilities, required experience, qualifications — in the languages a
+ * multinational's template is translated into (en, it, fr, de, pt, es). A line
+ * is a heading only when it is nothing else, an optional colon aside.
+ */
+const REQUIREMENT_HEADING = new RegExp('^(?:'
+  + [
+    // en
+    'job purpose', 'purpose of the role', 'role purpose', '(?:key |main |primary |major )?responsibilities',
+    '(?:required |minimum |basic |preferred )?(?:experience|qualifications|requirements)(?: required)?',
+    'what you(?:\'|’)ll do', 'what you will do',
+    // it
+    'scopo del ruolo', '(?:maggiori |principali )?responsabilità', 'esperienza richiesta',
+    'qualifiche(?: preferenziali| richieste)?', 'requisiti(?: richiesti)?',
+    // fr
+    '(?:objectif|but) du poste', '(?:principales )?responsabilités(?: principales)?', 'expérience requise',
+    'qualifications (?:requises|préférées|souhaitées)', 'exigences',
+    // de
+    'zweck der (?:stelle|rolle)', '(?:haupt)?aufgaben', '(?:haupt)?verantwortlichkeiten', 'erforderliche erfahrung',
+    '(?:bevorzugte |erforderliche )?qualifikationen', 'anforderungen',
+    // pt / es
+    '(?:objetivo|propósito) d[aoe]l? (?:função|cargo|puesto|rol)', '(?:principais |principales )?responsabilidades(?: principales)?',
+    'experiência (?:necessária|requerida)', 'experiencia (?:requerida|necesaria)',
+    'qualificações(?: preferenciais| necessárias)?', 'calificaciones(?: preferidas| requeridas)?', 'requisitos',
+  ].join('|')
+  + ')\\s*:?$', 'i');
+
+/**
+ * A BODY WHOSE REQUIREMENT SECTIONS ARE ALL EMPTY (F-760).
+ *
+ * CNH's SuccessFactors feed carries each US requisition in Italian and French
+ * as well, and those copies are the translated TEMPLATE: "Scopo del ruolo /
+ * Maggiori Responsabilità / Esperienza Richiesta / Qualifiche preferenziali"
+ * one after another with nothing under any of them, then the pay line and the
+ * benefits. It is 3,800 characters of boilerplate that reads as a description
+ * to everything downstream, and there is nothing in it to judge.
+ *
+ * True when there are at least three requirement headings, not one line
+ * between any two of them, and no bulleted list straight after the last. What
+ * follows the last heading is otherwise not judged — it runs on into pay and
+ * benefits, which survive in the hollow copies too. Any line in a requirement
+ * section counts as content, however short: Cargill's "Bachelor's degree in
+ * related field" and HF Sinclair's "One year of job experience is required."
+ * are whole sections, and so is McCormick's table, whose short column labels
+ * follow the heading directly.
+ */
+export function hollowBody(text) {
+  const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const at = [];
+  for (let i = 0; i < lines.length; i++) if (REQUIREMENT_HEADING.test(lines[i])) at.push(i);
+  if (at.length < 3) return false;
+  for (let k = 0; k + 1 < at.length; k++) if (at[k + 1] !== at[k] + 1) return false;
+  return !/^[•·▪◦*–-]/.test(lines[at[at.length - 1] + 1] || '');
+}
+
+/**
  * A FILE NAME AN HTTP HEADER CAN CARRY (2026-09-23).
  *
  * Exowatt's posting is "Mechanical Engineer – Optical Systems", with an en

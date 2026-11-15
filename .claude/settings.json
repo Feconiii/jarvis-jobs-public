@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__linkedin__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/jarvis/linkedin-mcp-guard.mjs\"",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

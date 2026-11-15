@@ -4,7 +4,7 @@
 // "manufacturing" because his skips are full of manufacturing jobs. A word is
 // only evidence when it appears in skips MORE than in the deck he chose from.
 
-import { learnFromSkips, learnFromApplyForms } from './skip-learn.mjs';
+import { learnFromSkips, learnFromApplyForms, withoutDeclined, DECLINED_TARGET_MAX } from './skip-learn.mjs';
 
 let pass = 0, fail = 0;
 function check(label, got, want) {
@@ -277,6 +277,31 @@ console.log('\n\u{1F9EA} skip-learn: launch employers are proposed, never hidden
     { company: 'Mixed', title: 'C', reasons: ['Pay too low'] },
   ], deckPlus, { minSkips: 3 });
   check('a mixed reason keeps its judgement', r3.proposals.some(x => x.target === 'Mixed'), true);
+}
+
+// ── a declined proposal is never offered again (2026-11-12) ────────────
+{
+  const props = [
+    { kind: 'company', target: 'ASM', action: 'hide-company' },
+    { kind: 'space-employer', target: 'Impulse Space', action: 'hide-company' },
+    { kind: 'title', target: 'summer', action: 'add-rule', rule: 'no summer in title' },
+    { kind: 'title', target: 'optimus', action: 'add-rule', rule: 'no optimus in title' },
+  ];
+  const declined = [
+    { action: 'hide-company', target: 'asm' },
+    { action: 'hide-company', target: 'Impulse Space' },
+    { action: 'add-rule', target: 'summer' },
+  ];
+  const left = withoutDeclined(props, declined);
+  check('declined hides and rules are left out, whatever the case', left.map(p => p.target).join(','), 'optimus');
+  check('a decline of a hide does not hide a rule on the same word',
+    withoutDeclined([{ action: 'add-rule', target: 'asm', rule: 'no asm in title' }], declined).length, 1);
+  check('no declines: every proposal stays', withoutDeclined(props, []).length, 4);
+  check('a missing file reads as no declines', withoutDeclined(props, undefined).length, 4);
+  const long = 'x'.repeat(300);
+  check('a long target, stored cut to its first 200 characters, still matches',
+    withoutDeclined([{ action: 'add-rule', target: long }], [{ action: 'add-rule', target: long.slice(0, DECLINED_TARGET_MAX) }]).length, 0);
+  check("an apostrophe in a name (Moody's) matches", withoutDeclined([{ action: 'hide-company', target: "Moody's" }], [{ action: 'hide-company', target: "moody's" }]).length, 0);
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

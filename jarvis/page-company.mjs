@@ -15,12 +15,23 @@ const FILLER = new Set([
   'recruiting', 'talent', 'external', 'internal', 'global', 'us', 'usa', 'na',
   'uscareers', 'engineering', 'hourly', 'campus', 'students', 'university',
   'experienced', 'professional', 'corporate', 'en', 'portal', 'site', 'ats',
+  // MokaHR's paths: /social-recruitment/<employer>/<id>, /campus-recruitment/… (F-1023)
+  'socialrecruitment', 'campusrecruitment',
 ]);
 
 // Hosts whose first label is the ATS itself, not the employer.
 const ATS_HOST = /^(?:jobs\.lever\.co|(?:job-)?boards\.greenhouse\.io|jobs\.ashbyhq\.com|apply\.workable\.com|jobs\.smartrecruiters\.com|jobs\.jobvite\.com)$/i;
+// Hosts that put the employer in the SECOND path segment: hire-r1.mokahr.com/social-recruitment/geekplusamerica/100008811.
+const SECOND_SEGMENT_HOST = /(^|\.)mokahr\.com$/i;
 
-const flat = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// "+" is read as "plus" (F-1023, 2026-11-06): the store's "Geek+" is the
+// "geekplusamerica" in GeekPlus's own careers address.
+const flat = (s) => String(s || '').toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9]/g, '');
+
+// A region a careers address appends to the employer's name ("geekplusamerica").
+const REGION_TAIL = /(?:northamerica|americas|america|usa)$/;
+/** The key without a trailing region, when what is left is still a name (4+ letters); else ''. */
+const regionless = (k) => { const r = k.replace(REGION_TAIL, ''); return r !== k && r.length >= 4 ? r : ''; };
 
 /**
  * Flattened employer names the page's URL could stand for, longest first.
@@ -37,7 +48,8 @@ export function pageCompanyKeys(pageUrl) {
   const first = segs[0] ? decodeURIComponent(segs[0]) : '';
   // The board's own slug: jobs.lever.co/PhoenixTailings, boards.greenhouse.io/agility.
   if (first && !/^[a-z]{2}-[A-Z]{2}$/.test(first)) add(first);
-  if (!ATS_HOST.test(host)) {
+  if (SECOND_SEGMENT_HOST.test(host) && segs[1]) add(decodeURIComponent(segs[1]));
+  if (!ATS_HOST.test(host) && !SECOND_SEGMENT_HOST.test(host)) {
     // The employer's label: the leftmost one, split on dashes so a prefix like
     // "careers-" or "engineering-" falls away; every contiguous run is tried.
     const label = host.split('.')[0];
@@ -68,7 +80,24 @@ export const employerKey = (s) => flat(String(s || '').trim().replace(CO_SUFFIX,
 export function sameEmployer(key, company) {
   const k = flat(key), c = flat(company);
   if (k.length < 3 || c.length < 3) return false;
-  return c.startsWith(k) || (k.startsWith(c) && c.length >= Math.min(k.length, 6));
+  return c.startsWith(k) || (k.startsWith(c) && c.length >= Math.min(k.length, 6))
+    || namesEmployer(key, company);
+}
+
+/**
+ * Does a site's key name exactly this employer (F-1023)? Equal once "+" is
+ * "plus" and "Inc."-style endings are gone, or equal once the key's trailing
+ * region is gone: `geekplusamerica` is "Geek+". EXACT only — the key without
+ * its region is never a prefix test, or `bankofamerica` would become "bankof"
+ * and name Bank of the West.
+ */
+export function namesEmployer(key, company) {
+  const k = flat(key);
+  if (k.length < 3) return false;
+  const names = new Set([flat(company), employerKey(company)].filter((c) => c.length >= 3));
+  if (names.has(k)) return true;
+  const r = regionless(k);
+  return !!r && names.has(r);
 }
 
 /**

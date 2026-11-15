@@ -134,6 +134,9 @@ check('keys are compared lowercase', hostOf({ careers_url: 'https://Jobs.Lever.C
 check('a multi-part suffix keeps the company label',
   registrableDomain('careers.example.co.uk'), 'example.co.uk');
 check('a bare domain is already registrable', registrableDomain('lever.co'), 'lever.co');
+// A generic second level under a country code is a public suffix (review, 2026-11-03).
+check('gov.uk, com.hk and com.tr keep their third label', [registrableDomain('jobs.acme.gov.uk'), registrableDomain('a.b.com.hk'), registrableDomain('x.y.com.tr')], ['acme.gov.uk', 'b.com.hk', 'y.com.tr']);
+check('…while a Workday tenant is still one service', registrableDomain('acme.wd5.myworkdayjobs.com'), 'myworkdayjobs.com');
 
 // An entry with no usable URL must still yield a key the limiter tolerates,
 // and must never throw.

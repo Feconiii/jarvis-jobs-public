@@ -83,5 +83,29 @@ console.log('\n🧪 Phenom: the posting page\'s own record (2026-10-07)');
   check('a home page (no job) gives nothing', phenomPosting('<script>phApp.ddo = {"siteConfig":{}};</script>'), null);
 }
 
+console.log('\n🧪 SAP SuccessFactors job pages: schema.org microdata, no JSON-LD (Teradyne, Qorvo, Veeco)');
+{
+  const { microdataPosting } = await import('./embedded-posting.mjs');
+  // Trimmed from jobs.teradyne.com/Teradyne/job/…/1390606800/, 2026-10-18:
+  // nested spans inside the description, the address as <meta> tags.
+  const page = `<html><body><div class="jobDisplayShell" itemscope="itemscope" itemtype="http://schema.org/JobPosting">
+    <span itemprop="jobLocation" itemscope itemtype="http://schema.org/Place"><span itemprop="address" itemscope itemtype="http://schema.org/PostalAddress"><meta itemprop="addressLocality" content="Sunnyvale"><meta itemprop="addressRegion" content="CA"><meta itemprop="postalCode" content="94085"><meta itemprop="addressCountry" content="US"></span></span>
+    <meta itemprop="datePosted" content="Mon Oct 05 07:00:00 UTC 2026"><meta itemprop="hiringOrganization" content="Teradyne">
+    <h1 id="job-title" itemprop="title">Field Application Engineer (SEG, San Jose, CA)</h1>
+    <span itemprop="description" class="jobdescription"><p><span style="font-size:10pt"><span>We are the global test and automation specialists.</span></span></p><ul><li>Bachelor's degree in EE or ME</li></ul></span>
+    <span itemprop="industry">Testing</span></div><footer><span>Cookie settings</span></footer></body></html>`;
+  const jp = microdataPosting(page);
+  check('title', jp?.title, 'Field Application Engineer (SEG, San Jose, CA)');
+  check('the whole description, nested spans included, and nothing after it',
+    [jp?.description.includes('test and automation specialists'), jp?.description.includes("Bachelor's degree"), jp?.description.includes('Testing'), jp?.description.includes('Cookie')],
+    [true, true, false, false]);
+  check('where it is', jp?.jobLocation?.[0]?.address, { '@type': 'PostalAddress', addressLocality: 'Sunnyvale', addressRegion: 'CA', addressCountry: 'US' });
+  check('the date parses', new Date(jp?.datePosted).toISOString(), '2026-10-05T07:00:00.000Z');
+  check('embeddedPosting finds it', embeddedPosting(page)?.title, 'Field Application Engineer (SEG, San Jose, CA)');
+  check('a JobPosting scope with an empty description is nothing, not a posting',
+    microdataPosting('<div itemscope itemtype="https://schema.org/JobPosting"><h1 itemprop="title">X</h1><span itemprop="description">  </span></div>'), null);
+  check('a page with no JobPosting scope gives nothing', microdataPosting('<span itemprop="description">hello</span>'), null);
+}
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

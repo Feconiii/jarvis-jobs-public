@@ -186,6 +186,28 @@ beside each PDF before trusting a layout.
   discovery source.
 - **Backups** — `npm run jarvis:backup` copies your decisions and hand-written
   files to `jarvis-backup/`.
+- **Scheduled search (Windows)** — `powershell -ExecutionPolicy Bypass -File
+  jarvis/register-daily-search.ps1` adds the task "Jarvis Daily Job Search"
+  (7:30 AM and 5:10 PM, or as soon as the machine wakes). It runs at
+  below-normal priority and logs to `data/jarvis/daily-search.log`. The
+  dashboard also runs the same search every 6 hours while it is up.
+- **H-1B record** — if you need sponsorship, download the newest "LCA
+  Disclosure Data" file from dol.gov's foreign-labor performance page in your
+  browser (the site refuses scripts) into Downloads. The daily pass imports it
+  (`npm run jarvis:lca -- <file.xlsx>` does it by hand), and the cards show
+  each employer's petition count.
+- **Outreach and the LinkedIn tool** — the Outreach tab works without any
+  sign-in (public pages only). For Claude Code's signed-in LinkedIn tool,
+  install `uv` (`uvx` on your PATH); `.mcp.json` starts it and Claude Code asks
+  before enabling it. Every call goes through `jarvis/linkedin-mcp-guard.mjs`
+  (attached in `.claude/settings.json`): read-only, 20–30 s apart, logged to
+  `data/jarvis/linkedin-mcp-usage.jsonl`. Messages are sent only by you, from
+  the Outreach tab's Send all or a send you schedule with
+  `node jarvis/send-outreach.mjs --at "<day> <time window>"`.
+- **OneDrive copy** — off. `resumes.onedrive: on` (or a folder in
+  `resumes.onedrive_dir`) in `config/profile.yml`, or `JARVIS_ONEDRIVE=on` in
+  the environment the dashboard starts in, copies each built resume to your
+  OneDrive folder; `npm run jarvis:onedrive` copies once by hand.
 
 ## 11. Tests
 

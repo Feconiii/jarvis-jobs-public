@@ -33,7 +33,9 @@
 //   pending    never looked for. The resolver takes these first.
 //   no-board   looked for, nothing answered. Asked again after 30 days (3 when
 //              a shared ATS was refusing us — F-444: a refusal is not absence).
-//   partial    a Workday tenant without its site path. Asked again in 14 days.
+//   partial    a Workday tenant without its site path, or a board shared with a
+//              tracked company beside one nothing reads. Asked again in 14 days;
+//              swept on LinkedIn like no-board.
 //
 // Coverage is then a NUMBER — tracked over everything not decided against —
 // printed at the end of every scan and every daily run, so a backlog like
@@ -75,6 +77,17 @@ export const LINKEDIN_PAGE = 10;
 const DAY = 24 * 60 * 60 * 1000;
 /** How long a settled answer stands before the board is looked for again. */
 export const RETRY_DAYS = { 'no-board': 30, partial: 14, refused: 3 };
+// A NAME REFUSED AGAIN WAITS LONGER, AND IS NEVER GIVEN UP (2026-11-03).
+// 1,216 names had been asked seven times three days apart while Workable kept
+// throttling: each retry re-sent the same probes into a full slow lane. A
+// refusal is throttling, not an answer, so the wait doubles from the last one
+// (3, 6, 12, 24 days at most) and the name is always asked again.
+export const REFUSED_MAX_DAYS = 24;
+export function refusedRetryDays(prev) {
+  if (!prev || !/refusing/.test(String(prev.outcome || ''))) return RETRY_DAYS.refused;
+  const gap = (Date.parse(prev.next_attempt || '') - Date.parse(prev.last_attempt || '')) / DAY;
+  return Math.min(Math.max(Number.isFinite(gap) ? gap * 2 : RETRY_DAYS.refused, RETRY_DAYS.refused), REFUSED_MAX_DAYS);
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS employers (
@@ -115,6 +128,13 @@ export function openUniverse(file = UNIVERSE_DB) {
   if (!cols.has('listing')) db.exec("ALTER TABLE employers ADD COLUMN listing TEXT NOT NULL DEFAULT ''");
   if (!cols.has('listing_count')) db.exec('ALTER TABLE employers ADD COLUMN listing_count INTEGER NOT NULL DEFAULT 0');
   if (!cols.has('listing_checked')) db.exec('ALTER TABLE employers ADD COLUMN listing_checked TEXT');
+  // When LinkedIn itself last named the employer hiring. last_seen moves for
+  // any source, so it cannot say that (F-1039 review). A row LinkedIn alone
+  // ever named starts from its last_seen; the rest wait for LinkedIn's next pass.
+  if (!cols.has('linkedin_seen')) {
+    db.exec('ALTER TABLE employers ADD COLUMN linkedin_seen TEXT');
+    db.exec("UPDATE employers SET linkedin_seen = last_seen WHERE sources = 'linkedin'");
+  }
   return db;
 }
 
@@ -217,11 +237,15 @@ const startsWith = (long, short) => short.length <= long.length && short.every((
  * ordinary word (GENERIC_HEADS), so "Constellation" is neither Constellation
  * Brands nor Constellation Energy.
  */
-export function matchTracked(name, index) {
+export function matchTracked(name, index, { exact = false } = {}) {
   const toks = nameTokens(name);
   if (!toks.length) return null;
   const hit = index.exact.get(toks.join(''));
   if (hit) return hit;
+  // A NAME FROM A CURATED LIST IS THE COMPANY'S OWN (F-947): a hiring list
+  // names the company exactly, so "Cambium" (materials, LA) on Grace Gong's
+  // list is not the tracked Cambium Networks. Exact or alias only.
+  if (exact) return null;
   for (const { toks: t, rec } of index.byFirst.get(toks[0]) || []) {
     const shorter = t.length <= toks.length ? t : toks;
     if (shorter.join('').length < 5) continue;
@@ -253,6 +277,7 @@ export function ingest(db, rows, source, { now = new Date().toISOString() } = {}
   const ins = db.prepare(`INSERT INTO employers (key, name, site, sources, hardware, evidence, sample, first_seen, last_seen)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const upd = db.prepare(`UPDATE employers SET site = ?, sources = ?, hardware = ?, evidence = ?, sample = ?, last_seen = ? WHERE key = ?`);
+  const linkedinSeen = source === 'linkedin' ? db.prepare('UPDATE employers SET linkedin_seen = ? WHERE key = ?') : null;
   let added = 0, seen = 0, skipped = 0;
   db.exec('BEGIN');
   try {
@@ -263,17 +288,21 @@ export function ingest(db, rows, source, { now = new Date().toISOString() } = {}
       // board is how Raydar happened (F-509).
       if (!key || NEVER_TRACK.test(name)) { skipped++; continue; }
       const titles = (r.titles || []).filter(Boolean);
-      const hw = titles.some((t) => worthTracking(t)) ? 1 : 0;
+      // A curated list names the company and its field, not a posting title
+      // (discover-radar.mjs): the caller says it is hardware.
+      const hw = r.hardware || titles.some((t) => worthTracking(t)) ? 1 : 0;
       const n = Number(r.count) || titles.length || 1;
       const prev = get.get(key);
       if (!prev) {
         ins.run(key, name, r.site || '', source, hw, n, titles.slice(0, 4).join(' | ').slice(0, 300), now, now);
+        linkedinSeen?.run(now, key);
         added++;
         continue;
       }
       const sources = [...new Set([...String(prev.sources).split(','), source].filter(Boolean))].join(',');
       upd.run(prev.site || r.site || '', sources, prev.hardware || hw, Math.max(prev.evidence, n),
         prev.sample || titles.slice(0, 4).join(' | ').slice(0, 300), now, key);
+      linkedinSeen?.run(now, key);
       seen++;
     }
     db.exec('COMMIT');
@@ -312,15 +341,20 @@ export function storeRows(jobsDbPath = JOBS_DB) {
  * Bring every row in line with portals.yml: an employer the list now has is
  * tracked (or disabled); one whose entry has gone back to pending.
  */
+/** Ledger sources that are curated lists naming each company exactly (F-947). */
+export const CURATED_SOURCES = new Set(['radar', 'startup-lists']);
+
 export function sync(db, entries = portalsEntries()) {
   const index = trackedIndex(entries);
-  const rows = db.prepare("SELECT key, name, state, tracked_as FROM employers WHERE state IN ('pending','tracked','disabled','no-board','partial')").all();
+  const rows = db.prepare("SELECT key, name, state, tracked_as, sources FROM employers WHERE state IN ('pending','tracked','disabled','no-board','partial')").all();
   const set = db.prepare('UPDATE employers SET state = ?, tracked_as = ? WHERE key = ?');
   let changed = 0;
   db.exec('BEGIN');
   try {
     for (const r of rows) {
-      const m = matchTracked(r.name, index);
+      // Named by a curated hiring list and nothing else: exact match only (F-947).
+      const curatedOnly = !!r.sources && String(r.sources).split(',').every((s) => CURATED_SOURCES.has(s));
+      const m = matchTracked(r.name, index, { exact: curatedOnly });
       // A board found under another name ("same board as …") is tracked through
       // that entry; the name match cannot see it, so it is left alone.
       if (!m && r.state === 'tracked' && r.tracked_as.startsWith('board:')) continue;
@@ -334,12 +368,16 @@ export function sync(db, entries = portalsEntries()) {
 }
 
 /** What the resolver should look at next: never-tried first, hardware first. */
-export function due(db, { limit = 400, hardwareOnly = false, now = new Date().toISOString(), retryAll = false, minEvidence = 0 } = {}) {
+export function due(db, { limit = 400, hardwareOnly = false, now = new Date().toISOString(), retryAll = false, minEvidence = 0, shared = false } = {}) {
+  // shared: the employers settled as "same board as a tracked company" are
+  // asked once more (--recheck-shared, 2026-11-07), so one whose careers page
+  // also links a board nothing reads becomes partial (Bastian Solutions).
+  const sharedRows = shared ? "OR (state = 'tracked' AND outcome = 'same board as a tracked company')" : '';
   // retryAll: every no-board / partial row is due now, whatever its retry date —
   // for a rerun after the resolver learned something new (a fixed pattern, a new
   // provider). minEvidence narrows it to employers worth that.
   return db.prepare(`SELECT key, name, site FROM employers
-    WHERE (state = 'pending' OR (state IN ('no-board','partial') AND (${retryAll ? '1 = 1' : 'next_attempt IS NULL OR next_attempt <= ?'})))
+    WHERE (state = 'pending' OR (state IN ('no-board','partial') AND (${retryAll ? '1 = 1' : 'next_attempt IS NULL OR next_attempt <= ?'})) ${sharedRows})
     ${hardwareOnly ? 'AND hardware = 1' : ''}
     ${minEvidence > 0 ? `AND evidence >= ${Number(minEvidence) | 0}` : ''}
     ORDER BY (state = 'pending') DESC, hardware DESC,
@@ -349,34 +387,95 @@ export function due(db, { limit = 400, hardwareOnly = false, now = new Date().to
       evidence DESC, name LIMIT ?`).all(...(retryAll ? [] : [now]), new Date(Date.parse(now) - 30 * DAY).toISOString(), limit);
 }
 
+/** Settled as tracked (or partial) through a board another tracked company owns (F-1049). */
+export const sharedRow = (p) => (p?.state === 'tracked' || p?.state === 'partial')
+  && /^same board as a tracked company/.test(String(p.outcome || ''));
+/** That shared board's URL: `board:<url>` when tracked, "(<url>)" in a partial row's outcome. */
+export function sharedBoard(p) {
+  if (String(p?.tracked_as || '').startsWith('board:')) return p.tracked_as.slice(6);
+  return String(p?.outcome || '').match(/\((https?:[^)\s]+)\)/)?.[1] || '';
+}
+const boardKey = (u) => String(u || '').toLowerCase().replace(/^https?:\/\//, '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+export const sameBoardUrl = (a, b) => !!a && !!b && boardKey(a) === boardKey(b);
+/** Names whose ledger row is tracked through a shared board (asked without --write) and the rest. */
+export function splitShared(db, companies) {
+  const prevOf = db.prepare('SELECT state, outcome FROM employers WHERE key = ?');
+  const shared = companies.filter((c) => sharedRow(prevOf.get(keyOf(plainName(c.name)))));
+  return { shared, rest: companies.filter((c) => !shared.includes(c)) };
+}
+const PROPOSALS = path.join(ROOT, 'data', 'jarvis', 'recheck-proposals.jsonl');
+function proposeToFile(p) { try { appendFileSync(PROPOSALS, `${JSON.stringify(p)}\n`); } catch { /* a record */ } }
+
 /**
  * Read a discover-ats --results-file back into the ledger.
  * `refused`: the run reported a shared ATS refusing us, so its misses are not
  * real and come back in days, not a month.
  */
-export function record(db, lines, { refused = false, now = new Date() } = {}) {
+export function record(db, lines, { refused = false, now = new Date(), propose = proposeToFile } = {}) {
   const at = now.toISOString();
   const later = (d) => new Date(now.getTime() + d * DAY).toISOString();
   const upd0 = db.prepare(`UPDATE employers SET state = ?, tracked_as = ?, outcome = ?, attempts = attempts + 1,
     last_attempt = ?, next_attempt = ?, platform = ? WHERE key = ?`);
   const upd = { run: (state, as, outcome, at1, next, key, platform = '') => upd0.run(state, as, outcome, at1, next, platform, key) };
+  const prevOf = db.prepare('SELECT state, tracked_as, outcome, last_attempt, next_attempt FROM employers WHERE key = ?');
+  // A RECHECK ADDS, IT NEVER TAKES AWAY (F-1049, 2026-11-12). --recheck-shared
+  // asks the employers settled as "same board as a tracked company" once more,
+  // to find a SECOND board. A miss there says nothing about the first: the
+  // 11-12 run turned 16 of them into no-board and blanked the board they share
+  // (Pall → Danaher's Workday, Weir Minerals → Weir's, three ProMach brands).
+  // And a DIFFERENT board found under the name replaces nothing: the same run
+  // re-pointed H&P at HP Inc.'s Greenhouse, Sentry at the software company's
+  // Ashby, Bastian at viastore's Stuttgart Personio and Uber at a one-posting
+  // SmartRecruiters account. Sentry's slug WAS its name, so no name check would
+  // have caught it: such a board is written down as a proposal for a person to
+  // read (data/jarvis/recheck-proposals.jsonl) and the row keeps its board.
+  // Only a second board beside the SAME shared one (partial, with `also`) is applied.
+  const keepShared = db.prepare('UPDATE employers SET attempts = attempts + 1, last_attempt = ?, next_attempt = ? WHERE key = ?');
+  const keep = (key, prev) => keepShared.run(at, prev.state === 'partial' ? later(RETRY_DAYS.partial) : prev.next_attempt ?? null, key);
   const counts = {};
+  // WHICH misses were not real (F-946). A run that names its unchecked names
+  // retries only those in three days; the rest are real misses. Only a run
+  // that names none (an older results file) falls back to the run-wide flag.
+  const unchecked = new Set(lines.filter((l) => l.outcome === 'unchecked').map((l) => keyOf(plainName(l.name))));
+  const listed = unchecked.size > 0 || lines.some((l) => l.outcome === 'unchecked-listed');
+  const wasRefused = (key) => (listed ? unchecked.has(key) : refused);
   db.exec('BEGIN');
   try {
     for (const l of lines) {
       const key = keyOf(plainName(l.name));
       if (!key) continue;
+      const refused = wasRefused(key);
       counts[l.outcome] = (counts[l.outcome] || 0) + 1;
+      const prev = prevOf.get(key);
+      if (sharedRow(prev) && l.outcome !== 'gated') {
+        const board = sharedBoard(prev);
+        const same = !l.url || sameBoardUrl(l.url, board);
+        const secondBoard = l.outcome === 'partial' && l.also && same;
+        if (!secondBoard) {
+          if (!same && ['tracked', 'found', 'dupe', 'partial'].includes(l.outcome)) {
+            propose({ at, name: l.name, key, shared: board, found: l.url, outcome: l.outcome, provider: l.provider || '', count: l.count ?? null });
+            counts.proposed = (counts.proposed || 0) + 1;
+          }
+          keep(key, prev);
+          continue;
+        }
+      }
       switch (l.outcome) {
-        case 'tracked': upd.run('tracked', l.url ? `board:${l.url}` : '', 'tracked', at, null, key); break;
+        case 'tracked': upd.run('tracked', l.url ? `board:${l.url}` : '', l.also ? `tracked; its careers page also links ${l.also}, which nothing here reads` : 'tracked', at, null, key, l.also || ''); break;
         case 'dupe': upd.run('tracked', `board:${l.url || ''}`, 'same board as a tracked company', at, null, key); break;
         case 'gated': upd.run('gated', '', 'clearance / ITAR employer', at, null, key); break;
-        case 'partial': upd.run('partial', '', `workday tenant, site unknown: ${l.url || ''}`, at, later(RETRY_DAYS.partial), key); break;
+        // …or a board shared with a tracked company, beside one nothing reads
+        // (Bastian Solutions: Toyota Automated Logistics' Workday + ADP MyJobs).
+        // Partial, so the LinkedIn sweep reads what only that board holds.
+        case 'partial': upd.run('partial', '', l.also
+          ? `same board as a tracked company (${l.url || ''}), and its careers page also links ${l.also}, which nothing here reads`
+          : `workday tenant, site unknown: ${l.url || ''}`, at, later(RETRY_DAYS.partial), key, l.also || ''); break;
         // A miss on a platform we cannot read yet is named, so the report can
         // say "312 employers are on UKG" instead of "312 have no board".
-        case 'miss': upd.run('no-board', '', l.platform ? `runs on ${l.platform}, which nothing here reads yet`
+        case 'miss':
+          upd.run('no-board', '', l.platform ? `runs on ${l.platform}, which nothing here reads yet`
           : refused ? 'no board (a shared ATS was refusing)' : 'no board answered', at,
-          later(refused ? RETRY_DAYS.refused : RETRY_DAYS['no-board']), key, l.platform || ''); break;
+          later(refused ? refusedRetryDays(prevOf.get(key)) : RETRY_DAYS['no-board']), key, l.platform || ''); break;
         default: break;   // 'known' and 'found' settle nothing; sync() reads portals.yml
       }
     }
@@ -400,6 +499,20 @@ export function readResults(file) {
  */
 export async function resolveNames(db, companies, { write = true, log = process.stderr, concurrency = 8, lookup = lookupSite } = {}) {
   if (!companies.length) return {};
+  // AN EMPLOYER TRACKED THROUGH A SHARED BOARD IS ASKED WITHOUT --write (F-1049):
+  // discover-ats would append whatever board it finds under the name to
+  // portals.yml before record() could refuse it (H&P → HP Inc.'s Greenhouse).
+  // What it finds comes back as `found` and becomes a proposal.
+  if (write) {
+    const { shared, rest } = splitShared(db, companies);
+    if (shared.length) {
+      const opts = { log, concurrency, lookup };
+      const a = rest.length ? await resolveNames(db, rest, { ...opts, write: true }) : {};
+      const b = await resolveNames(db, shared, { ...opts, write: false });
+      for (const [k, v] of Object.entries(b)) a[k] = (a[k] || 0) + v;
+      return a;
+    }
+  }
   // A name with no website gets one looked up, so its careers page can be
   // followed instead of guessing `<name>.com` (branded boards live there).
   if (lookup) await fillSites(db, companies, lookup);
@@ -562,6 +675,41 @@ export function coverageLine(c) {
 // throttling stops and says how far it got, and the rest stay due.
 
 export const SWEEP_RECHECK_DAYS = 14;
+// HIRING NOW, ASKED SOONER (2026-11-07). Aseon Labs was swept on 10-30, found
+// nothing, and posted the roles he saw on Jack & Jill days later; the next
+// sweep was two weeks out. An employer in his field that LinkedIn showed
+// hiring in the last 30 days (its last sweep listed his-field postings, or a
+// LinkedIn harvest named it — linkedin_seen, not last_seen, which any source
+// moves) is asked again after 3 days — out of the same
+// daily budget, never above it: these take at most FRESH_SHARE of it, the
+// sweep-confirmed ones first, and the fortnightly rotation keeps the rest.
+export const FRESH_RECHECK_DAYS = 3;
+export const FRESH_WINDOW_DAYS = 30;
+export const FRESH_SHARE = 2 / 3;
+
+/**
+ * Who the sweep asks today, at most `budget`: employers hiring in his field on
+ * LinkedIn lately and not asked for 3 days (up to FRESH_SHARE of the budget),
+ * then the fortnightly rotation. Each row carries `fresh` for the log.
+ */
+export function sweepDue(db, { budget = 300, now = new Date() } = {}) {
+  const n = Math.max(0, Math.floor(Number(budget) || 0));
+  if (!n) return [];
+  const ago = (d) => new Date(now.getTime() - d * DAY).toISOString();
+  const window = ago(FRESH_WINDOW_DAYS);
+  const fresh = db.prepare(`SELECT key, name FROM employers WHERE state IN ('no-board','partial') AND hardware = 1
+    AND ((listing = 'hiring-hw' AND listing_checked >= ?) OR linkedin_seen >= ?)
+    AND (listing_checked IS NULL OR listing_checked < ?)
+    ORDER BY (listing = 'hiring-hw') DESC, evidence DESC, name LIMIT ?`)
+    .all(window, window, ago(FRESH_RECHECK_DAYS), Math.floor(n * FRESH_SHARE))
+    .map((r) => ({ ...r, fresh: true }));
+  const taken = new Set(fresh.map((r) => r.key));
+  const rest = db.prepare(`SELECT key, name FROM employers WHERE state IN ('no-board','partial')
+    AND (listing_checked IS NULL OR listing_checked < ?)
+    ORDER BY hardware DESC, evidence DESC, name LIMIT ?`).all(ago(SWEEP_RECHECK_DAYS), n)
+    .filter((r) => !taken.has(r.key)).slice(0, n - fresh.length);
+  return [...fresh, ...rest];
+}
 
 /**
  * @param {import('node:sqlite').DatabaseSync} db
@@ -570,10 +718,8 @@ export const SWEEP_RECHECK_DAYS = 14;
 export async function linkedinSweep(db, { budget = 300, days = 30, dryRun = false, harvestImpl = null, importImpl = null,
   log = (s) => console.log(s), now = new Date() } = {}) {
   const harvest = harvestImpl || (await import('./discover-linkedin.mjs')).harvest;
-  const stale = new Date(now.getTime() - SWEEP_RECHECK_DAYS * DAY).toISOString();
-  const rows = db.prepare(`SELECT key, name FROM employers WHERE state IN ('no-board','partial')
-    AND (listing_checked IS NULL OR listing_checked < ?)
-    ORDER BY hardware DESC, evidence DESC, name LIMIT ?`).all(stale, budget);
+  const rows = sweepDue(db, { budget, now });
+  const freshN = rows.filter((r) => r.fresh).length;
   const save = db.prepare('UPDATE employers SET listing = ?, listing_count = ?, listing_checked = ? WHERE key = ?');
   const counts = { 'hiring-hw': 0, 'hiring-other': 0, none: 0 };
   let done = 0, throttled = false, imported = 0, batch = 0;
@@ -622,8 +768,8 @@ export async function linkedinSweep(db, { budget = 300, days = 30, dryRun = fals
     if (done % 100 === 0) { await flush(); log(`  … ${done}/${rows.length} swept — ${JSON.stringify(counts)}`); }
   }
   await flush();
-  log(`  swept ${done} of ${rows.length}${throttled ? ' — LinkedIn kept throttling, the rest stay due' : ''}: ${JSON.stringify(counts)}`);
-  return { swept: done, due: rows.length, throttled, counts, imported };
+  log(`  swept ${done} of ${rows.length} (${freshN} hiring lately, asked again after ${FRESH_RECHECK_DAYS} days)${throttled ? ' — LinkedIn kept throttling, the rest stay due' : ''}: ${JSON.stringify(counts)}`);
+  return { swept: done, due: rows.length, fresh: freshN, throttled, counts, imported };
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────
@@ -637,6 +783,8 @@ const USAGE = `
     seed --names-file <txt> --source <s> [--sites-file <json>]
     resolve [--budget <n>] [--chunk <n>] [--concurrency <n>] [--hardware-only] [--dry-run]
             [--retry-all] [--min-evidence <n>]   misses again now, ignoring their retry date
+            [--recheck-shared]       …and employers tracked through another company's board,
+                                     once, in case their careers page links a second one
                                      look for the boards of what is due, and track them
     daily                            LinkedIn's last two days (and the public indexes on
                                      Sundays), then resolve 1,500
@@ -650,7 +798,7 @@ const USAGE = `
 const LOCK = path.join(ROOT, 'data', 'jarvis', 'universe.lock');
 
 /** One resolve run at a time; a lock whose process is gone is stale. */
-function takeLock() {
+export function takeLock() {
   try {
     const held = JSON.parse(readFileSync(LOCK, 'utf8'));
     if (held?.pid && held.pid !== process.pid) {
@@ -658,10 +806,13 @@ function takeLock() {
     }
   } catch { /* no lock */ }
   writeFileSync(LOCK, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
-  process.on('exit', () => {
-    try { if (JSON.parse(readFileSync(LOCK, 'utf8')).pid === process.pid) rmSync(LOCK); } catch { /* gone */ }
-  });
+  process.on('exit', releaseLock);
   return true;
+}
+
+/** Give the resolver's lock back now, if this process holds it (a caller that lives on after its write). */
+export function releaseLock() {
+  try { if (JSON.parse(readFileSync(LOCK, 'utf8')).pid === process.pid) rmSync(LOCK); } catch { /* not ours, or gone */ }
 }
 
 function flag(args, name, dflt) {
@@ -710,9 +861,10 @@ async function main(argv) {
       console.log('  by state:', c.by);
       console.log('  hardware:', c.hardware.by);
       // What the misses run on: the platforms worth a provider next.
-      const plat = db.prepare(`SELECT platform, count(*) AS n FROM employers WHERE state = 'no-board' AND platform <> ''
+      // …and partial rows, named by the second board nothing reads (F-1038).
+      const plat = db.prepare(`SELECT platform, count(*) AS n FROM employers WHERE state IN ('no-board','partial') AND platform <> ''
         GROUP BY platform ORDER BY n DESC`).all();
-      if (plat.length) console.log('  no board, by the platform it runs on:', Object.fromEntries(plat.map((p) => [p.platform, p.n])));
+      if (plat.length) console.log('  no board (or partly read), by the platform it runs on:', Object.fromEntries(plat.map((p) => [p.platform, p.n])));
       const n = Number(flag(args, 'pending', 20));
       const next = due(db, { limit: n });
       if (next.length) {
@@ -759,17 +911,49 @@ async function main(argv) {
         await run('discover-runway.mjs', ['--write']);
         // The slower indexes weekly: their lists change by the month.
         if (new Date().getDay() === 0) await run('discover-sources.mjs', ['--write']);
+        // Twice a week, the curated "(HIRING LIST)" posts on LinkedIn (Grace
+        // Gong's On My Radar) and in-house "my team is hiring" posts at the
+        // companies he applied to (discover-radar.mjs, 2026-10-31: "i dont
+        // want to have to call it manually"). It reads through the signed-in
+        // MCP in a headless Claude session, paced by the same guard.
+        if ([1, 4].includes(new Date().getDay())) await run('discover-radar.mjs', ['--write']);
         // And weekly, every big employer's board is held to its size: a thin or
         // stale board is replaced by the one it really uses (F-713).
         if (new Date().getDay() === 0) await run('reboard.mjs', ['--write']);
+        // And weekly, the coverage meter: live postings from outside the scanner
+        // (Simplify, public ATS JSON) looked up in the store, logged (2026-11-03).
+        if (new Date().getDay() === 0) await run('coverage-meter.mjs', ['--track']);
+        // And weekly, tracked employers' separate early-career boards (Astera
+        // Labs' "asteraearlycareer2027": its new-grad roles), 40 a week.
+        if (new Date().getDay() === 0) await run('sibling-boards.mjs', ['--write', '--limit', '40']);
+        // Every day, Simplify's new-grad listings his flags allow, through the
+        // store's normal import (2026-11-03); its employers go to the ledger.
+        await run('import-simplify.mjs', []);
+        // …then a board row still without a body takes one from a copy of it
+        // the store already holds (F-978): LinkedIn, Simplify, Handshake.
+        await run('copy-bodies.mjs', ['--write']);
+        // The H-1B record (F-984): a newer disclosure file in his Downloads is
+        // imported and the ledger reseeded; on Sundays today's companies are
+        // linked again to the file loaded; an overdue quarter is said.
+        await run('lca-refresh.mjs', new Date().getDay() === 0 ? ['--relink'] : []);
       }
       sync(db);
       // 1,500 a day (was 400): a rate-limited night leaves thousands of misses
       // due again in three days, and 400 a day took two weeks to get through them.
-      const budget = Number(flag(args, 'budget', 1500));
+      let budget = Number(flag(args, 'budget', 1500));
+      // A copied posting's link names its board (Resurgent Industries,
+      // 2026-11-07: the name guesses missed "resurgent-industries"). Those are
+      // checked first, one live call per board, out of the SAME budget.
+      if (cmd === 'daily' && !args.includes('--dry-run')) {
+        try {
+          const links = await (await import('./board-links.mjs')).runLinks({ db, budget: Math.min(300, budget), write: true });
+          budget = Math.max(0, budget - links.calls);
+        } catch (e) { console.error(`  ⚠ board links skipped: ${e.message}`); }
+      }
       const chunk = Math.max(10, Number(flag(args, 'chunk', 150)));
       const list = due(db, { limit: budget, hardwareOnly: args.includes('--hardware-only'),
-        retryAll: args.includes('--retry-all'), minEvidence: Number(flag(args, 'min-evidence', 0)) || 0 });
+        retryAll: args.includes('--retry-all'), minEvidence: Number(flag(args, 'min-evidence', 0)) || 0,
+        shared: cmd === 'resolve' && args.includes('--recheck-shared') });
       console.log(`  ${list.length} employer(s) due a board check (budget ${budget}, ${chunk} per run)`);
       const totals = {};
       for (let i = 0; i < list.length; i += chunk) {

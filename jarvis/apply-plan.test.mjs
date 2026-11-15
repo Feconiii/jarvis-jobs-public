@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  planField, planForm, decide, RESUME_FIELD_RE, MAX_MULTI, EXPECTED_EXTENSION, extensionIsStale, chooseBand, chooseDelay, chooseResidence, formatForType, planEntries,
+  planField, planForm, inCalifornia, decide, RESUME_FIELD_RE, MAX_MULTI, EXPECTED_EXTENSION, extensionIsStale, chooseBand, chooseDelay, chooseResidence, formatForType, planEntries, portfolioPdfName,
 } from './apply-plan.mjs';
 import { chooseOption } from './apply/_form.mjs';
 
@@ -39,6 +39,13 @@ test('a plain question is filled from the profile', () => {
   const a = planField(field({ label: 'First Name' }), PROFILE);
   assert.equal(a.action, 'fill');
   assert.equal(a.value, 'Alex');
+});
+
+test('a month box holding a year is not "already set" (Coherent End Date Month "2027", 2026-10-23)', () => {
+  const a = planField(field({ label: 'End Date Month', type: 'prompt', current: '2027' }), PROFILE);
+  assert.notEqual(a.action, 'skip', 'a year in a month box is reported, never kept as done');
+  const b = planField(field({ label: 'End Date Month', type: 'prompt', current: 'May' }), PROFILE);
+  assert.equal(b.action, 'skip', 'a real month stays');
 });
 
 test('an unknown question is left blank and reported, never guessed', () => {
@@ -1339,7 +1346,30 @@ test('F-621: Micron\'s three first names, told apart by page order', () => {
   const firsts = planForm(F, profile, {}).actions.filter((a) => /^first name$/i.test(a.label)).map((a) => a.value);
   assert.deepEqual(firsts, ['Alex', 'Anh Minh Alex', 'Alex'], 'contact, legal, preferred — as he sent them twice');
   const plain = planForm(F.slice(0, 2), profile, {}).actions.map((a) => a.value);
-  assert.deepEqual(plain, ['Anh Minh Alex', 'Rivera'], 'no preferred-name section: the legal name, as before');
+  assert.deepEqual(plain, ['Alex', 'Rivera'], 'no preferred-name section: the name he goes by (his answer, 2026-10-23)');
+});
+
+test('F-911: Oracle\'s "Miscellaneous Documents" box never takes the resume, even as the only upload left', () => {
+  const F = [
+    { label: 'Optional: Miscellaneous Documents — Upload Attachment', type: 'file', options: [] },
+    { label: 'Import your profile from resume', type: 'file', options: [] },
+  ];
+  const a = planForm(F, PROFILE, {}).actions.find((x) => /Miscellaneous/.test(x.label));
+  assert.notEqual(a.action, 'upload', `the resume slot was hidden because it is full; got ${JSON.stringify(a)}`);
+  const rippling = planForm([{ label: 'Drop or select (.doc / .docx / .pdf)', type: 'file', options: [] }], PROFILE, {}).actions[0];
+  assert.equal(rippling.action, 'upload', 'an unnamed lone slot is still the resume (Cintal)');
+});
+
+test('First Name beside a Preferred First Name box is his legal given names (his call, 2026-10-24)', () => {
+  const profile = { answers: {}, identity: { first_name: 'Anh Minh Alex', last_name: 'Rivera', preferred_full_name: 'Alex Rivera' } };
+  const F = [['First Name', 'text'], ['Middle Name', 'text'], ['Last Name', 'text'], ['Preferred First Name', 'text']]
+    .map(([label, type]) => ({ label, type, options: [] }));
+  const v = Object.fromEntries(planForm(F, profile, {}).actions.map((a) => [a.label, a.value]));
+  assert.equal(v['First Name'], 'Anh Minh Alex');
+  assert.equal(v['Preferred First Name'], 'Alex');
+  assert.equal(v['Last Name'], 'Rivera');
+  const alone = planForm(F.filter((f) => f.label !== 'Preferred First Name'), profile, {}).actions.find((a) => a.label === 'First Name');
+  assert.equal(alone.value, 'Alex', 'no preferred box: the name he goes by (2026-10-23)');
 });
 
 test('F-631: Micron\'s contact first name stays "Alex" on the pass after the form rebuilds', () => {
@@ -1349,9 +1379,9 @@ test('F-631: Micron\'s contact first name stays "Alex" on the pass after the for
     .map(([label, type]) => ({ label, type, options: [] }));
   const first = planForm(F, profile, {}).actions.find((a) => /^first name$/i.test(a.label));
   assert.equal(first.value, 'Alex');
-  // Greenhouse and the rest ask First, Last, Email: the legal name, unchanged.
+  // Greenhouse and the rest ask First, Last, Email: the name he goes by since 2026-10-23.
   const gh = [['First Name', 'text'], ['Last Name', 'text'], ['Email', 'text']].map(([label, type]) => ({ label, type, options: [] }));
-  assert.equal(planForm(gh, profile, {}).actions.find((a) => /^first name$/i.test(a.label)).value, 'Anh Minh Alex');
+  assert.equal(planForm(gh, profile, {}).actions.find((a) => /^first name$/i.test(a.label)).value, 'Alex');
 });
 
 test('F-621: Hyve\'s pay ranges — his target takes its band, outside the range "Other"; money in shorthand is read', () => {
@@ -1591,10 +1621,10 @@ test('how he heard is answered, in every shape the question takes', () => {
     planForm([{ id: 'x', label, type: options.length ? 'select' : 'text', options, required: true }], P, {}).actions[0];
 
   assert.equal(ask('How did you learn about this opportunity?✱ — FieldAI Website',
-    ['FieldAI Website', 'LinkedIn', 'Referral', 'Job Board', 'Other']).value, 'LinkedIn',
+    ['FieldAI Website', 'LinkedIn', 'Referral', 'Job Board', 'Other']).value, 'FieldAI Website',
   'the option text riding on the label must not decide the answer');
-  assert.equal(ask('How did you learn about this opportunity?').value, 'LinkedIn');
-  assert.equal(ask('How did you hear about us?').value, 'LinkedIn');
+  assert.equal(ask('How did you learn about this opportunity?').value, 'Company Website');
+  assert.equal(ask('How did you hear about us?').value, 'Company Website');
   // A LIST OF CATEGORIES takes the category answer — `decide` picks whichever
   // shape the form actually offers (F-263).
   assert.equal(ask('How did you hear about this role?',
@@ -1887,7 +1917,7 @@ test('SmartRecruiters rows get the job they already name, not the job at their p
   assert.equal(at(9).value, 'description of job 2');
   assert.equal(at(10).value, '05/2025');
   assert.equal(at(11).value, '08/2025');
-  assert.equal(at(12).action, 'skip', 'an ended job is not "currently work here"');
+  assert.equal(at(12).action, 'uncheck', 'an ended job is not "currently work here" — the box is cleared if ticked (F-871)');
   // Row 3 is Applied Materials.
   assert.equal(at(16).value, 'description of job 1');
   // Title and Company that hold something are never typed over.
@@ -1899,6 +1929,68 @@ test('SmartRecruiters rows get the job they already name, not the job at their p
   assert.equal(at(24).action, 'check');
   // And the section is NOT empty, so nothing is added again (F-562).
   assert.deepEqual(acts.entries, [], 'entries already on the page are not entered a second time');
+});
+
+// Phenom's work history (Honda, 2026-10-23): plain text boxes the resume parse
+// had already filled in ITS order — the job he holds first.
+const PHENOM_ROW = (company, title) => [
+  field({ label: 'Company Name', held: company || undefined }),
+  field({ label: 'Job Title', held: title || undefined }),
+  field({ type: 'select', label: 'Employer', options: ['Please Select', 'Current', 'Prior'] }),
+  field({ label: 'From Date', picker: 'mdy' }),
+  field({ label: 'End Date', picker: 'mdy' }),
+  field({ type: 'select', label: 'Type of Business', options: ['Please Select', 'Educational Services', 'Manufacturing'] }),
+];
+
+test('F-873: a job row whose text box already names a job gets THAT job\'s dates and lists (Phenom, Honda 2026-10-23)', () => {
+  const fields = [...PHENOM_ROW('Makerspace MTC', 'Manufacturing Lead'), ...PHENOM_ROW('Applied Materials', 'Robotics Intern'), ...PHENOM_ROW('Acme Steel', '')];
+  const a = planForm(fields, HISTORY_PROFILE).actions;
+  // Row 1 holds Makerspace: Current, its own start, no end date.
+  assert.equal(a[2].value, 'Current', `row 1 is the job it names: ${JSON.stringify(a[2])}`);
+  assert.match(String(a[3].value), /^08\/\d{2}\/2024$/);
+  assert.equal(a[4].action, 'skip', 'Makerspace is still held — no end date');
+  // Row 2 holds Applied Materials: Prior, May–August 2026.
+  assert.equal(a[8].value, 'Prior');
+  assert.match(String(a[9].value), /^05\/\d{2}\/2026$/);
+  assert.match(String(a[10].value), /^08\/\d{2}\/2026$/);
+  assert.equal(a[11].value, 'Manufacturing');
+  // Row 3 holds Acme Steel.
+  assert.match(String(a[15].value), /^05\/\d{2}\/2025$/);
+});
+
+test('F-871: Paylocity\'s "Currently Working Here" is ticked for the job he holds and cleared for one that ended', () => {
+  const row = (company) => [
+    field({ label: 'Company Name (required)', held: company }),
+    field({ label: 'Start Date' }),
+    field({ type: 'checkbox', label: 'Reason for Leaving — Currently Working Here', options: ['Currently Working Here'] }),
+  ];
+  const a = planForm([...row('Applied Materials'), ...row('Makerspace MTC')], HISTORY_PROFILE).actions;
+  assert.equal(a[2].action, 'uncheck', `an ended job: ${JSON.stringify(a[2])}`);
+  assert.equal(a[5].action, 'check', 'the job he holds');
+});
+
+test('F-875/F-876/F-877: Apple\'s job rows — a May start is picked from a month list, "Current Employer" is No for an ended job, the second Year is the end\'s', () => {
+  const MONTHS = ['Month', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const YEARS = ['Year', '2027', '2026', '2025', '2024', '2023'];
+  const row = (held) => [
+    field({ label: 'Employer', held }),
+    field({ label: 'Job Title' }),
+    field({ type: 'radio', label: 'Current Employer', options: ['Yes', 'No'] }),
+    field({ type: 'select', label: 'Start Date', options: MONTHS }),
+    field({ type: 'select', label: 'Year', options: YEARS }),
+    field({ type: 'select', label: 'End Date', options: MONTHS }),
+    field({ type: 'select', label: 'Year', options: YEARS }),
+  ];
+  const a = planForm([...row('Acme Steel'), ...row('Makerspace MTC')], HISTORY_PROFILE).actions;
+  assert.equal(a[2].value, 'No', `an ended job is not the current employer: ${JSON.stringify(a[2])}`);
+  assert.equal(a[3].value, 'May', `"May 2025" is May on a month list: ${JSON.stringify(a[3])}`);
+  assert.equal(a[4].value, '2025');
+  assert.equal(a[5].value, 'August');
+  assert.equal(a[6].value, '2025', 'the second Year is the end year');
+  assert.equal(a[9].value, 'Yes', 'the job he holds');
+  assert.equal(a[11].value, '2024');
+  assert.equal(a[12].action, 'skip', 'no end month for the job he holds');
+  assert.equal(a[13].action, 'skip', 'and no end year');
 });
 
 test('an empty SmartRecruiters section still gets his entries', () => {
@@ -1949,6 +2041,30 @@ test('AN ANSWER LONGER THAN ITS BOX is cut to its leading clause for review, or 
   assert.equal(planField(field({ label: 'Phone', type: 'tel', maxLength: 10 }), PROFILE).value, '5550000000', 'a phone still takes its digits');
 });
 
+test('F-794: Oracle\'s "Import your profile from resume" is the parse slot; the resume goes in "Upload Resume" (Coherent, 2026-10-22)', () => {
+  const acts = planForm([
+    field({ label: 'Import your profile from resume', type: 'file' }),
+    field({ label: 'Upload Resume', type: 'file', id: 'attachment-upload-2' }),
+  ], PROFILE).actions;
+  assert.equal(acts[0].action, 'skip', `the import box is left alone: ${JSON.stringify(acts[0])}`);
+  assert.match(acts[0].why, /parse-a-resume/);
+  assert.equal(acts[1].action, 'upload', 'the real slot gets the resume');
+});
+
+test('F-795: a job row\'s Month box holding a YEAR gets the job\'s month; a proper month is kept, never his availability (Coherent, Oracle)', () => {
+  const P = { ...SR_PROFILE, answers: { ...SR_PROFILE.answers, earliest_start: 'June 2027 (graduating May 2027)' } };
+  const f = (label, type, current = '') => field({ label, type, current });
+  const acts = planForm([
+    f('Employer Name', 'text'), f('Job Title', 'text'),
+    f('Start Date Month', 'prompt', '2023'), f('Start Date Year', 'prompt'),
+    f('End Date Month', 'prompt', '2027'), f('End Date Year', 'prompt'),
+  ], P).actions.map((a) => [a.action, a.value]);
+  assert.deepEqual(acts.slice(2), [['prompt', 'May'], ['prompt', '2026'], ['prompt', 'August'], ['prompt', '2026']], JSON.stringify(acts));
+  const kept = planForm([f('Employer Name', 'text'), f('Job Title', 'text'), f('Start Date Month', 'prompt', 'June')], P).actions[2];
+  assert.equal(kept.action, 'skip', `a real month stays: ${JSON.stringify(kept)}`);
+  assert.ok(!/June 2027/.test(String(kept.value || '')));
+});
+
 test('GREENHOUSE SPLIT DATES: month menus and year boxes, for the job and for the degree (Lyft, F-572)', () => {
   // Measured 2026-09-24 on Lyft's Greenhouse form: "Start date month" and
   // "Start date year" were answered with his availability, "June 2027
@@ -1962,6 +2078,72 @@ test('GREENHOUSE SPLIT DATES: month menus and year boxes, for the job and for th
   assert.deepEqual(acts.slice(2, 6), [['prompt', 'May'], ['fill', '2026'], ['prompt', 'August'], ['fill', '2026']], 'the job\'s own dates');
   assert.deepEqual(acts.slice(8), [['prompt', 'August'], ['fill', '2023'], ['prompt', 'May'], ['fill', '2099']], 'the degree\'s own dates');
   assert.ok(!acts.some(([, v]) => /June 2027/.test(String(v))), 'his availability goes nowhere near a date row');
+});
+
+const UKG_MONTHS = ['Choose...', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+test('F-799: UKG\'s job and education rows — Company / Organization, Month, Year (YYYY), To month, To year — get each job\'s own values; the salutation Title is not a job (Yaskawa)', () => {
+  const P = { ...SR_PROFILE, answers: { ...SR_PROFILE.answers, earliest_start: 'June 2027 (graduating May 2027)' } };
+  const f = (label, type = 'text', options = []) => field({ label, type, options });
+  const job = () => [f('Job Title'), f('Company / Organization'), f('Location'), f('Month', 'select', UKG_MONTHS), f('Year (YYYY)'), f('To month', 'select', UKG_MONTHS), f('To year'), f('Description')];
+  const list = [
+    f('Title', 'select', ['Choose...', 'Dr.', 'Miss', 'Mr.', 'Mrs.', 'Ms.']),
+    ...job(),
+    field({ label: 'School Name', type: 'prompt', current: 'Lakeside University' }),
+    f('From month', 'select', UKG_MONTHS), f('From year'), f('To month', 'select', UKG_MONTHS), f('To year'),
+    f('Month'), f('Day'), f('Year'),
+  ];
+  const plan = planForm(list, P);
+  const a = plan.actions;
+  assert.ok(!/in your history/.test(String(a[0].why || '')), `the salutation is not a job: ${JSON.stringify(a[0])}`);
+  assert.equal(a[2].value, 'Applied Materials', `the first job row is his first job: ${JSON.stringify(a.slice(1, 9).map((x) => [x.action, x.value]))}`);
+  assert.equal(a[4].value, 'May');
+  assert.equal(a[5].value, '2026', 'a year box gets the year alone');
+  assert.equal(a[6].value, 'Aug', 'a month list takes its own spelling of August');
+  assert.equal(a[7].value, '2026');
+  assert.notEqual(a[3].value, P.identity?.location, 'the job row\'s Location is the job\'s, not his home');
+  assert.deepEqual(a.slice(10, 14).map((x) => x.value), ['Aug', '2023', 'May', '2099'], 'the degree\'s own dates, the year boxes holding years only');
+  assert.ok(!a.slice(14).some((x) => /\d/.test(String(x.value || ''))), `a date question after the rows is no job's: ${JSON.stringify(a.slice(14))}`);
+  assert.ok(!a.some((x) => /June 2027/.test(String(x.value || ''))));
+  // A "Title" with Mr./Ms. never makes the work section look filled.
+  assert.deepEqual(planForm([list[0]], P, { sections: [{ kind: 'work', generic: true, count: 0, filled: false }] }).entries.map((e) => e.kind), ['work']);
+});
+
+test('F-951: a Certifications or References block after the job rows is no job\'s — its bare Month / Year / Location stay out', () => {
+  const P = { ...SR_PROFILE, answers: { ...SR_PROFILE.answers, earliest_start: 'June 2027 (graduating May 2027)' } };
+  const f = (label, type = 'text', options = []) => field({ label, type, options });
+  const job = () => [f('Job Title'), f('Company / Organization'), f('Location'), f('Month', 'select', UKG_MONTHS), f('Year (YYYY)'), f('To month', 'select', UKG_MONTHS), f('To year'), f('Description')];
+  const list = [...job(), f('Certification Name'), f('Location'), f('Month', 'select', UKG_MONTHS), f('Year')];
+  const a = planForm(list, P).actions;
+  assert.equal(a[1].value, 'Applied Materials', 'the job row is still filled');
+  assert.equal(a[3].value, 'May');
+  const after = a.slice(8);
+  assert.ok(!after.some((x) => /Applied Materials|Santa Clara|Austin|\b20\d\d\b|^May$/.test(String(x.value || ''))), `the certification's boxes get no job's values: ${JSON.stringify(after.map((x) => [x.action, x.value]))}`);
+  // No section heading, but a second bare Month / Year in the same row: not the job's either.
+  const dup = planForm([...job(), f('Month', 'select', UKG_MONTHS), f('Year')], P).actions.slice(8);
+  assert.ok(!dup.some((x) => /\b20\d\d\b|^(May|Aug)$/.test(String(x.value || ''))), `a repeated bare box is not the row's: ${JSON.stringify(dup.map((x) => [x.action, x.value]))}`);
+});
+
+test('F-798: a resume the page already lists as an attachment is not uploaded again (UKG moves it out of the box)', () => {
+  const list = [
+    field({ label: 'Upload Resume DOC, DOCX, or PDF (Max file size 6MB).', type: 'file', attached: 0 }),
+    field({ label: 'Alex Rivera - Yaskawa America Inc. - Product (Mechanical) Engineer.pdf', type: 'checkbox', options: ['x'] }),
+    field({ label: 'Alex Rivera - Yaskawa America Inc. - Product (Mechanical) Engineer.pdf Document Type', type: 'select', options: ['Resume', 'Cover Letter', 'Other'] }),
+  ];
+  const a = planForm(list, PROFILE).actions;
+  assert.equal(a[0].action, 'skip', JSON.stringify(a[0]));
+  assert.match(a[0].why, /already on this page/);
+  // A fresh form still gets it; someone else's file name proves nothing.
+  assert.equal(planForm([list[0]], PROFILE).actions[0].action, 'upload');
+  assert.equal(planForm([list[0], field({ label: 'transcript_2024.pdf', type: 'checkbox', options: ['x'] })], PROFILE).actions[0].action, 'upload');
+});
+
+test('F-800: his past answer is never borrowed for a label that repeats on the page (one box per row)', () => {
+  const P = { ...PROFILE, pastAnswer: () => ({ answer: 'Acme Steel Stud Company', company: 'Yaskawa', at: '2026-10-22' }) };
+  const once = planForm([field({ label: 'Which shop floor system did you use most' })], P).actions[0];
+  assert.equal(once.value, 'Acme Steel Stud Company', 'a question asked once may still borrow');
+  const rows = planForm([field({ label: 'Which shop floor system did you use most' }), field({ label: 'Which shop floor system did you use most' })], P).actions;
+  assert.ok(rows.every((x) => x.value !== 'Acme Steel Stud Company'), JSON.stringify(rows.map((x) => [x.action, x.value])));
 });
 
 test('WORK AUTHORIZATION AS STATEMENTS takes the sponsorship one; "may we contact" is not a name (F-572)', () => {
@@ -2042,6 +2224,31 @@ test('AN "IF YES" UNDER A QUESTION ANSWERED NO does not apply — Western Digita
   assert.equal(acts[1].action, 'skip', 'the follow-up under a No is not a gap');
   assert.match(acts[1].why, /does not apply/);
   assert.equal(acts[3].action, 'unknown', 'under a question with no answer, it is still his');
+});
+
+test('F-904: the portfolio PDF is found under the name he GOES by, not only his legal name — Droyd', () => {
+  const made = (f) => /[\\/]Alex Rivera Portfolio\.pdf$/.test(f);
+  assert.equal(portfolioPdfName({ full_name: 'Anna Maria Alex Rivera', preferred_full_name: 'Alex Rivera' }, made), 'Alex Rivera Portfolio.pdf');
+  assert.equal(portfolioPdfName({ full_name: 'Alex Rivera' }, made), 'Alex Rivera Portfolio.pdf');
+  assert.equal(portfolioPdfName({ full_name: 'Anna Maria Alex Rivera' }, made), null, 'no file under any of his names: nothing to attach');
+  const P = { ...PROFILE, portfolioPdf: 'Alex Rivera Portfolio.pdf' };
+  const a = planForm([{ label: 'Please upload your portfolio here', type: 'file', options: [], required: false }], P).actions[0];
+  assert.equal(a.action, 'upload-portfolio');
+});
+
+test('F-903: a conflict-of-interest DISCLOSURE takes his standing No — Oceaneering statements, KION free text', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, conflict_of_interest: 'No' } };
+  const oce = { label: "To ensure appropriate compliance with legal requirements and Oceaneering's Code of Business Conduct and Ethics, Applicants are required to disclose any situatio — To the best of my knowledge, I have no conflict of interest. Neither I, nor a member of my extended family, is in a position, either with a governmental entity or otherwise, to award, maintain, improperly influence or expedite the award ",
+    type: 'radio', options: ['To the best of my knowledge, I have no conflict of interest. Neither I, nor a me', 'I have a possible conflict of interest. I understand I may be contacted to provi'], required: true };
+  const a = planForm([oce], P).actions[0];
+  assert.equal(a.action, 'select'); assert.match(a.value, /^(No|To the best)/);
+  const kion = { label: 'Please disclose any situation(s) that might create an actual, potential, or perceived conflict of interest in accordance with the position', type: 'text', options: [], required: true };
+  const k = planForm([kion], P).actions[0];
+  assert.equal(k.value, 'I do not have any situations that would create a conflict of interest.');
+  const unset = planForm([oce], { ...PROFILE, answers: { ...PROFILE.answers, conflict_of_interest: '' } }).actions[0];
+  assert.equal(unset.action, 'unknown', 'with no standing answer it stays his');
+  const details = planForm([{ label: 'Please describe the potential conflict of interest you are disclosing', type: 'text', options: [], required: false }], P).actions[0];
+  assert.notEqual(details.value, 'I do not have any situations that would create a conflict of interest.');
 });
 
 test('HIS OWN PAST ANSWER fills a question no rule knows — Intel questionnaire, 2026-09-25', () => {
@@ -2251,6 +2458,42 @@ test('Sabanto (Breezy), 2026-09-25: a salary with a currency list beside it — 
   ], P, { company: 'Sabanto' }).actions;
   assert.deepEqual(acts.map((a) => a.value), ['90000', 'US Dollar ($)', 'YES', '$90000/year']);
   assert.ok(acts.slice(0, 3).every((a) => a.review));
+});
+
+test('his salary for a California role is his California figure (2026-11-11: "90 for everywherre and 100k for cali")', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, salary_expectation: '$90000/year', salary_expectation_california: '$100000/year' } };
+  const ask = (location) => planForm([{ label: 'What are your salary expectations?', type: 'text' }], P, { company: 'Acme', location }).actions[0].value;
+  assert.equal(ask('San Jose, CA, US, 95134'), '$100000/year');
+  assert.equal(ask('Fremont, California'), '$100000/year');
+  assert.equal(ask('Austin, TX'), '$90000/year');
+  assert.equal(ask('Toronto, ON, CA'), '$90000/year', 'CA after a province code is Canada');
+  assert.equal(ask(null), '$90000/year', 'no location: his everywhere figure');
+  // The posted-range yes/no compares against the figure the box would get.
+  const range = planForm([{ label: 'The posted base salary range for this role is $90,000 - $95,000. Is that range acceptable to you?', type: 'radio', options: ['Yes', 'No'] }],
+    P, { company: 'Acme', location: 'San Diego, CA' }).actions[0];
+  assert.notEqual(range.value, 'Yes', 'a California range below $100,000 is his to answer');
+  // Without a California figure in his file, the everywhere one stands.
+  const plain = { ...PROFILE, answers: { ...PROFILE.answers, salary_expectation: '$90000/year' } };
+  assert.equal(planForm([{ label: 'What are your salary expectations?', type: 'text' }], plain, { company: 'Acme', location: 'San Jose, CA' }).actions[0].value, '$90000/year');
+  // The amount box beside a currency list takes the California number too (first mate's review, 2026-11-12).
+  const split = planForm([
+    { label: 'Desired Salary', type: 'text' },
+    { label: 'Desired Salary', type: 'select', options: ['', 'US Dollar ($)', 'Canadian Dollar ($)', 'Euro (€)'] },
+  ], P, { company: 'Acme', location: 'San Jose, CA' }).actions;
+  assert.deepEqual(split.map((a) => a.value), ['100000', 'US Dollar ($)']);
+});
+
+test('only a California place gets his California figure: Canada written out, a bare Canadian city and Baja California do not', () => {
+  for (const p of ['San Jose, CA', 'Fremont, California', 'Los Angeles, CA', 'Remote, CA']) assert.equal(inCalifornia(p), true, p);
+  for (const p of ['Toronto, Ontario, CA', 'Vancouver, British Columbia, CA', 'Toronto, CA', 'Montreal, QC, CA', 'Toronto, ON, CA',
+    'Tijuana, Baja California', 'Mexicali, Baja California, Mexico', 'Austin, TX', '']) assert.equal(inCalifornia(p), false, p);
+});
+
+test('code review #9: a California zip or a country after the state is still California', () => {
+  for (const p of ['San Jose, CA 95134', 'San Jose, CA 95134-1234', 'San Jose, CA, US', 'San Jose, CA, USA', 'San Jose, CA 95134, United States'])
+    assert.equal(inCalifornia(p), true, p);
+  // Not a California zip, and Canada stays Canada.
+  for (const p of ['Austin, TX 78701', 'Somewhere, CA 12345', 'Toronto, ON, CA', 'Toronto, CA']) assert.equal(inCalifornia(p), false, p);
 });
 
 test('a salary\'s pay-period list takes Yearly for a per-year figure (Sabanto, 2026-09-25)', () => {
@@ -2714,6 +2957,59 @@ test('a second empty education or language row is matched to his entries, never 
   assert.equal(a[5].value, 'Vietnamese', 'the second Language is his second language');
 });
 
+test('F-812: a start date asked as three lists (Month / Day / Year) gets June / 1 / 2027, never the sentence (Legrand, Oracle)', () => {
+  const q = 'What is your earliest possible start date, including any notice period required?';
+  const plan = planForm(['Month', 'Day', 'Year'].map((p) => field({ label: `${q} ${p}`, type: 'prompt', promptKind: 'combo' })), COND_PROFILE);
+  const [m, d, y] = plan.actions;
+  assert.equal(m.value, 'June', JSON.stringify(m));
+  assert.ok(m.values.includes('06'), 'the month number is a second spelling');
+  assert.equal(d.value, '1');
+  assert.match(d.why, /first day/);
+  assert.equal(y.value, '2027');
+  // A job row's month box is not touched by this pass.
+  const job = planForm([field({ label: 'Start Date Month', type: 'prompt', promptKind: 'combo', current: 'May' })], COND_PROFILE).actions[0];
+  assert.notEqual(job.value, 'June');
+});
+
+test('F-833: a required "Statement of Agreement" box is ticked like every consent (Veeco, SuccessFactors, 2026-10-22)', () => {
+  const plan = planForm([
+    field({ label: 'Job-Specific Information — * Statement of Agreement', type: 'checkbox', options: ['* Statement of Agreement'], required: true }),
+    field({ label: 'Applicant Certification', type: 'checkbox', options: ['Applicant Certification'] }),
+  ], PROFILE);
+  assert.equal(plan.actions[0].action, 'check', JSON.stringify(plan.actions[0]));
+  assert.equal(plan.actions[1].action, 'check', JSON.stringify(plan.actions[1]));
+});
+
+test('F-797: a language row that already names one of his languages is never typed over with English (Terex, 2026-10-22)', () => {
+  const P2 = { ...PROFILE, languages: [{ name: 'English', proficiency: 'Fluent' }, { name: 'Vietnamese', proficiency: 'Native' }] };
+  const row = (n, current) => [
+    field({ label: 'Language', type: 'prompt', id: `language-${n}--language`, key: 'formField-language', current }),
+    field({ label: 'Reading', type: 'prompt', id: `language-${n}--r`, key: 'formField-r' }),
+  ];
+  const two = planForm([...row(287, 'English'), ...row(288, 'Vietnamese')], P2).actions;
+  assert.equal(two[0].action, 'skip');
+  assert.equal(two[2].action, 'skip', `Vietnamese stays: ${JSON.stringify(two[2])}`);
+  assert.match(two[2].why, /Vietnamese/);
+  // One row holding his second language is left alone too.
+  const one = planForm(row(288, 'Vietnamese'), P2).actions;
+  assert.equal(one[0].action, 'skip', `a lone Vietnamese row stays: ${JSON.stringify(one[0])}`);
+});
+
+test('F-902: an EMPTY language row is not "already names undefined"; on Oracle it is the open entry, left to the entry filler (Ford)', () => {
+  const P2 = { ...PROFILE, languages: [{ name: 'English', proficiency: 'Fluent' }, { name: 'Vietnamese', proficiency: 'Native' }] };
+  const fields = [
+    field({ label: 'Language', type: 'prompt', id: 'contentItemId-63', key: '', current: '' }),
+    field({ label: 'Reading', type: 'radio', options: ['High', 'Moderate', 'Low'] }),
+  ];
+  const plain = planForm(fields, P2).actions;
+  assert.ok(!/undefined/.test(String(plain[0].why || '')), `no "already names undefined": ${JSON.stringify(plain[0])}`);
+  assert.ok(!(plain[0].action === 'skip' && /already names/.test(String(plain[0].why || ''))), JSON.stringify(plain[0]));
+  const oracle = planForm(fields, P2, { sections: [{ kind: 'language', label: 'Add Language', count: 1, filled: false, generic: true, hasAdd: true, saved: 1 }] });
+  assert.equal(oracle.actions[0].action, 'skip', JSON.stringify(oracle.actions[0]));
+  assert.match(oracle.actions[0].why, /open language entry/);
+  assert.ok((oracle.entries || []).some((g) => g.kind === 'language' && g.entries.some((e) => e.name === 'Vietnamese')), `Vietnamese still sent as an entry: ${JSON.stringify(oracle.entries)}`);
+});
+
 test('a job row with no job left for it stays empty, never his availability (Apple, 2026-10-16)', () => {
   const plan = planForm([
     field({ label: 'Employer', current: 'Applied Materials' }),
@@ -2724,4 +3020,439 @@ test('a job row with no job left for it stays empty, never his availability (App
   ], PROFILE);
   assert.equal(plan.actions[1].value, 'Engineering Intern');
   for (const k of [2, 3, 4]) assert.equal(plan.actions[k].action, 'skip', `box ${k} of the spare row`);
+});
+
+test('F-850: a sponsorship question offering statements picks "in the future but currently authorized" (VulcanForms, Rippling, 2026-10-16)', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes' } };
+  const options = ['I will not need sponsorship now or at any point in the future.', 'I will need sponsorship in the future but am currently authorized to work in the US', 'I will need sponsorship and am not currently authorized to work in the US for any employer', 'Other'];
+  const plan = planForm([field({ label: 'Will you now or in the future require sponsorship for employment (e.g., H-1B visa)?', type: 'radio', options })], P);
+  assert.equal(plan.actions[0].action, 'select', JSON.stringify(plan.actions[0]));
+  assert.equal(plan.actions[0].optionIndex, 1);
+  // …and a Yes/No list still gets Yes.
+  const yn = planForm([field({ label: 'Will you now or in the future require sponsorship?', type: 'radio', options: ['Yes', 'No'] })], P);
+  assert.equal(yn.actions[0].optionIndex, 0);
+});
+
+test('F-851/F-852: a past job\'s phone and pay are never his (Paylocity work history, Optomec 2026-10-04)', () => {
+  const P = { ...PROFILE, identity: { ...PROFILE.identity, phone: '+1 555 010 0000' }, answers: { ...PROFILE.answers, salary_expectation: '$90000/year' } };
+  const plan = planForm([field({ label: 'Company Phone Number' }), field({ label: 'Starting Salary' }), field({ label: 'Ending Salary' })], P);
+  for (const a of plan.actions) assert.ok(!/555|90000/.test(String(a.value || '')), `${a.label}: ${JSON.stringify(a)}`);
+});
+
+test('2026-10-22: a portfolio FILE slot gets his portfolio PDF when one is built (Droyd, Ashby)', () => {
+  const P = { ...PROFILE, identity: { ...PROFILE.identity, portfolio: 'alexrivera.example' }, portfolioPdf: 'Alex Rivera Portfolio.pdf' };
+  for (const label of ['Portfolio', 'Portfolio (optional)', 'Work samples', 'Please attach samples of your work']) {
+    const [a] = planForm([{ label, type: 'file' }], P, { company: 'Droyd' }).actions;
+    assert.equal(a.action, 'upload-portfolio', label);
+  }
+  // Required, too.
+  assert.equal(planForm([{ label: 'Portfolio', type: 'file', required: true }], P).actions[0].action, 'upload-portfolio');
+  // Never on top of a file already there.
+  assert.equal(planForm([{ label: 'Portfolio', type: 'file', attached: 1 }], P).actions[0].action, 'skip');
+  // A slot that names the resume never gets the portfolio; the letter's is the letter's.
+  assert.notEqual(planForm([{ label: 'Resume or portfolio', type: 'file' }], P).actions[0].action, 'upload-portfolio');
+  assert.equal(planForm([{ label: 'Cover letter', type: 'file' }], P).actions[0].action, 'upload-letter');
+  // His portfolio is online, so "if it is not online, attach it" stays a skip.
+  const cond = 'If your portfolio is not available online, please attach it here — Attach';
+  assert.equal(planForm([{ label: cond, type: 'file' }], P).actions[0].action, 'skip');
+  // Two portfolio slots: one gets the file.
+  const two = planForm([{ label: 'Portfolio', type: 'file' }, { label: 'Portfolio', type: 'file', required: true }], P).actions;
+  assert.equal(two.filter((a) => a.action === 'upload-portfolio').length, 1);
+  assert.equal(planForm([{ label: 'Portfolio', type: 'file' }], P).summary.portfolio, 1);
+});
+
+test('2026-10-22: with no portfolio PDF built, a portfolio slot is planned as before', () => {
+  const P = { ...PROFILE, identity: { ...PROFILE.identity, portfolio: 'alexrivera.example' } };
+  assert.equal(planForm([{ label: 'Portfolio', type: 'file' }], P).actions[0].action, 'skip');
+  assert.equal(planForm([{ label: 'Portfolio', type: 'file', required: true }], P).actions[0].action, 'unknown');
+});
+
+test('F-884: a video or audio upload is never "the only document upload on the form"', () => {
+  const plan = planForm([{ id: 'v', label: 'Upload Video', type: 'file', options: [] }], { answers: {}, identity: {} }, {});
+  assert.notEqual(plan.actions[0].action, 'upload', JSON.stringify(plan.actions[0]));
+  const plan2 = planForm([{ id: 'd', label: 'Drop or select (.doc / .docx / .pdf)', type: 'file', options: [] }], { answers: {}, identity: {} }, {});
+  assert.equal(plan2.actions[0].action, 'upload', 'a lone document slot is still the resume');
+});
+
+test('F-889: an Oracle section reporting its saved tiles still gets his entries, even with the open entry\'s School box on the page', () => {
+  const fields = [{ id: 's', label: 'School', type: 'text', options: [] }, { id: 'm', label: 'Major', type: 'text', options: [] }];
+  const oracle = planForm(fields, PROFILE, { sections: [{ kind: 'education', label: 'Add Education', count: 2, filled: false, generic: true, saved: 2 }] });
+  assert.ok((oracle.entries || []).some((g) => g.kind === 'education' && g.entries.length), JSON.stringify(oracle.entries));
+  // A generic section without tiles keeps the old guard: a School box on the page is an entry already there.
+  const other = planForm(fields, PROFILE, { sections: [{ kind: 'education', label: 'Add education', count: 0, filled: false, generic: true }] });
+  assert.ok(!(other.entries || []).some((g) => g.kind === 'education'), JSON.stringify(other.entries));
+});
+
+test('F-893: a job row\'s Employment Type and Reason for Leaving lists, Education Type as degree levels (Lincoln Electric)', () => {
+  const P = { ...PROFILE,
+    education: { ...(PROFILE.education || {}), degree_level: "Bachelor's", location: 'Springfield, Washington' },
+    answers: { ...(PROFILE.answers || {}), reason_for_leaving: 'Internship ended', employer_agreement: 'No' },
+    work_experience: [
+      { company: 'Applied Materials', title: 'Manufacturing Engineer Intern', start: 'May 2026', end: 'August 2026' },
+      { company: 'Lakeside University - Makerspace Manufacturing Technology Center', title: 'Manufacturing Lead', start: 'August 2024', end: '', current: true },
+    ] };
+  const RL = ['No Selection', 'Involuntary', 'Not Applicable (Currently Employed)', 'Voluntary'];
+  const ET = ['No Selection', 'Full-Time', 'Part-Time', 'Internship', 'Temporary'];
+  const row = (n) => [
+    { id: `co${n}`, label: 'Company', type: 'text' },
+    { id: `ti${n}`, label: 'Position', type: 'text' },
+    { id: `et${n}`, label: 'Employment Type', type: 'select', options: ET },
+    { id: `rl${n}`, label: 'Reason for Leaving', type: 'select', options: RL },
+  ];
+  const a = planForm([...row(1), ...row(2),
+    { id: 'edu', label: 'Education Type', type: 'select', options: ['No Selection', 'High School or GED', 'Associate Degree Program (or equivalent)', "Bachelor's Degree Program (or equivalent)", "Master's Degree Program (or equivalent)"] },
+    { id: 'ack', label: 'Acknowledgement', type: 'checkbox', options: ['Acknowledgement'] },
+  ], P, {}).actions;
+  assert.equal(a[2].value, 'Internship', 'an internship is an internship');
+  assert.equal(a[3].value, 'Voluntary', 'an internship that ran its term was left voluntarily');
+  assert.equal(a[6].value, 'Part-Time', 'the student job he holds');
+  assert.equal(a[7].value, 'Not Applicable (Currently Employed)');
+  assert.equal(a[8].value, "Bachelor's Degree Program (or equivalent)");
+  assert.equal(a[9].action, 'check', 'a bare Acknowledgement box is ticked like every consent');
+  // A lone "Employment Type" with no job row is not a job's type.
+  assert.notEqual(planForm([{ id: 'x', label: 'Employment Type', type: 'select', options: ET }], P, {}).actions[0].value, 'Internship');
+});
+
+// SuccessFactors' Previous Employment (Lincoln Electric, 2026-10-23): one row
+// of boxes, a section Add, ui5 date pickers whose placeholder is MM/DD/YYYY.
+const SF_ROW = (company) => [
+  field({ label: '* Company Name', name: 'VFLD2', held: company || undefined }),
+  field({ label: '* Position Title', name: 'VFLD6' }),
+  field({ label: 'From Date', placeholder: 'MM/DD/YYYY' }),
+  field({ label: 'End Date', placeholder: 'MM/DD/YYYY' }),
+];
+const SF_SECTIONS = [{ kind: 'work', label: ' Add', count: 1, filled: true, blank: false, hasAdd: true, generic: true }];
+
+test('F-899: a SuccessFactors date box whose placeholder is MM/DD/YYYY gets MM/DD/YYYY, not "May 2026"', () => {
+  const a = planForm(SF_ROW(''), HISTORY_PROFILE, { sections: SF_SECTIONS }).actions;
+  assert.equal(a[0].value, 'Applied Materials');
+  assert.equal(a[2].value, '05/01/2026');
+  assert.equal(a[3].value, '08/31/2026', 'an end is the last day of the month he left');
+});
+
+test('F-897: SuccessFactors inline job rows — the jobs no row holds are sent as inline entries', () => {
+  const r = planForm(SF_ROW(''), HISTORY_PROFILE, { sections: SF_SECTIONS });
+  const work = r.entries.find((g) => g.kind === 'work');
+  assert.ok(work, `the work section is not done with one row of three jobs: ${JSON.stringify(r.entries)}`);
+  assert.equal(work.inline, true);
+  assert.deepEqual(work.entries.map((e) => e.company), ['Acme Steel', 'Makerspace MTC'], 'row 1 takes Applied Materials; the other two are added');
+  // Every job already on the page: nothing is added.
+  const all = planForm([...SF_ROW('Applied Materials'), ...SF_ROW('Acme Steel'), ...SF_ROW('Makerspace MTC')], HISTORY_PROFILE, { sections: SF_SECTIONS });
+  assert.deepEqual(all.entries.filter((g) => g.kind === 'work'), []);
+  // A section whose entries are saved cards (no rows of boxes) is untouched.
+  const cards = planForm([], HISTORY_PROFILE, { sections: [{ ...SF_SECTIONS[0], count: 1, filled: true }] });
+  assert.deepEqual(cards.entries, []);
+});
+
+test('F-898: "If you have any relatives… provide their full name" is never given his own name', () => {
+  for (const label of [
+    'If you have any relatives currently employed, provide their full name, location and your relationship to them.',
+    'If you were referred, please provide their full name.',
+    "Relative's full name",
+  ]) {
+    const a = planField(field({ label, multiline: true }), PROFILE);
+    assert.notEqual(a.value, PROFILE.identity.full_name, `${label} → ${JSON.stringify(a)}`);
+  }
+  assert.equal(planField(field({ label: 'Full Name' }), PROFILE).value, PROFILE.identity.full_name, 'his own full name still answers');
+});
+
+// ── 2026-11-04 apply session (F-988, F-992, F-993) ────────────────────────
+const SESSION_PROFILE = {
+  ...PROFILE,
+  answers: { ...PROFILE.answers, current_title: 'Manufacturing Lead', government_employee: 'No' },
+  eeo: { disability: 'No, I do not have a disability' },
+};
+
+test('F-992: "are there any days or times when you are unavailable to work?" never gets a disability answer', () => {
+  const label = 'Other than time off for reasons related to your religion, a disability, or a medical condition, are there any days or times when you are unavailable to work?';
+  for (const f of [field({ label }), field({ label, multiline: true }), field({ label, type: 'select', options: ['Yes', 'No'] })]) {
+    const a = planField(f, SESSION_PROFILE);
+    assert.ok(!/disabilit/i.test(String(a.value ?? '')), `${f.type}: ${JSON.stringify(a)}`);
+    assert.notEqual(a.action, 'fill', 'his schedule is his to answer');
+    assert.notEqual(a.action, 'select');
+  }
+  // The disability question itself still answers.
+  assert.equal(planField(field({ label: 'Disability Status' }), SESSION_PROFILE).value, 'No, I do not have a disability');
+});
+
+test('F-992 review: no schedule question that names a disability is given a disability answer', () => {
+  for (const label of [
+    'Aside from a disability or medical condition, are there times you cannot work?',
+    'Do you have scheduling restrictions (religious, disability-related or other)?',
+    'Besides disability accommodations, are there days you are not able to work?',
+    'Other than a disability, which days and hours are you unavailable?',
+  ]) {
+    for (const f of [field({ label }), field({ label, type: 'select', options: ['Yes', 'No'] })]) {
+      const a = planField(f, SESSION_PROFILE);
+      assert.ok(!/disabilit/i.test(String(a.value ?? '')), `${label} (${f.type}) → ${JSON.stringify(a)}`);
+      assert.ok(!['fill', 'select'].includes(a.action), `${label} (${f.type}) is his to answer → ${JSON.stringify(a)}`);
+    }
+  }
+  // Self-identification still answers, in its usual shapes.
+  for (const label of ['Do you have a disability?', 'Disability', 'Please refer to the Voluntary Self-Identification of Disability statement above before answering this question.']) {
+    assert.equal(planField(field({ label }), SESSION_PROFILE).value, 'No, I do not have a disability', label);
+  }
+});
+
+test('F-993: "What type of employment are you seeking?" is Full-time; a past job\'s type is not', () => {
+  const a = planField(field({ label: 'What type of employment are you seeking?', type: 'select', options: ['Full-time', 'Internship'] }), SESSION_PROFILE);
+  assert.equal(a.action, 'select');
+  assert.equal(a.value, 'Full-time');
+  const past = planField(field({ label: 'Type of employment', type: 'select', options: ['Full-time', 'Internship'] }), SESSION_PROFILE);
+  assert.notEqual(past.action, 'select', `a bare "Type of employment" stays history: ${JSON.stringify(past)}`);
+});
+
+test('F-988: a federal-employment question that names contractors is never given his job title', () => {
+  const label = 'Including your current position, have you ever been employed by the U.S. Federal Government, a contractor (including subsidiaries, parents, and affiliates) that performed work for the U.S. Federal Government, served in the Military, and/or were a Political Appointee?';
+  const options = ['No', 'Yes, Employed by the U.S. Federal Government', 'Yes, Served in the Military', 'Yes, Political Appointee', 'Yes, Performed work for the U.S. Federal Government'];
+  const a = planField(field({ label, type: 'select', options }), SESSION_PROFILE);
+  assert.notEqual(a.value, 'Manufacturing Lead', JSON.stringify(a));
+  // His answer since 2026-11-04: Yes, through Applied Materials — the list's contractor row, named.
+  const atAmat = (SESSION_PROFILE.work_experience || []).some((w) => /applied materials/i.test(String(w?.company || '')));
+  if (atAmat) assert.equal(a.value, 'Yes, Performed work for the U.S. Federal Government', JSON.stringify(a));
+  else assert.notEqual(a.action, 'select', 'no federal contractor in this profile: his to answer');
+  const noAmat = planField(field({ label, type: 'select', options }), { ...SESSION_PROFILE, work_experience: [{ company: 'Makerspace MTC', title: 'Lead' }] });
+  assert.notEqual(noAmat.action, 'select', 'no federal contractor in his history: his to answer');
+  // His title and his own government employment still answer where asked.
+  assert.equal(planField(field({ label: 'Current Job Title' }), SESSION_PROFILE).value, 'Manufacturing Lead');
+  assert.equal(planField(field({ label: 'Have you ever been a federal, state, or local government employee?', type: 'select', options: ['Yes', 'No'] }), SESSION_PROFILE).value, 'No');
+});
+
+test('his answers, 2026-11-04 (F-995, F-997): sponsorship row, federal contractor, authorization, and no visa detail', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes', visa_status_note: 'F-1 student graduating May 2027; OPT then H-1B.' }, work_experience: [{ company: 'Applied Materials', title: 'Process Engineering Intern' }] };
+  const plan = (label, type = 'select', options = ['Yes', 'No'], extra = {}, profile = P) => planForm([{ label, type, options, ...extra }], profile, { company: 'Ginkgo' }).actions[0];
+  const SPONSOR = 'Do you now or will you in the future need employer sponsorship for a visa to work in the country where the job is open?';
+  // 1. Sponsorship: "Yes, but not until the future" is his row, named, not reached by a bare Yes.
+  assert.equal(plan(SPONSOR, 'select', ['Yes, now', 'Yes, but not until the future', 'No']).value, 'Yes, but not until the future', 'three rows (Ginkgo): his row, not the first Yes');
+  assert.equal(plan(SPONSOR, 'select', ['Yes, but not until the future', 'No']).value, 'Yes, but not until the future');
+  assert.equal(plan(SPONSOR).value, 'Yes', 'a plain Yes/No list still gets Yes');
+  assert.equal(plan(SPONSOR, 'select', ['I will not need sponsorship now or at any point in the future.', 'I will need sponsorship in the future but am currently authorized to work in the US', 'I will need sponsorship and am not currently authorized to work in the US']).value,
+    'I will need sponsorship in the future but am currently authorized to work in the US', 'a list of statements keeps its middle row (F-850)');
+  assert.equal(plan('Do you currently require sponsorship to work in the US?').value, 'No', 'a present-only question is still No');
+  // 2. Federal contractor: Yes, through Applied Materials.
+  const GINKGO = 'Including your current position, have you ever been employed by the U.S. Federal Government, a contractor or subcontractor that performed work for the U.S. Federal Government, served in the Military, and/or were a Political Appointee?';
+  assert.equal(plan(GINKGO).value, 'Yes');
+  assert.equal(plan('Have you ever been employed by a federal contractor?').value, 'Yes');
+  assert.notEqual(plan(GINKGO, 'select', ['Yes', 'No'], {}, { ...P, work_experience: [{ company: 'Makerspace MTC', title: 'Intern' }] }).value, 'Yes', 'no federal contractor in his history: not Yes');
+  assert.notEqual(plan('Are you currently employed by a federal contractor?').value, 'Yes', 'present-only: the internship has ended');
+  // 3. Authorized: Yes; without restrictions: No; an optional visa-detail box stays empty.
+  assert.equal(plan('Are you legally authorized to work in the United States?').value, 'Yes');
+  assert.equal(plan('Are you legally authorized to work in the country where the job is located without restrictions?').value, 'No');
+  for (const label of ['Which visa? (optional)', 'What is your current visa status? (Optional)', 'If you require sponsorship, please explain your situation (optional).', 'Optional: please provide your current immigration status, including type of visa and remaining work authorization.']) {
+    assert.equal(plan(label, 'text', [], { required: false }).action, 'skip', `optional, left empty: ${label}`);
+  }
+  assert.equal(plan('Which visa?', 'text', [], { required: false, optional: true }).action, 'skip', 'an explicit optional flag counts');
+  assert.notEqual(plan('Which visa?', 'text', [], { required: false }).action, 'skip', 'a missing required attribute alone is not "optional" (review)');
+  assert.notEqual(plan('Which visa? (optional)', 'text', [], { required: true }).action, 'skip', 'a required one is still his to see answered');
+  assert.notEqual(plan('Do you hold a visa that allows you to work in the US? (optional)', 'select', ['Yes', 'No'], { required: false }).action, 'skip', 'a Yes/No question is answered, optional or not');
+});
+
+test('review, 2026-11-04: his future row never falls to a "now" row, and the federal rule is about HIM only', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes' }, work_experience: [{ company: 'Applied Materials', title: 'Intern' }] };
+  const plan = (label, options = ['Yes', 'No']) => planForm([{ label, type: 'select', options }], P, {}).actions[0];
+  const Q = 'Will you now or in the future require sponsorship to work in the US?';
+  for (const [options, future] of [
+    [['Yes, now', 'Yes, in the future', 'No'], 'Yes, in the future'],
+    [['No, I do not require sponsorship', 'Yes, I now require sponsorship', 'Yes, I will require sponsorship in the future'], 'Yes, I will require sponsorship in the future'],
+    [['Yes, I require sponsorship now', 'Yes, I will require sponsorship in the future', 'No'], 'Yes, I will require sponsorship in the future'],
+    [['Yes - currently', 'Yes - in the future', 'No'], 'Yes - in the future'],
+    [['Yes, now', 'Yes, but not until the future', 'No'], 'Yes, but not until the future'],
+  ]) assert.equal(plan(Q, options).value, future, `the future row of ${options.join(' | ')}`);
+  assert.equal(chooseOption('Yes, but not until the future', ['Yes, now', 'Yes, in the future', 'No']), -1, 'his row matches word for word or not at all');
+  assert.equal(chooseOption('Yes, in the future', ['Yes, now', 'No']), -1, 'a short future row never takes a "now" row');
+  // The federal rule answers only his own employment.
+  for (const q of ['Do you have a family member who works for a federal contractor?',
+    'Are you or any member of your immediate family employed by a federal contractor?',
+    'Have you or a relative ever been a federal contractor?',
+    'Will you be working for a federal contractor?',
+    'Is this role on a federal contractor program?']) assert.notEqual(plan(q).value, 'Yes', q);
+  assert.equal(plan('Including your current position, have you ever been employed by the U.S. Federal Government, a contractor or subcontractor that performed work for the U.S. Federal Government, served in the Military, and/or were a Political Appointee?').value, 'Yes', 'Ginkgo\'s wording: Yes');
+  assert.equal(plan('Have you worked for a federal contractor?').value, 'Yes');
+});
+
+test('chooseOption: an option whose text IS the answer wins before polarity (F-995)', () => {
+  assert.equal(chooseOption('Yes, but not until the future', ['Yes, now', 'Yes, but not until the future', 'No']), 1);
+  assert.equal(chooseOption('Yes', ['Yes, I will', 'Yes', 'No']), 1);
+  assert.equal(chooseOption('No', ['No Selection', 'Yes', 'No']), 2, 'a placeholder is still never an answer');
+});
+
+test('replay, 2026-11-04: a row-only answer is never typed into a text box (Nudge, Ashby)', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes' } };
+  const a = planForm([{ label: 'Will you now or in the future require sponsorship for employment in the United States?', type: 'text' }], P, {}).actions[0];
+  assert.equal(a.value, 'Yes', 'he sent Yes into that box');
+  const m = planForm([{ label: 'Will you now or in the future require sponsorship for employment in the United States?', type: 'prompt' }], P, {}).actions[0];
+  assert.ok((m.values || m.alternatives || [m.value]).includes('Yes, but not until the future') || m.value === 'Yes', 'a menu the page opens still gets his row to try');
+});
+
+test('re-review, 2026-11-04: his sponsorship Yes never takes a row that speaks only of now', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes' } };
+  const Q = 'Do you now or will you in the future require sponsorship to work in the US?';
+  const plan = (options, type = 'select') => planForm([{ label: Q, type, options }], P, {}).actions[0];
+  for (const options of [['Yes, now', 'No'], ['Yes, I currently require sponsorship', 'No'], ['Yes - immediately', 'No']]) {
+    const a = plan(options);
+    assert.notEqual(a.action, 'select', `left for him, not "${options[0]}"`);
+  }
+  assert.equal(plan(['Yes', 'No']).value, 'Yes', 'a plain Yes/No list still gets Yes');
+  assert.equal(plan(['Yes, later', 'No']).value, 'Yes, later', '"later" is a future row');
+  assert.equal(plan([], 'text').value, 'Yes', 'a text box is typed plain Yes');
+  assert.equal(chooseOption('Yes, not now', ['Yes, now', 'No']), -1);
+  assert.equal(chooseOption('Yes, not now', ['Yes', 'No']), 0);
+  assert.equal(chooseOption('Yes, not now', ['No', 'Yes, I will need sponsorship']), 1, 'a Yes that is not "now" is taken');
+});
+
+test('his rule, 2026-11-04: a cover letter only where the form names one or asks for additional attachments', async () => {
+  const { letterPlanned, isAdditionalAttachmentsBox } = await import('./apply-plan.mjs');
+  const plan = (fields) => planForm(fields, PROFILE, {});
+  const acts = (fields) => plan(fields).actions.map((a) => [a.label, a.action]);
+  const letters = (fields) => acts(fields).filter(([, a]) => a === 'upload-letter').map(([l]) => l);
+  const RESUME = { label: 'Resume/CV', type: 'file', id: 'resume' };
+  // Nothing asks: no letter attached, none written (one predicate for both).
+  assert.deepEqual(acts([RESUME]), [['Resume/CV', 'upload']]);
+  assert.equal(letterPlanned(plan([RESUME, { label: 'Why do you want to work here?', type: 'textarea' }])), '', 'no field names a letter');
+  // Additional attachments and no letter slot: the letter goes there, and is written.
+  assert.deepEqual(letters([RESUME, { label: 'Additional Documents', type: 'file', id: 'docs' }]), ['Additional Documents']);
+  assert.match(letterPlanned(plan([RESUME, { label: 'Additional Documents', type: 'file', id: 'docs' }])), /Additional Documents/);
+  // A cover-letter slot takes it; the extra box stays empty.
+  assert.deepEqual(letters([RESUME, { label: 'Cover Letter', type: 'file', id: 'cover_letter' }, { label: 'Additional Documents', type: 'file', id: 'docs' }]), ['Cover Letter']);
+  // A cover-letter TEXT box is the letter's place too: never a second copy as a file, and no file written.
+  const textForm = [RESUME, { label: 'Cover Letter', type: 'textarea', id: 'cl' }, { label: 'Additional Documents', type: 'file', id: 'docs' }];
+  assert.deepEqual(letters(textForm), []);
+  assert.equal(letterPlanned(plan(textForm)), '');
+  // A slot that already holds a file is his: no letter on top of it.
+  assert.deepEqual(letters([RESUME, { label: 'Additional Documents', type: 'file', id: 'docs', attached: 1 }]), []);
+  // His correction: a letter of interest IS a cover letter; a letter of recommendation never gets one.
+  assert.deepEqual(letters([RESUME, { label: 'Letter of Interest', type: 'file', id: 'loi' }]), ['Letter of Interest']);
+  assert.deepEqual(letters([RESUME, { label: 'Covering letter', type: 'file', id: 'x1' }]), ['Covering letter']);
+  assert.deepEqual(letters([RESUME, { label: 'Letter of Recommendation', type: 'file', id: 'lor' }]), [], 'a recommendation is someone else\'s letter');
+  assert.deepEqual(letters([RESUME, { label: 'Reference letter', type: 'file', id: 'ref' }]), []);
+  // Review: an additional box that names something else gets no letter, unless it opens with "additional"/"supplemental".
+  assert.equal(isAdditionalAttachmentsBox('Upload any other relevant documents (transcript, portfolio)'), false);
+  assert.equal(isAdditionalAttachmentsBox('Optional file upload'), false, '"optional" alone is not a request for more');
+  assert.equal(isAdditionalAttachmentsBox('Other documents: letters of recommendation'), false);
+  assert.equal(isAdditionalAttachmentsBox('Additional documents (e.g. transcript)'), true);
+  assert.deepEqual(letters([RESUME, { label: 'Upload any other relevant documents (transcript, portfolio)', type: 'file', id: 'o' }]), []);
+  // The server starts a letter only when the plan placed one — never on the page's text or the posting's description.
+  const { readFileSync } = await import('node:fs');
+  const serve = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
+  assert.match(serve, /const said = letterPlanned\(plan\);/);
+  assert.doesNotMatch(serve, /body\.mentionsLetter \?|the posting mentions a cover letter/, 'no early start from a mention');
+  const content = readFileSync(new URL('./extension/content.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(content, /mentionsLetter:/, 'the extension no longer sends the page-mention signal');
+});
+
+test('his answer, 2026-11-04: "authorized … without restrictions?" stays No — his old Yes is never borrowed', () => {
+  const P = { ...PROFILE, answers: { ...PROFILE.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes' }, applyingTo: 'Intuitive',
+    pastAnswer: () => ({ answer: 'Yes', company: 'Intuitive', at: '2026-09-26T10:00:00Z' }) };
+  const Q = 'Are you legally authorized to work in the country where the job is located without restrictions?';
+  for (const type of ['select', 'prompt', 'radio']) {
+    const a = planForm([{ label: Q, type, options: type === 'prompt' ? [] : ['Yes', 'No'] }], P, { company: 'Intuitive' }).actions[0];
+    assert.equal(a.value, 'No', `${type}: ${JSON.stringify(a)}`);
+    assert.ok(!(a.alternatives || []).includes('Yes'), `${type}: his old Yes is not even an alternative`);
+    assert.ok(!a.past, 'not marked as his own earlier answer');
+  }
+  // A list where No does not appear as a plain row: still never his old Yes.
+  const odd = planForm([{ label: Q, type: 'select', options: ['Yes', 'Prefer not to say'] }], P, { company: 'Intuitive' }).actions[0];
+  assert.notEqual(odd.value, 'Yes', JSON.stringify(odd));
+});
+
+test('week review F1, 2026-11-13: export control, U.S. person, clearance and "legally allowed" are never borrowed either', () => {
+  // No rule knows these wordings, so the plan fell through to his past
+  // answer: an old answer would have come back on a question only the rules answer.
+  const P = { ...PROFILE, applyingTo: 'Intuitive', pastAnswer: () => ({ answer: 'Borrowed', company: 'Intuitive', at: '2026-09-26T10:00:00Z' }) };
+  for (const Q of [
+    'Are you legally allowed to work in the U.S.?',
+    'Are you a U.S. person as defined by ITAR/EAR?',
+    'Are you a foreign national?',
+    'Do you hold an active security clearance?',
+    'Will this role give you access to export-controlled technology? Please confirm you understand.',
+    'What is your nationality?',
+    'Do you have the right to work in the United States?',
+  ]) {
+    for (const type of ['radio', 'prompt']) {
+      const field = { label: Q, type, options: type === 'prompt' ? [] : ['Yes', 'No', 'Borrowed'] };
+      const d = decide(field, Q, P);
+      assert.ok(!d.past && d.rule !== 'his-past-answer', `${Q} (${type}) borrowed his old answer: ${JSON.stringify(d)}`);
+      const a = planForm([field], P, { company: 'Intuitive' }).actions[0];
+      assert.notEqual(a.value, 'Borrowed', `${Q} (${type}) planned his old answer: ${JSON.stringify(a)}`);
+    }
+  }
+});
+
+test('re-review, 2026-11-04: a letter is written on request only where the plan placed one, or he asked in the panel', async () => {
+  const { letterWriteAllowed } = await import('./apply-plan.mjs');
+  assert.equal(letterWriteAllowed({ placed: false, ask: false }), '', 'neither: no letter');
+  assert.ok(letterWriteAllowed({ placed: true }));
+  assert.ok(letterWriteAllowed({ ask: true }));
+  // The wiring: the endpoint checks it before writing, the plan records placement, and the panel marks its own asks.
+  const { readFileSync } = await import('node:fs');
+  const serve = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf8');
+  assert.match(serve, /if \(said\) LETTER_PLACED\.add\(String\(id\)\);/);
+  assert.match(serve, /letterWriteAllowed\(\{ placed: LETTER_PLACED\.has\(id\), ask: url\.searchParams\.get\('ask'\) === '1' \}\)/);
+  assert.match(serve, /if \(!why\) return json\(res, 404/);
+  const bg = readFileSync(new URL('./extension/background.js', import.meta.url), 'utf8');
+  assert.match(bg, /\/api\/cover-letter-pdf\?\$\{q\}&write=1&ask=1/, 'the panel chip and drag are his ask');
+  assert.match(bg, /&write=1`;\s*\n\s*const \{ buf, filename \} = await api\(`\/api\/cover-letter-pdf/, 'the filler\'s own request carries no ask');
+});
+
+test('F-1013 #23: another employer\'s past answer never replaces a rule answer that fits by date or band', () => {
+  const past = () => ({ answer: '3+ months', company: 'Zeta Corp', at: '2026-09-20' });
+  const f = [{ label: 'When can you start?', type: 'radio', options: ['Immediately', '2 weeks', '1-3 months', '3+ months'] }];
+  const a = planForm(f, { ...PROFILE, pastAnswer: past }, { company: 'Acme' }).actions[0];
+  assert.ok(!/Zeta/.test(String(a.past || '')), `Zeta Corp's answer is not Acme's: ${JSON.stringify(a)}`);
+  assert.notEqual(a.rule, 'his-past-answer');
+  // (Same-employer borrowing where the rule fits nothing is pinned by the
+  // Lexington Medical GPA test above.)
+});
+
+test('F-1013 #8: a checkbox LIST under a consent-sounding question is a choice, never "tick every box"', () => {
+  const [skills] = planForm([{ label: 'I confirm I have hands-on experience with', type: 'checkbox', options: ['SolidWorks', 'ANSYS', 'MATLAB'] }], PROFILE, { company: 'Acme' }).actions;
+  assert.notEqual(skills.action, 'check', `every skill would have been claimed: ${JSON.stringify(skills)}`);
+  // One consent box is still ticked…
+  const [one] = planForm([{ label: 'I agree to the privacy policy', type: 'checkbox', options: [] }], PROFILE, { company: 'Acme' }).actions;
+  assert.equal(one.action, 'check');
+  // …and so is a list made only of consents.
+  const [both] = planForm([{ label: 'I agree to the following', type: 'checkbox', options: ['I agree to the Terms of Use', 'I agree to the Privacy Policy'] }], PROFILE, { company: 'Acme' }).actions;
+  assert.equal(both.action, 'check');
+});
+
+// ── P3: "not listed" rows, place spellings ──────────────────────────────────
+import { notListedFor } from './apply-plan.mjs';
+import { placeSpellings } from './apply/_form.mjs';
+
+test('P3: only a school-name or plain Degree list gets the "not listed" last resort; never a ladder of levels, never a multi', () => {
+  for (const l of ['School', 'School *', 'University', 'School Name', 'Institution', 'School or University', 'Degree', 'Degree *']) {
+    assert.ok(notListedFor(l, 'combo').notListed, `${l} gets it`);
+  }
+  for (const l of ['Highest level of education', 'Degree level', 'Degree Type', 'Education Level', 'School location', 'Are you currently enrolled in school?', 'Highest Degree']) {
+    assert.equal(notListedFor(l, 'combo').notListed, undefined, `${l} does not`);
+  }
+  assert.equal(notListedFor('School', 'multi').notListed, undefined);
+  const [a] = planForm([field({ label: 'School', type: 'prompt', promptKind: 'combo' })], PROFILE).actions;
+  assert.equal(a.value, 'Lakeside University');
+  assert.deepEqual(a.notListed, ['Other', 'Not Listed', 'None of the above']);
+  assert.equal((a.values || []).some((v) => /other|not listed/i.test(v)), false, '"Other" is never among his values');
+});
+
+test('P3: a School list already showing "Other" is answered, and the name box under it gets his school', () => {
+  const plan = planForm([
+    field({ label: 'School', type: 'prompt', promptKind: 'combo', current: 'Other' }),
+    field({ label: 'If other, please enter your school name', type: 'text' }),
+  ], PROFILE);
+  assert.equal(plan.actions[0].action, 'skip');
+  assert.match(plan.actions[0].why, /already set to "Other"/);
+  assert.equal(plan.actions[1].action, 'fill');
+  assert.equal(plan.actions[1].value, 'Lakeside University');
+});
+
+test('P3: a place\'s other spellings, from the state table', () => {
+  assert.deepEqual(placeSpellings('Springfield, Washington'), ['Springfield, WA', 'Springfield']);
+  assert.deepEqual(placeSpellings('Springfield, WA'), ['Springfield, Washington', 'Springfield']);
+  assert.deepEqual(placeSpellings('Springfield, WA, USA'), ['Springfield, Washington, USA', 'Springfield']);
+  assert.deepEqual(placeSpellings('Springfield'), []);
+  assert.deepEqual(placeSpellings('Leeds, Yorkshire'), [], 'not a U.S. state: no variants');
+  const [loc] = planForm([field({ label: 'Location' })], PROFILE).actions;
+  assert.equal(loc.value, 'Springfield, Washington');
+  assert.deepEqual(loc.placeAlts, ['Springfield, WA', 'Springfield']);
+  const [first] = planForm([field({ label: 'First Name' })], PROFILE).actions;
+  assert.equal(first.placeAlts, undefined);
 });

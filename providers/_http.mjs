@@ -21,6 +21,9 @@ async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers =
       const err = new Error(snippet ? `HTTP ${res.status}: ${snippet}` : `HTTP ${res.status}`);
       err.status = res.status;
       err.body = responseText;
+      // Workable's 429 is a day-long IP block whose length is only in this
+      // header (F-634); a caller deciding whether to stop needs it.
+      err.retryAfter = res.headers.get('retry-after');
       throw err;
     }
     return res;

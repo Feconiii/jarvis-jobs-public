@@ -71,7 +71,54 @@ const ONLY_IF_ASKED = new Set([
   'Object Detection', 'Image Classification', 'Part Inspection', 'Qualification Testing', 'Dimensional Analysis',
   'Time Studies', 'Process Improvement', 'Continuous Improvement', 'Bottleneck Analysis', 'Cleanroom', 'Material Selection',
   'Agentic AI', 'AI Agents', 'AI Workflow Automation', 'Prompt Engineering', 'Large Language Models (LLMs)', 'AI-Assisted Engineering',
+  // Field-neutral activity phrases and AI buzzwords only. A person's own method
+  // names and niche tools go in their pool's rules.onlyIfAsked (2026-10-26: his
+  // Kaizen/5S/Pareto lists on a robotics page, "too many niche details … hurts").
 ]);
+// THE PERSON'S OWN RULES LIVE IN THEIR POOL, NOT HERE (2026-10-27, his ask:
+// "make sure its general, not tailored to companies and hardcoded"). The pool's
+// `rules` names which of its items print only when asked (method names, niche
+// tools, the lesser CAD packages a blind grade called stuffing), which skills
+// stand only beside one bullet, which languages a coding posting must see, and
+// where a planned course belongs. This module only applies them.
+const bulletKeys = (spec) => new Set((spec?.experience || []).flatMap((e) => (e.bullets || []).map((b) => b.provenanceKey)));
+/** The pool's rules, read once per build. A pool without them gates nothing. */
+export function rulesOf(pool) {
+  const r = pool?.rules || {};
+  const languages = Array.isArray(r.languages) ? r.languages : [];
+  const codeKey = Object.entries(pool?.skills || {}).find(([, v]) => (v.items || []).some((i) => languages.includes(i)))?.[0] || null;
+  return {
+    onlyIfAsked: new Set([...ONLY_IF_ASKED, ...(Array.isArray(r.onlyIfAsked) ? r.onlyIfAsked : [])]),
+    backedBy: r.backedBy && typeof r.backedBy === 'object' ? r.backedBy : {},
+    languages,
+    codeKey,
+    codeLead: codeKey ? pool.skills[codeKey].lead : null,
+    courseAskedWhen: r.courseAskedWhen && typeof r.courseAskedWhen === 'object' ? r.courseAskedWhen : {},
+  };
+}
+/** A skill that names one bullet's work, with that bullet off the page (Skild: AMR skill, no AMR bullet). */
+const orphaned = (item, keys, R) => !!R.backedBy[item] && !keys.has(R.backedBy[item]);
+/** Whether a spare pool item may pad a skills line for this posting. */
+const fillable = (item, named, jdLow, spec, R) => {
+  const asked = named(item) || jdLow.includes(String(item).toLowerCase());
+  if (asked) return true;
+  if (R.onlyIfAsked.has(item)) return false;
+  return !(spec && orphaned(item, bulletKeys(spec), R));
+};
+/**
+ * A POSTING THAT ASKS FOR CODE GETS THE LANGUAGES (2026-10-27). The planner's
+ * rule says so, and a rebuilt tools-and-automation page still went out with
+ * only CAD and Manufacturing lines. Enforced here, after the plan.
+ */
+const ASKS_FOR_CODE = /\b(python|c\+\+|matlab|programming|scripting|scripts?|coding|firmware|labview|ros ?2?)\b/i;
+/** A course still to be taken carries its term: "(Spring 2027)". */
+const PLANNED_COURSE = /\((spring|summer|fall|autumn|winter)\s+\d{4}\)/i;
+/** Whether a planned course belongs on this posting's page; with no rule, it may stay. */
+const plannedFits = (course, jd, R) => {
+  const p = R.courseAskedWhen[course];
+  if (!p) return true;
+  try { return new RegExp(p, 'i').test(String(jd || '')); } catch { return false; }
+};
 const courseLine = (spec) => (spec.education?.[0]?.bullets || []).find((b) => b && typeof b === 'object' && /coursework/i.test(b.lead || ''));
 const courseItems = (spec) => String(courseLine(spec)?.text || '').split(/,\s*/).filter(Boolean);
 const withCourses = (spec, items) => ({
@@ -107,7 +154,7 @@ function revert(spec, applied) {
  */
 export async function polish(spec, {
   pdfPath, pool = null, reserve = [], tailor = null, job = null, jd = null, vocab = null,
-  keep = [], maxPasses = MAX_PASSES, dpi = 200, log = () => {}, tailored = null,
+  keep = [], maxPasses = MAX_PASSES, dpi = 200, log = () => {}, tailored = null, protect = null,
 } = {}) {
   const notes = [];
   const applied = [];
@@ -124,18 +171,49 @@ export async function polish(spec, {
   const askedFor = jd ? termsIn(jd) : new Set();
   const named = (item) => [...termsIn(String(item))].some((t) => askedFor.has(t));
   const namedIn = (s, cat) => skillItems(s, cat.key).filter(named).length;
+  // THE SKILLS LINE THAT GIVES WAY when the page is full or a bullet wants its
+  // room: the one the posting asked least of — never the line holding the
+  // languages a coding posting asks for (2026-10-27: "scripting for test
+  // automation. Python is a plus" matched no menu item word for word, so the
+  // line holding Python scored least and was traded for a bullet).
+  const R = rulesOf(pool);
+  const codeAsked = !!(jd && ASKS_FOR_CODE.test(jd)) && R.languages.length > 0;
+  const holdsCode = (s, c) => codeAsked && skillItems(s, c.key).some((x) => R.languages.includes(x));
+  const leastAsked = (s) => {
+    const open = (s.skills || []).filter((c) => !holdsCode(s, c));
+    return open.length ? open.reduce((lo, c) => (namedIn(s, c) <= namedIn(s, lo) ? c : lo), open[open.length - 1]) : null;
+  };
   // Activity phrases and AI buzzwords print only when the posting uses them —
   // the blind read of 2026-09-23 called "Object Detection" padding, and the
   // writer's own rules already say so. A family base has no posting, so they go.
   const jdText = String(jd || '').toLowerCase();
+  const keysNow = bulletKeys(spec);
   spec = {
     ...spec,
     skills: (spec.skills || []).map((s) => {
       const items = skillItems(spec, s.key);
-      const kept = items.filter((x) => !ONLY_IF_ASKED.has(x) || named(x) || jdText.includes(String(x).toLowerCase()));
+      const kept = items.filter((x) => {
+        const asked = named(x) || jdText.includes(String(x).toLowerCase());
+        return asked || (!R.onlyIfAsked.has(x) && !orphaned(x, keysNow, R));
+      });
       return kept.length === items.length || !kept.length ? s : { ...s, text: kept.join(', ') };
     }),
   };
+  if (codeAsked && R.codeKey) {
+    const onPage = new Set((spec.skills || []).flatMap((s) => skillItems(spec, s.key)));
+    if (!R.languages.some((l) => onPage.has(l))) {
+      const have = (spec.skills || []).find((s) => s.key === R.codeKey);
+      spec = have
+        ? withSkills(spec, R.codeKey, [...R.languages, ...skillItems(spec, R.codeKey)])
+        : { ...spec, skills: [...(spec.skills || []), { key: R.codeKey, lead: R.codeLead, text: R.languages.join(', ') }] };
+      notes.push(`the posting asks for programming and the page had no language — added ${R.languages.join(', ')}`);
+    }
+  }
+  {
+    const courses = courseItems(spec);
+    const out = courses.filter((c) => !PLANNED_COURSE.test(c) || (jd && plannedFits(c, jd, R)));
+    if (out.length !== courses.length) spec = withCourses(spec, out);
+  }
   const browser = await chromium.launch();
   let fit = null, judge = null, layout = null;
   const render = async (s) => {
@@ -220,13 +298,13 @@ export async function polish(spec, {
         // posting asked least of; two categories stay, because one subtitle is
         // a list, not a grouping.
         const cats = spec.skills || [];
-        if (cats.length > 2) {
-          const least = cats.reduce((lo, c) => (namedIn(spec, c) <= namedIn(spec, lo) ? c : lo), cats[cats.length - 1]);
+        const least = cats.length > 2 ? leastAsked(spec) : null;
+        if (least) {
           spec = { ...spec, skills: cats.filter((c) => c !== least) };
           notes.push(`spilled past one page — dropped the "${least.lead}" skills category`);
           continue;
         }
-        const cut = withoutOneBullet(spec);
+        const cut = withoutOneBullet(spec, protect);
         if (!cut.dropped) { notes.push('spills past one page and nothing is left to cut'); break; }
         // TWO BULLETS SAID AS ONE BEFORE EITHER CLAIM GOES (2026-09-29): the
         // RoboDK and rack bullets become the one cobot-cell bullet when the cut
@@ -237,6 +315,32 @@ export async function polish(spec, {
       }
 
       // 2. A FOUR-LINE BULLET: compressed, same facts, fewer words.
+      // A FOUR-LINE PROJECT IS SAID IN ITS SHORT FORM (2026-10-27). The repair
+      // below finds bullets by their experience entry only, so a project that
+      // ran to four lines (the arm project's full wording, 372 characters, now
+      // on more pages because the checklist keeps it as proof) reached the sheet
+      // check and failed it on three of thirteen rebuilds. Its own short form is
+      // the same claim in fewer words; a phrase the posting named still blocks it.
+      {
+        let fixedProject = false;
+        for (const p of judge.problems.filter((x) => x.kind === 'long-bullet' && !bulletFor(spec, x.bullet.ends))) {
+          let tight = shortenBulletEnding(spec, p.bullet.ends, keep);
+          // His 1–3-line rule outranks a phrase the planner chose to keep: a
+          // project has no reworded form, so when only its short form fits, it
+          // is used and the phrase it gives up is named (Droyd: "serial-bus
+          // servo actuation" against "serial-bus servos").
+          if (!tight.shortened) {
+            tight = shortenBulletEnding(spec, p.bullet.ends, []);
+            if (tight.shortened) {
+              const was = (spec.projects || []).find((x) => String(x.text).trim().endsWith(String(p.bullet.ends).trim().slice(-30)))?.text || '';
+              const lost = keep.filter((k) => was.includes(k) && !(tight.spec.projects || []).some((x) => String(x.text).includes(k)));
+              if (lost.length) notes.push(`gave up "${lost.join('", "')}" to keep the project to three lines`);
+            }
+          }
+          if (tight.shortened) { spec = tight.spec; notes.push(`the ${tight.shortened} project in its short form (was ${p.bullet.lines} lines)`); fixedProject = true; }
+        }
+        if (fixedProject) continue;
+      }
       const long = judge.problems.filter((p) => p.kind === 'long-bullet').map((p) => ({ p, hit: bulletFor(spec, p.bullet.ends) })).filter((x) => x.hit && !triedCompress.has(x.hit.b.provenanceKey));
       if (long.length) {
         for (const x of long) triedCompress.add(x.hit.b.provenanceKey);
@@ -344,7 +448,7 @@ export async function polish(spec, {
           // line is a few words over is given more of the category — items he
           // has in the pool that the plan left off — until it is worth having.
           if (!fixed && pool) {
-            const spare = spareSkills(pool, key, items);
+            const spare = spareSkills(pool, key, items).filter((x) => fillable(x, named, String(jd || '').toLowerCase(), spec, R));
             let grown = items;
             for (const extra of spare.slice(0, 4)) {
               grown = [...grown, extra];
@@ -426,7 +530,15 @@ export async function polish(spec, {
         const here = onPageNow();
         if (here.has(key) || ONE_OF.some((pair) => pair.includes(key) && pair.some((x) => x !== key && here.has(x)))) continue;
         const cats = spec.skills || [];
-        const least = cats.reduce((lo, c) => (namedIn(spec, c) <= namedIn(spec, lo) ? c : lo), cats[cats.length - 1]);
+        const least = leastAsked(spec);
+        if (!least) { reserve.unshift(key); break; }
+        // ON A TAILORED PAGE, ONLY FOR PROOF (2026-10-27). The rebuilt Coherent
+        // and Amazon pages traded their CAD/CAE and Automation lines for Baja,
+        // the plant map and a Baja troubleshooting line — a blind grader then
+        // marked both pages down for having no CAD or robotics skills. A skills
+        // line gives way only to a bullet the posting's checklist cites as
+        // proof, and never a line holding a tool the posting names.
+        if (jd && (!(protect && protect.has(key)) || namedIn(spec, least) > 0)) continue;
         const candidate = withBullet({ ...spec, skills: cats.filter((c) => c !== least) }, key, pool);
         const again = await render(candidate);
         const spilledNow = again.fit.overflow || (again.fit.pages || 1) > 1;
@@ -482,7 +594,8 @@ export async function polish(spec, {
         // A tool-less activity phrase or an AI buzzword is filler when isolated
         // (the blind read called "Object Detection" padding); it fills a line
         // only when this posting uses it.
-        if (t.kind === 'skills') spare = spare.filter((x) => !ONLY_IF_ASKED.has(x) || isAsked(x) || jdLow.includes(String(x).toLowerCase()));
+        if (t.kind === 'skills') spare = spare.filter((x) => fillable(x, isAsked, jdLow, spec, R));
+        else spare = spare.filter((c) => !PLANNED_COURSE.test(c) || (jd && plannedFits(c, jd, R)));
         if (!spare.length) continue;
         // An estimate from the measured line, then proved by a render; an
         // estimate that wraps gives back its last item and is measured again.

@@ -16,7 +16,24 @@
 // A wrong answer that reports as correct is worse than a blank field. These cases
 // are the guard.
 
-import { resolveLabel } from './apply/_answers.mjs';
+import { resolveLabel as resolveLabelRaw } from './apply/_answers.mjs';
+
+// HIS SPONSORSHIP ROW, NAMED FIRST (F-995, his answer 2026-11-04): every
+// sponsorship "Yes" now leads with "Yes, but not until the future" so a list
+// offering that row gets it word for word. The checks below were written for
+// the plain answer; they read past that first row, and SPONSOR_ROW_SEEN
+// counts that it was there each time (checked at the end).
+const SPONSOR_ROW = 'Yes, but not until the future';
+let SPONSOR_ROW_SEEN = 0;
+const resolveLabel = (...a) => {
+  const r = resolveLabelRaw(...a);
+  // …and his Yes is "Yes, not now" (re-review): a Yes that never takes a now-only row. Read as the plain Yes.
+  if (r?.kind === 'answer' && Array.isArray(r.value) && r.value[0] === SPONSOR_ROW && r.value[1] === 'Yes, not now') {
+    SPONSOR_ROW_SEEN += 1;
+    return { ...r, value: ['Yes', ...r.value.slice(2)] };
+  }
+  return r;
+};
 
 // Fixture, NOT the user's real profile — keeps the test deterministic and keeps
 // personal data out of the repo.
@@ -78,6 +95,7 @@ is('Have you ever interviewed at Anthropic before?', 'No', 'never applied means 
 is('AI Policy for Application', 'Yes', 'the AI policy acknowledgement is the standing AI consent');
 is('Agreement to Arbitrate', 'Yes', 'an arbitration agreement is a consent box');
 is('Please read the arbitration agreement below', 'Yes');
+is('Do you agree for Metaview to join and take notes in your interviews?', 'Yes', 'an interview note-taker is a consent (Focused Energy, 2026-10-16)');
 is('What is the address from which you plan on working? If you would need to relocate, please type "relocating".', 'Springfield, Washington', 'his location is the address he works from');
 
 // ── SmartRecruiters screening step, Becton Dickinson (live 2026-09-04) ──
@@ -92,6 +110,20 @@ is('Are you legally authorized to work in the USA without sponsorship?', 'No',
   const u = resolveLabel('Are you legally authorized to work in the United States without sponsorship?', unknown);
   if (u.kind !== 'answer') pass++; else { fail++; console.log(`✗ neither answer known → blank, never guessed; got ${JSON.stringify(u)}`); }
 }
+{
+  // TI, live 2026-10-24 (F-909): required, and left blank.
+  const f1 = { ...P, answers: { ...P.answers, visa_status_note: 'F-1 student; OPT after graduation, then H-1B' } };
+  const ti = 'U.S. Immigration Form: Do you currently hold an H, L, E, J, or F nonimmigrant visa (examples: H-1B, H-2B, H-4, L-1, L-2, E-1, E-2, J-1, J-2, F-1, etc.)?';
+  const r = resolveLabel(ti, f1);
+  if (r.kind === 'answer' && r.value === 'Yes') pass++; else { fail++; console.log(`✗ an F-1 holder holds an F nonimmigrant visa; got ${JSON.stringify(r)}`); }
+  const none = resolveLabel(ti, { ...P, answers: { ...P.answers, visa_status_note: '' } });
+  if (none.kind !== 'answer' || none.value !== 'Yes') pass++; else { fail++; console.log('✗ no F-1 in the profile → never Yes'); }
+}
+{
+  // onsemi, 2026-10-24 (F-913): "Previous Last Name" was typed "Rivera".
+  const r = resolveLabel('Previous Last Name', P);
+  if (!(r.kind === 'answer' && r.value === 'Byron')) pass++; else { fail++; console.log('✗ a previous last name is never his current one'); }
+}
 is('Are you eligible for a 24-month OPT extension based upon a US degree in STEM?', 'Yes', 'STEM extension beats the generic OPT rule');
 is('Do you have a disability or chronic condition that substantially limits one or more of your major life activities, including mobility and learning?',
   'No, I do not have a disability', '"major life activities" must NOT take the discipline answer');
@@ -99,8 +131,8 @@ is('What was your major?', 'Mechanical Engineering', 'a real "major" question st
 is('Field of Study', 'Mechanical Engineering');
 
 // ── wording variants seen across vendors ────────────────────────────
-is('Where did you hear about Hadrian?', 'LinkedIn', 'Ashby says "Where", not "How"');
-is('How did you find out about this opportunity?', 'LinkedIn');
+is('Where did you hear about Hadrian?', 'Company Website', 'Ashby says "Where", not "How"');
+is('How did you find out about this opportunity?', 'Company Website'); // his choice, 2026-10-23: the company's own site first
 is('Are you a former ASML employee or contractor?', 'No', 'company name sits between the words');
 is('How many years of relevant professional experience do you have related to this position?', '2 years');
 is('Please select your sex:', 'Male', 'Workday asks sex, not gender');
@@ -271,7 +303,7 @@ is('Preferred Name', 'Ada Byron', 'the preferred name, not the legal one');
 is('Preferred First Name', 'Ada', 'first word of what he goes by');
 is('Legal Name', 'Augusta Ada Byron', 'and the legal fields are untouched');
 is('Full Name', 'Augusta Ada Byron');
-is('First Name', 'Augusta Ada');
+is('First Name', 'Ada'); is('Legal First Name', 'Augusta Ada'); // 2026-10-23: the name he goes by, legal only where it says legal
 is('Last Name', 'Byron');
 
 // -- a graduation date split across two controls --------------------
@@ -303,7 +335,7 @@ is('U.S. Export Control Requirements - Are you a citizen, national, or resident 
 is('Are you a U.S. person as defined by ITAR?', 'No', 'and a real US-person question still routes there');
 is('Are you a citizen of Cuba, Iran, North Korea or Syria?', 'No');
 is('How did you first hear about this job? Please list the site, event, or person that referred you.',
-  'LinkedIn', 'an adverb between "you" and "hear" must not break the match');
+  'Company Website', 'an adverb between "you" and "hear" must not break the match');
 
 
 // -- a question that asks him to EXPLAIN is not asking for a number --
@@ -474,6 +506,21 @@ is('What is your field of study?', 'Mechanical Engineering');
 is('What is the name of the school you attend?', 'Test University');
 is('What type of opportunity are you looking for?', 'New College Graduate');
 
+// ── a GPA floor is a Yes/No about his number (F-943, Cummins on Oracle) ──
+is('Do you possess a cumulative GPA that is 2.5 or higher?', 'Yes', 'the Cummins question');
+is('Do you possess a cumulative GPA that is 2.5 or higher on a 4.0 scale in your academic program?', 'Yes', 'the Cummins question, word for word (answer log 2026-10-30)');
+is('Do you have a minimum GPA of 3.0?', 'Yes', '"minimum GPA of N"');
+is('Do you have a 3.0+ GPA?', 'Yes', '"N+"');
+is('Is your GPA at least 3.95?', 'No', 'a floor above his GPA is answered No, truthfully');
+is('Is your cumulative GPA 3.5/4.0 or above?', 'Yes', 'a floor written on the 4-point scale');
+is('Is your GPA below 2.0?', 'unknown', 'a ceiling is not a floor: left for him');
+is('Do you have a GPA?', 'unknown', 'no number, nothing to compare');
+is('What is your cumulative GPA?', '3.9', 'the number question still gets the number');
+// The number has to be the GPA's (review 2026-11-06).
+is('Do you have a 3.0 GPA and 2+ years of experience?', 'unknown', '"2+ years" is not a GPA floor');
+is('Is your GPA 84 or higher?', 'unknown', 'a 100-point scale is not read as 4.0');
+is('Is your GPA between 3.3-4.0?', 'unknown', 'a range is his to answer');
+
 // ── the two EEO questions that look alike (Ashby, measured 2026-09-07) ──
 //
 // A race question whose FIRST OPTION is "Hispanic or Latino" is labelled
@@ -574,7 +621,9 @@ is('Previous Title', 'unknown');
   const H = { ...P, identity: { ...P.identity, postal_code: '12345' }, answers: { ...P.answers, held_h1b: 'No', held_j1: 'No' } };
   const check = (label, expected) => {
     const r = resolveLabel(label, H);
-    const got = r.kind === 'answer' ? r.value : r.kind;
+    // A ladder's first rung is its Yes/No answer (F-850: sponsorship also
+    // carries the statement it makes true, for lists of sentences).
+    const got = r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind;
     if (got === expected) pass++;
     else { fail++; console.log(`✗ ${label.slice(0, 70)}\n    expected ${JSON.stringify(expected)} got ${JSON.stringify(got)}`); }
   };
@@ -602,7 +651,7 @@ is('Previous Title', 'unknown');
     ['Name', 'Ada Byron'],                                                        // Radiant: what he goes by
     ['Legal Name', 'Augusta Ada Byron'],
     ['Legal Name — I have a preferred name', 'Yes'],                              // KLA / Wolfspeed Workday
-    ['Where did you hear about us? (e.g., LinkedIn, job board, referral)', 'LinkedIn'], // Nudge: the how-heard answer, not his URL
+    ['Where did you hear about us? (e.g., LinkedIn, job board, referral)', 'Company Website'], // Nudge: the how-heard answer, not his URL
     ['This position requires the lawful ability to access technical data, information, and areas controlled by United States export control laws and regulations. In order for Wolfspeed, Inc. and its subsidiaries to comply with U.S. Department of Commerce Export Administration Regulations, you will need to provide documentation confirming your nationality if an offer of employment is extended', 'Yes'],
     ['California Applicants only:I understand the Company may obtain, without using the services of a third party investigative consumer reporting agency, public records', 'Not applicable'],
   ]) {
@@ -642,7 +691,7 @@ is('Previous Title', 'unknown');
     ['Have you ever been sponsored for an H-1B?', 'No'],
   ]) {
     const r = resolveLabel(label, S);
-    const got = r.kind === 'answer' ? r.value : r.kind;
+    const got = r.kind === 'answer' ? (Array.isArray(r.value) ? r.value[0] : r.value) : r.kind;   // a ladder's first rung (F-850)
     if (got === want) pass++;
     else { fail++; console.log(`✗ ${label.slice(0, 70)}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); }
   }
@@ -696,15 +745,64 @@ is('Previous Title', 'unknown');
   const cases = [
     ['Are you legally eligible for employment in the country where the job is located?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'Yes'],
     ['What is your required notice period with your current employer?', (r) => r.kind === 'answer' && /no notice period/.test(r.value)],
+    // F-790 (Terex, 2026-10-22): got "Lakeside University — Manufacturing Lead (student)".
+    ['How much notice do you need to leave your current employer?', (r) => r.kind === 'answer' && /no notice period/.test(r.value)],
+    ['How many weeks of notice must you give your current employer?', (r) => r.kind === 'answer' && /no notice period/.test(r.value)],
+    ['Current Employer', (r) => r.kind === 'answer' && /Lakeside/.test(r.value)],
+    // F-796 (Coherent, Oracle, 2026-10-22): required, left blank.
+    ['Will you require visa assistance now or in the future from our company?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'Yes'],
+    ['Do you need immigration support to work in the U.S.?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'Yes'],
+    ['Have you ever received visa assistance from us?', (r) => !(r.kind === 'answer' && [].concat(r.value)[0] === 'Yes')],
     ['(Optional) Where can we find more information about you? (e.g., personal website, GitHub, x.com)', (r) => r.kind === 'answer' && r.value === 'alexrivera.example'],
     ['GitHub URL', (r) => r.kind === 'blank'],
     ['Understanding', (r) => r.kind === 'answer'],
-    ['How did you hear about us?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'LinkedIn'],
+    ['How did you hear about us?', (r) => r.kind === 'answer' && [].concat(r.value)[0] === 'Company Website' && [].concat(r.value).includes('LinkedIn')],
   ];
   for (const [label, ok] of cases) {
     const r = resolveLabel(label, W);
     if (ok(r)) pass++; else { fail++; console.log('✗ ' + label + ' got ' + JSON.stringify(r)); }
   }
+}
+
+// SuccessFactors portals, 2026-10-07..22 (F-830..F-834): questions left blank
+// or answered wrong on EnerSys, Newell and Veeco.
+{
+  const S = { ...P, answers: { ...P.answers, has_bachelors_degree: 'Yes', previously_employed_here: 'No', citizenship_status: 'Non-U.S. citizen (F-1 student visa, Canada)' } };
+  const first = (r) => [].concat(r?.value)[0];
+  const cases = [
+    // F-830: the required mark and "at least" hid the degree question; years answered No.
+    ['* Do you have at least a 4 year degree in a related field OR at least 10 years of work related experience?', (r) => r.kind === 'answer' && first(r) === 'Yes'],
+    ['Do you have a four-year degree in engineering?', (r) => r.kind === 'answer' && first(r) === 'Yes'],
+    // F-831: someone else's name is never his.
+    ["If you selected EnerSys Employee Referral, please indicate who referred you by providing the individual's LEGAL FIRST and LAST NAME.", (r) => r.kind !== 'answer' || !/Byron|Ada/.test(String(first(r)))],
+    ["Referrer's Last Name", (r) => r.kind !== 'answer' || !/Byron/.test(String(first(r)))],
+    ['Emergency contact first name', (r) => r.kind !== 'answer' || !/Ada/.test(String(first(r)))],
+    ['* Last Name', (r) => r.kind === 'answer' && first(r) === 'Byron'],
+    ['Preferred First Name', (r) => r.kind === 'answer' && first(r) === 'Ada'],
+    // F-898: a relative's (or anyone's) "their full name" is never his.
+    ["Relative's full name", (r) => r.kind !== 'answer' || !/Byron|Ada/.test(String(first(r)))],
+    ['Please provide their full name, location and your relationship to them.', (r) => r.kind !== 'answer' || !/Byron|Ada/.test(String(first(r)))],
+    // F-832: employed here, with no time word.
+    ['* Have you been employed by EnerSys, or any of its affiliates? NOTE: Internal Employees need to apply via LiNK >> Careers.', (r) => r.kind === 'answer' && first(r) === 'No'],
+    ['* Are you, or have you been employed by Newell Brands during the last 5 years (formerly known as Newell Rubbermaid or Jarden Corporation)?', (r) => r.kind === 'answer' && first(r) === 'No'],
+    // F-834: citizen or permanent resident.
+    ['* Are you a U.S. Citizen or U.S. Permanent Resident (i.e. a green card holder)?', (r) => r.kind === 'answer' && first(r) === 'No'],
+    ['* This facility performs work for the military. Thus, employees must be either a US Citizen or a Permanent Resident. Can you meet this requirement?', (r) => !(r.kind === 'answer' && first(r) === 'Yes')],
+  ];
+  for (const [label, ok] of cases) {
+    const r = resolveLabel(label, S);
+    if (ok(r)) pass++; else { fail++; console.log('✗ ' + label + ' got ' + JSON.stringify(r)); }
+  }
+}
+
+// Coherent's Oracle "Travel Domestically" (2026-10-22): his travel_ok, given for
+// travel within the United States; travel abroad is not his files' to answer.
+{
+  const T = { ...P, answers: { ...P.answers, travel_ok: 'Yes', travel_countries: 'Within the United States' } };
+  const dom = resolveLabel('Travel Domestically', T);
+  if (dom.kind === 'answer' && [].concat(dom.value)[0] === 'Yes') pass++; else { fail++; console.log('✗ Travel Domestically got ' + JSON.stringify(dom)); }
+  const abroad = resolveLabel('Travel Internationally', T);
+  if (!(abroad.kind === 'answer' && [].concat(abroad.value)[0] === 'Yes')) pass++; else { fail++; console.log('✗ Travel Internationally got ' + JSON.stringify(abroad)); }
 }
 
 // ── Samsung, Standard Bots, ASML, KLA — left for him 2026-09-25, his answers ──
@@ -769,6 +867,17 @@ is('Previous Title', 'unknown');
     at('The job posting listed the applicable salary range for this position. Are you willing to accept this salary range?', pay) === '$90000/year', false);
   eqq('"Current Salary" is never his target', at('Current Salary', pay) === '$90000/year', false);
   eqq('…"Desired Salary" still is', at('Desired Salary', pay), '$90000/year');
+  eqq('"The posted base salary range … $90,000 – $150,000 … Is that range acceptable to you?" is Yes when it reaches his ask (Therm-X, 2026-10-17)',
+    at('The posted base salary range for this role is $90,000 – $150,000 depending on level. Is that range acceptable to you?', pay), 'Yes');
+  eqq('…a range that tops out below his ask is his to answer',
+    at('The posted base salary range for this role is $60,000 – $75,000. Is that range acceptable to you?', pay) === 'Yes', false);
+  const me = { ...P, education: { ...P.education, discipline: 'Mechanical Engineering', degree_level: "Bachelor's", degree: 'Bachelor of Science' } };
+  eqq('"Have you completed, or will you complete before your start date, a BS in Mechanical Engineering…?" is Yes, never his major (Therm-X)',
+    at('Have you completed, or will you complete before your start date, a BS in Mechanical Engineering or a closely related engineering discipline?', me), 'Yes');
+  eqq('"How many years have you worked as a mechanical design engineer?" is a band true of internships, never his 2 years (Therm-X)',
+    at('How many years have you worked as a mechanical design engineer (internships count at half)?', me), '0-2');
+  eqq('…a BS in Electrical Engineering is his to answer',
+    at('Have you completed, or will you complete before your start date, a BS in Electrical Engineering or a closely related engineering discipline?', me) === 'Yes', false);
 }
 
 // Stress round 19 and the logged-question audit (2026-09-26).
@@ -816,7 +925,7 @@ is('Previous Title', 'unknown');
   const eqq = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}\n    expected ${JSON.stringify(want)} got ${JSON.stringify(got)}`); } };
   eqq('Onto: "legally permitted to work" is the authorization question', at('Are you legally permitted to work in the country where this job is located?'), 'Yes');
   eqq('Onto: "can you provide proof of eligibility?" — the I-9 documents, Yes', at('If hired, can you provide proof of eligibility?'), 'Yes');
-  eqq('Luma: "How did you discover us?" is how he heard', at('How did you discover us?'), 'LinkedIn');
+  eqq('Luma: "How did you discover us?" is how he heard', at('How did you discover us?'), 'Company Website');
   eqq('Luma: a box for "Portfolio/GitHub/Website" gets the portfolio', at('Portfolio/GitHub/Website'), 'https://example-portfolio.test');
   eqq('…a box for GitHub alone is still left empty', at('GitHub URL'), 'blank');
   eqq('Amazon: "What country/region are you currently located?"', at('What country/region are you currently located?'), 'United States of America');
@@ -843,6 +952,237 @@ is('Previous Title', 'unknown');
   eqq('GlobalFoundries: "you declare that you have read, understood, and accepted the terms in this policy" is the consent box',
     at('By submitting, you declare that you have read, understood, and accepted the terms in this policy'), 'Yes');
   eqq('…a declaration of a fact is not', at('By submitting, you declare that you have read this form and that you are a U.S. citizen') === 'Yes', false);
+}
+
+// ORACLE RECRUITING CLOUD, 2026-10-22 (F-811, F-812, F-813, F-814).
+{
+  const ok = (label, test, why) => { const r = resolveLabel(label, P); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const v = (r) => [].concat(r.value)[0];
+  // F-811: a discharge date is no veteran status (Ralliant, Coherent).
+  for (const part of ['Month', 'Day', 'Year']) ok(`Newly Separated Veteran Discharge Date ${part}`, (r) => r.kind === 'blank', 'F-811 discharge date');
+  ok('Veteran Self-Identification Status', (r) => r.kind === 'answer' && v(r) === 'I am not a Veteran.', 'F-811 veteran status still answered');
+  const vet = { ...P, eeo: { ...P.eeo, veteran: 'I identify as one or more of the classifications of protected veteran' } };
+  { const r = resolveLabel('Newly Separated Veteran Discharge Date Month', vet); if (r.kind !== 'blank') pass++; else { fail++; console.log('✗ F-811 a veteran\'s discharge date is not blanked'); } }
+  // F-812: a start date that mentions notice asks for the date (Legrand).
+  ok('What is your earliest possible start date, including any notice period required?', (r) => r.kind === 'answer' && /June 2027/.test(v(r)), 'F-812 start date over notice');
+  ok('How much notice do you need to leave your current employer?', (r) => !(r.kind === 'answer' && /^June/.test(String(v(r)))), 'F-812 a notice question never gets the start date');
+  // F-813: "I choose not to disclose my …" is No for him (Coherent).
+  ok('I choose not to disclose my sex', (r) => r.kind === 'answer' && v(r) === 'No', 'F-813 sex');
+  ok('I choose not to disclose my ethnicity or race', (r) => r.kind === 'answer' && v(r) === 'No', 'F-813 race');
+  ok('Sex at Birth', (r) => r.kind === 'answer' && v(r) === 'Male', 'F-813 the sex question itself');
+  const declined = { ...P, eeo: { ...P.eeo, gender: 'I decline to self-identify' } };
+  { const r = resolveLabel('I choose not to disclose my sex', declined); if (!(r.kind === 'answer' && v(r) === 'No')) pass++; else { fail++; console.log('✗ F-813 someone who declines is not told No'); } }
+  // F-814: a state asked as its code (Nokia, Ralliant).
+  ok('State/Province Code', (r) => r.kind === 'answer' && v(r) === 'WA', 'F-814 code');
+  ok('State Abbreviation', (r) => r.kind === 'answer' && v(r) === 'WA', 'F-814 abbreviation');
+  ok('State', (r) => r.kind === 'answer' && v(r) === 'Washington', 'F-814 the bare State keeps the name');
+}
+
+// F-823..F-828 (Greenhouse / Ashby / Lever, 2026-10-22): wordings his own sends answered.
+{
+  const Q = { ...P, answers: { ...P.answers, willing_onsite: 'Yes', travel_ok: 'Yes' },
+    education: { ...(P.education || {}), discipline: 'Mechanical Engineering', degree: 'Bachelor of Science' } };
+  let n = 0;
+  const ok = (label, test, why, prof = Q) => { const r = resolveLabel(label, prof); n++; if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const v = (r) => [].concat(r.value)[0];
+  ok('This role is based out of our San Francisco office 5 days/week. Are you able to commit to working from this office?', (r) => r.kind === 'answer' && v(r) === 'Yes', 'F-823 in-office commit');
+  ok('Are you near a major airport hub and comfortable with the travel requirements?', (r) => !(r.kind === 'answer' && /engineering/i.test(String(v(r)))), 'F-824 "major" airport is not a field of study');
+  ok('What is your major?', (r) => r.kind === 'answer' && /mechanical/i.test(String(v(r))), 'F-824 the major question itself');
+  ok("How'd you discover Unlimited?", (r) => r.kind === 'answer', 'F-827 contraction');
+  const long = "Have you earned a Bachelor's degree in one of the fields mentioned above, as listed in the minimum requirements?";
+  ok(long, (r) => r.kind === 'answer' && v(r) === 'Yes', 'F-828 the posting names his field', { ...Q, postingText: 'Minimum requirements: BS in Mechanical Engineering, Mechatronics or Robotics.' });
+  ok(long, (r) => !(r.kind === 'answer' && v(r) === 'Yes'), 'F-828 a posting that does not name it is his', { ...Q, postingText: 'Minimum requirements: BS in Electrical Engineering or Computer Science.' });
+}
+// ── F-802: Workday questions his profile answers that no rule read (2026-10-03..16) ──
+{
+  const Q = { ...P, answers: { ...P.answers, remote_or_onsite: 'Open to on-site, hybrid, or remote', employer_agreement: 'No', worked_via_agency: 'No' } };
+  const ok = (label, test, why) => { const r = resolveLabel(label, Q); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const v = (r) => [].concat(r.value)[0];
+  ok('Type of Employment Desired', (r) => r.kind === 'answer' && [].concat(r.value).includes('Full- Time'), 'F-802 ITW employment type');
+  ok('Type of Employment', (r) => !(r.kind === 'answer' && v(r) === 'Full-time'), 'F-802 a bare history field is not what he wants next');
+  ok('Do you have a confidentiality obligation with your current or former employer that could impact your ability to work at Dematic in the position for which you have applied?', (r) => r.kind === 'answer' && v(r) === 'No', 'F-802 KION confidentiality');
+  ok('Do you have any other contractual obligations to current or former employers that could impact your ability to work at Dematic?', (r) => r.kind === 'answer' && v(r) === 'No', 'F-802 KION contractual');
+  // He answered Flowserve's "interested in working from home?" himself with
+  // "0%" (2026-10-03): his specific answer beats the general "open to remote".
+  ok('Are you interested in working from home?', (r) => !(r.kind === 'answer' && v(r) === 'Yes'), 'F-802 working from home stays his');
+  ok('Are you or have you in the past been a contingent work or contractor for GLOBAL FOUNDRIES?', (r) => r.kind === 'answer' && v(r) === 'No', 'F-802 GlobalFoundries contingent worker');
+  ok('Have you ever been excluded, suspended or debarred (or proposed for suspension or debarment) or declared ineligible?', (r) => !(r.kind === 'answer'), 'F-802 a fact his files do not hold stays his');
+}
+// ── F-804 / F-805: Workday questions left on his list (Plug Power, Samsung) ──
+{
+  const ok = (label, test, why) => { const r = resolveLabel(label, P); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  ok('Is this rate of pay Hourly or Salary?', (r) => r.kind === 'answer' && vals(r).includes('Salary') && !vals(r).some((x) => /\$/.test(x)), 'F-804 pay TYPE, not the amount');
+  { const r = resolveLabel('What is your desired annual salary?', { ...P, answers: { ...P.answers, salary_expectation: '$90000/year' } });
+    if (r.kind === 'answer' && /90000/.test(String([].concat(r.value)[0]))) pass++; else { fail++; console.log(`✗ F-804 the amount question still gets the amount: got ${JSON.stringify(r)}`); } }
+  ok('By submitting an application, you, the applicant, agree to not disclose to Samsung, or induce Samsung to use, any confidential or proprietary information belonging to your former employers', (r) => r.kind === 'answer' && vals(r)[0] === 'Yes', 'F-805 an undertaking about former employers\' secrets');
+  ok('Do you have access to confidential or proprietary information?', (r) => !(r.kind === 'answer' && vals(r)[0] === 'Yes' && vals(r).includes('I agree')), 'F-805 a factual question about confidential information is not the undertaking');
+}
+// ── F-850..F-854: Rippling, Paylocity, Eightfold (2026-09-25..10-16) ──
+{
+  const ok = (label, test, why, prof = P) => { const r = resolveLabel(label, prof); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  // F-850: statements instead of Yes/No (VulcanForms, Rippling).
+  ok('Will you now or in the future require sponsorship for employment (e.g., H-1B visa)?',
+    (r) => r.kind === 'answer' && vals(r)[0] === 'Yes' && vals(r).some((x) => /in the future but am currently authorized/i.test(x)), 'F-850 sponsorship statement ladder');
+  ok('Will you now or in the future require sponsorship?', (r) => r.kind === 'answer' && vals(r)[0] === 'No',
+    'F-850 someone who needs none is still "No"', { ...P, answers: { ...P.answers, require_sponsorship: 'No' } });
+  // F-851 / F-852: a past employer's phone and pay are not his.
+  ok('Company Phone Number', (r) => !(r.kind === 'answer' && /555/.test(String(vals(r)[0]))), 'F-851 company phone is not his mobile');
+  ok('Employer Phone', (r) => !(r.kind === 'answer' && /555/.test(String(vals(r)[0]))), 'F-851 employer phone');
+  ok('Mobile Number (required)', (r) => r.kind === 'answer' && /555/.test(String(vals(r)[0])), 'F-851 his own number still answered');
+  const paid = { ...P, answers: { ...P.answers, salary_expectation: '$90000/year' } };
+  ok('Starting Salary', (r) => !(r.kind === 'answer' && /90000/.test(String(vals(r)[0]))), 'F-852 a past job\'s starting salary', paid);
+  ok('Ending Salary', (r) => !(r.kind === 'answer' && /90000/.test(String(vals(r)[0]))), 'F-852 a past job\'s ending salary', paid);
+  ok('Desired Salary', (r) => r.kind === 'answer' && /90000/.test(String(vals(r)[0])), 'F-852 his target is still his answer to a desired salary', paid);
+  // F-856: an amount asked with its unit beside it is still the amount.
+  ok('What are your compensation expectations (hourly or salary)?', (r) => r.kind === 'answer' && /90000/.test(String(vals(r)[0])), 'F-856 Samsung amount', paid);
+  ok('What is your desired compensation expectation? Please provide either a salary or hourly amount.', (r) => r.kind === 'answer' && /90000/.test(String(vals(r)[0])), 'F-856 Terex amount', paid);
+  ok('Is this rate of pay Hourly or Salary?', (r) => r.kind === 'answer' && vals(r).includes('Salary'), 'F-856 the choice itself is still the pay type', paid);
+  // F-853: an English first name is the name he goes by.
+  ok('English First Name', (r) => r.kind === 'answer' && vals(r)[0] === 'Ada', 'F-853 English first name');
+  ok('First Name', (r) => r.kind === 'answer' && vals(r)[0] === 'Ada', 'the plain first name is the one he goes by (2026-10-23)');
+  // F-854: relative availability choices, true only with margin before his start.
+  const later = { ...P, answers: { ...P.answers, earliest_start: `June ${new Date().getFullYear() + 2}` } };
+  ok('When would you be available if an offer was accepted?', (r) => r.kind === 'answer' && vals(r)[0] === later.answers.earliest_start && vals(r).includes('More than 2 months after offer acceptance') && !vals(r).some((x) => /\+/.test(x)),
+    'F-854 relative choices offered for a far start', later);
+  const soon = new Date(); soon.setMonth(soon.getMonth() + 1);
+  const near = { ...P, answers: { ...P.answers, earliest_start: `${soon.toLocaleString('en-US', { month: 'long' })} ${soon.getFullYear()}` } };
+  ok('When would you be available if an offer was accepted?', (r) => r.kind === 'answer' && !vals(r).some((x) => /more than/i.test(x)), 'F-854 none for a start a month away', near);
+}
+
+// ORACLE'S WORDS ON FORD'S FORM, 2026-10-23 (F-885, F-886).
+{
+  const ok = (label, test, why, prof = P) => { const r = resolveLabel(label, prof); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  const addr = { ...P, identity: { ...P.identity, address_line1: '123 Sample Street', address_line2: 'Unit 4B' } };
+  ok('Street Number and Name or P.O. Box', (r) => vals(r)[0] === '123 Sample Street', 'F-885 street line', addr);
+  ok('Apartment or Unit Number', (r) => vals(r)[0] === 'Unit 4B', 'F-885 unit line', addr);
+  ok('Apt/Suite', (r) => vals(r)[0] === 'Unit 4B', 'F-885 apt/suite', addr);
+  const grad = { ...P, education: { ...P.education, graduation: 'May 2027' } };
+  ok('Projected Completion Date Month', (r) => vals(r)[0] === 'May', 'F-886 completion month', grad);
+  ok('Projected Completion Date Year', (r) => vals(r)[0] === '2027', 'F-886 completion year', grad);
+  ok('Highest Education Level', (r) => r.kind === 'answer' && vals(r).includes('Yes'), 'F-886 a Yes/No "highest" takes Yes after the levels', grad);
+  ok('What is your expected graduation term?', (r) => !/^May 2027$/.test(String(vals(r)[0] || '')), 'F-886 a TERM is not the date rule', grad);
+  ok('How did you hear about this opportunity?', (r) => vals(r).includes('Ford Careers Site'), 'F-885 the brand, not "Ford Motor"', { ...P, applyingTo: 'Ford Motor' });
+}
+
+// F-893: Lincoln Electric's SuccessFactors labels his files answer.
+{
+  const ok = (label, test, why, prof = P) => { const r = resolveLabel(label, prof); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  const Q = { ...P, education: { ...(P.education || {}), location: 'Springfield, Washington', degree_level: "Bachelor's" }, answers: { ...P.answers, employer_agreement: 'No' } };
+  ok('Education State/Province', (r) => vals(r)[0] === 'Washington', 'F-893 education state/province', Q);
+  ok('Are you under any contract or employment restriction with a current or previous employer?', (r) => vals(r)[0] === 'No', 'F-893 contract restriction', Q);
+  ok('Are you subject to any ongoing contractual or other legal restrictions which may limit the scope of work you can perform?', (r) => vals(r)[0] === 'No', 'F-893 Oceaneering restrictions', Q);
+  ok('Education Type', (r) => vals(r)[0] === "Bachelor's Degree Program (or equivalent)" && vals(r).includes('College / University'), 'F-893 degree level first, institution kinds after', Q);
+}
+
+// F-891: Schindler's three SuccessFactors questions his files answer.
+{
+  const ok = (label, test, why, prof = P) => { const r = resolveLabel(label, prof); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  const Q = { ...P, applyingTo: 'Schindler Group', answers: { ...P.answers, previously_applied_here: 'No', work_permit: 'Yes' }, eeo: { ...(P.eeo || {}), veteran: 'I am not a Veteran.' } };
+  ok('Have you ever applied for employment at Schindler before?', (r) => vals(r)[0] === 'No', 'F-891 applied before, employer between', Q);
+  ok('* Do you possess a work permit that legally entitles you to work in the country you are applying for?', (r) => vals(r)[0] === 'Yes', 'F-891 work permit without "valid"', Q);
+  ok('Status of National Military Service', (r) => vals(r)[0] === 'NA', 'F-891 national military service', Q);
+  ok('Are you a protected veteran?', (r) => /not a veteran/i.test(String(vals(r)[0])), 'F-891 the veteran question is unchanged', Q);
+}
+
+// F-895: his work-authorization answers, 2026-10-23.
+{
+  const ok = (label, test, why, prof = P) => { const r = resolveLabel(label, prof); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  const Q = { ...P, answers: { ...P.answers, currently_on_opt: 'No' } };
+  ok('* Are you authorized to work for any employer in the U.S. or only your current employer?', (r) => vals(r)[0] === 'Any Employer', 'F-895 any employer', Q);
+  ok('Do you currently have an EAD (Employment Authorization Document)?', (r) => vals(r)[0] === 'No', 'F-895 EAD now', Q);
+  ok('If you have an Employment Authorization Document (EAD) under the F-1 student OPT program, are you eligible for a 24-month OPT extension?', (r) => /do not have OPT/i.test(String(vals(r)[0])), 'F-895 the OPT-extension question keeps its own rule', Q);
+}
+
+// HIS THREE ANSWERS, 2026-10-23.
+{
+  const ok = (label, test, why, prof = P) => { const r = resolveLabel(label, prof); if (test(r)) pass++; else { fail++; console.log(`✗ ${why}: ${label} got ${JSON.stringify(r)}`); } };
+  const vals = (r) => [].concat(r.value);
+  // Authorized without sponsorship NOW → Yes; anything reaching the future → No.
+  ok('Are you authorized to work for Zipline in the United States without sponsorship now?', (r) => vals(r)[0] === 'Yes', 'now is his authorization today');
+  ok('Are you currently authorized to work in the U.S. without sponsorship?', (r) => vals(r)[0] === 'Yes', '"currently" is now');
+  ok('Are you authorized to work for Zipline in the United States without sponsorship in the future?', (r) => vals(r)[0] === 'No', 'the future stays No');
+  ok('Are you legally authorized to work in the United States now or in the future without sponsorship?', (r) => vals(r)[0] === 'No', 'now-or-future stays No');
+  ok('Are you legally authorized to work in the US without sponsorship?', (r) => vals(r)[0] === 'No', 'no time word: the standing No');
+  // First name: the one he goes by, unless the box says legal.
+  ok('First Name', (r) => vals(r)[0] === 'Ada', 'plain first name');
+  ok('Legal First Name', (r) => vals(r)[0] === 'Augusta Ada', 'legal first name');
+  // How he heard: the company's own site first, named for the company when the list does.
+  ok('How did you hear about us?', (r) => vals(r)[0] === 'Acme Website' && vals(r).includes('Company Website') && vals(r).includes('LinkedIn'), 'company site first, LinkedIn after', { ...P, applyingTo: 'Acme' });
+}
+
+// 2026-10-26 log audit: wrong sponsorship, status and date answers.
+{
+  const vals = (r) => [].concat(r.value);
+  const ok = (label, test, note, prof = P) => {
+    const r = resolveLabel(label, prof);
+    if (r.kind === 'answer' && test(r)) pass += 1; else { fail += 1; console.log(`FAIL ${note}: ${label} -> ${JSON.stringify(r)}`); }
+  };
+  const F1 = { ...P, answers: { ...P.answers, visa_status_note: 'F-1 student graduating May 2027; OPT then H-1B' } };
+  // Honda: a sponsorship question whose help text lists DACA was answered "No" by the DACA rule.
+  ok('Will you now, or at any time in the future, require visa sponsorship by Honda, such as Optional Practical Training (OPT), H-1B, O-1, TN, etc. to legally be employed in the U.S.? You can answer “No”, if you are: (a) a U.S. Citizen, (b) a Lawful Permanent Resident, (c) authorized to work based on (ii) Deferred Action for Childhood Arrivals (DACA)',
+    (r) => vals(r)[0] === 'Yes', 'sponsorship question mentioning DACA is still Yes', F1);
+  ok('Are you a DACA recipient?', (r) => vals(r)[0] === 'No', 'a DACA question is still No', F1);
+  // Terex: "currently" alone is today; he changed Yes to No by hand.
+  ok('Do you currently require sponsorship to work in the country for which you are applying?', (r) => vals(r)[0] === 'No', 'currently require sponsorship → No');
+  ok('Will you in the future require sponsorship to work in the country for which you are applying?', (r) => vals(r)[0] === 'Yes', 'future sponsorship → Yes');
+  ok('Will you now or in the future require visa sponsorship?', (r) => vals(r)[0] === 'Yes', 'now-or-future → Yes');
+  // F-951: "currently" beside a word that reaches past today is not today.
+  ok('Do you currently, or do you anticipate, requiring visa sponsorship?', (r) => vals(r)[0] === 'Yes', 'currently-or-anticipate → Yes');
+  ok('Do you currently require sponsorship or expect to?', (r) => vals(r)[0] === 'Yes', 'currently-or-expect → Yes');
+  ok('Do you currently require, or will you require, sponsorship for employment visa status?', (r) => vals(r)[0] === 'Yes', 'currently-or-will → Yes');
+  ok('Do you presently need an employer to sponsor you, or do you plan to request sponsorship eventually?', (r) => vals(r)[0] === 'Yes', 'presently-or-eventually → Yes');
+  ok('Are you currently authorized to work in the US without sponsorship and able to maintain that status?', (r) => vals(r)[0] === 'No', 'without sponsorship + maintain → No');
+  ok('Are you currently authorized to work without sponsorship, and would you remain so for the duration of employment?', (r) => vals(r)[0] === 'No', 'without sponsorship + remain → No');
+  // A request to describe his status gets the note, never "Yes".
+  ok('If visa sponsorship is required in US: What is the immigration status you currently hold? When does that work authorization expire?',
+    (r) => /F-1/.test(vals(r)[0]), 'status question gets the visa note', F1);
+  ok('If you answered "Yes" to the question above, please provide us information on your current immigration status, including type of visa and the amount of remaining work authorization.',
+    (r) => /F-1/.test(vals(r)[0]), 'Cummins status question gets the visa note', F1);
+  // Amazon: he has no EAD yet.
+  ok('Is your current EAD your STEM Extension?', (r) => vals(r)[0] === 'No', 'no EAD yet → No');
+  ok('Are you eligible for a 24-month STEM OPT extension?', (r) => vals(r)[0] === 'Yes', 'STEM extension eligibility stays Yes');
+  // West Pharmaceutical: an education completion date is his graduation, not today.
+  ok('Anticipated / Date of Completion', (r) => vals(r)[0] === 'May 2027', 'anticipated completion → graduation');
+  ok('Date', (r) => /^\d\d\/\d\d\/\d{4}$/.test(vals(r)[0]), 'a bare Date is still today');
+  // F-919: a graduation Day box gets a day.
+  ok('What is your anticipated graduation date? Day', (r) => vals(r)[0] === '15', 'graduation Day → 15');
+  ok('What is your anticipated graduation date? Month', (r) => vals(r)[0] === 'May', 'graduation Month → May');
+  // F-918: degree, major and class year in one box.
+  ok('Type of degree you are currently pursuing, major and what year you will be in Fall',
+    (r) => /Bachelor of Science in Mechanical Engineering, Test University; I will be a senior in Fall 2026/.test(vals(r)[0]), 'degree + major + year sentence');
+  ok('Major', (r) => vals(r)[0] === 'Mechanical Engineering', 'a bare Major is still the major');
+  // F-917: an Oracle entry's own date boxes are not availability.
+  { const r = resolveLabel('Start Date Month Year', P); if (r.kind !== 'answer') pass += 1; else { fail += 1; console.log('FAIL entry Start Date got', r.value); } }
+  ok('When can you start?', (r) => /2027/.test(vals(r)[0]), 'availability still answered');
+  // F-924: a box that shows its phone format gets it.
+  const ph = { ...P, identity: { ...P.identity, phone: '+1 (509) 555-0134' } };
+  ok('Please enter your full 10-digit phone number, including your area code (e.g., 123-456-7890).', (r) => vals(r)[0] === '509-555-0134', '10-digit phone format', ph);
+  ok('Phone', (r) => vals(r)[0] === '+1 (509) 555-0134', 'plain phone unchanged', ph);
+  // Full-log audit: a country list that names his country (fixture: Ruritania).
+  ok('For any of the countries listed below: • Are you a citizen or have a passport? Armenia, Cuba, Iran, North Korea, Ruritania, Syria',
+    (r) => vals(r)[0] === 'Yes', 'a citizenship list naming his country → Yes');
+  ok('Are you a citizen of Cuba, Iran, North Korea or Syria?', (r) => vals(r)[0] === 'No', 'the embargo list without it → No');
+  ok('Do you have dual citizenship or permanent residency status from countries other than the listed restricted countries? Cuba, Iran, Ruritania',
+    (r) => vals(r)[0] === 'No', '"other than the listed" is not his citizenship');
+  { const r = resolveLabel('In the past five (5) years, have you resided in any of these countries: Cuba, Iran, Ruritania', P);
+    if (r.kind !== 'answer') pass += 1; else { fail += 1; console.log('FAIL residence in a list naming his country was answered', r.value); } }
+  ok('o Are you currently in F-1 Visa status? (An F-1 Visa is granted to foreign students attending school in the United States)',
+    (r) => vals(r)[0] === 'Yes', 'a bulleted F-1 yes/no is still Yes', F1);
+  ok('For the purposes of determining long-term work authorization options, what type of visa do you currently hold (if any)?',
+    (r) => /F-1/.test(vals(r)[0]), 'what type of visa → the note', F1);
+}
+// His row came first on the sponsorship answers above, and on a direct ask too.
+{
+  const r = resolveLabelRaw('Do you now or will you in the future need employer sponsorship for a visa?', { ...P, answers: { ...P.answers, authorized_to_work_us: 'Yes', require_sponsorship: 'Yes' } });
+  if (r.kind === 'answer' && Array.isArray(r.value) && r.value[0] === SPONSOR_ROW && r.value[1] === 'Yes, not now') pass += 1;
+  else { fail += 1; console.log('FAIL his sponsorship row is not named first', JSON.stringify(r)); }
+  if (SPONSOR_ROW_SEEN >= 15) pass += 1; else { fail += 1; console.log(`FAIL his sponsorship row led only ${SPONSOR_ROW_SEEN} answers`); }
 }
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

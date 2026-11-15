@@ -57,6 +57,26 @@ guardArgs({ usage: USAGE, flags: ["--company","--provider","--tier","--dry-run",
 
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// A SCAN THAT WROTE OWES THE STORE A RECHECK (F-1028 review). Every chunk it
+// writes clears the pointer of each address it lists again (F-406); the
+// dedupe pass at the end puts them right. When the run dies after a write, or
+// the dedupe pass throws, the recheck still runs on the way out.
+let SCAN_WROTE = false;
+let SCAN_RECHECKED = false;
+export async function recheckIfOwed({ wrote = SCAN_WROTE, rechecked = SCAN_RECHECKED, log = console.log } = {}) {
+  if (!wrote || rechecked) return null;
+  try {
+    const { recheckWrite } = await import('./dedupe.mjs');
+    const { db } = await import('./store.mjs');
+    const r = await recheckWrite(db(), { log, quietWhenClean: true });
+    SCAN_RECHECKED = true;
+    return r;
+  } catch (err) {
+    log(`  (the recheck after this scan failed: ${err?.message || err})`);
+    return null;
+  }
+}
 const PROVIDERS_DIR = path.join(ROOT, 'providers');
 const PORTALS_PATH = process.env.CAREER_OPS_PORTALS || path.join(ROOT, 'portals.yml');
 
@@ -97,6 +117,18 @@ function resolveProvider(entry, providers) {
 }
 
 // ── watchlist tiering ───────────────────────────────────────────────
+
+/**
+ * The employer a scanned posting is filed under. An entry's `company:` (a
+ * second board of one employer, sibling-boards.mjs) wins only where the
+ * provider reports nothing or just echoes the entry name; a provider that
+ * names each posting's own employer is believed.
+ */
+export function companyOf(entry, j) {
+  const said = String(j?.company || '').trim();
+  if (entry?.company && (!said || said === String(entry.name || '').trim())) return entry.company;
+  return said || entry?.name || '';
+}
 
 function tierFor(name, watchlist) {
   const lower = (name || '').toLowerCase();
@@ -230,11 +262,17 @@ async function scanOne(entry, { providers, filterProvider, ctx, withHost }) {
         // for good — triage reads it, the pay parser reads it, and the card
         // shows it. One converter at the door, for every source.
         const description = htmlToText(j.description || '');
-        const t = triage({ title: j.title, description, location: j.location || '', url: j.url || '' });
+        // enrichedAt null: a list teaser has had no full read yet (F-627).
+        const t = triage({ title: j.title, description, location: j.location || '', url: j.url || '', enrichedAt: null });
         return {
           url: j.url,
           title: j.title,
-          company: j.company || entry.name,
+          // A second board of one employer (an early-career board) names its
+          // employer in `company:`, so hidden-company and employer rules still
+          // match. It wins only where the provider just echoes the entry name: a
+          // board whose provider reports each posting's own employer (an
+          // aggregator, a staffing board) keeps those names (review, 2026-11-03).
+          company: companyOf(entry, j),
           team: j.team || '',
           location: j.location || '',
           description,
@@ -388,6 +426,7 @@ async function main() {
     // posting appended mid-flush must land in the NEXT chunk, not vanish.
     const batch = pending;
     pending = [];
+    SCAN_WROTE = true;   // before the write: a chunk that throws half-way may still have cleared pointers
     const r = await withStoreLock(async () => upsertJobs(batch, nowIso));
     added += r.added;
     updated += r.updated;
@@ -427,6 +466,8 @@ async function main() {
     companiesNeedingAssist: needsAssist,
     postingsCaptured: captured,
     added, updated,
+    // Only a sweep of every tracked company sets the auto-scan clock (code review #3).
+    full: !filterCompany && !filterTier && !filterProvider && !knownBefore,
     perCompany: report,
   };
   if (!dryRun) await withStoreLock(async () => recordScan(summary));
@@ -459,8 +500,11 @@ async function main() {
       const { dedupeStore } = await import('./dedupe.mjs');
       const said = [];
       await dedupeStore({ write: true, log: (line) => said.push(String(line)) });
+      SCAN_RECHECKED = true;   // the write ends with the recheck
       const pointed = said.map((l) => l.trim()).find((l) => l.startsWith('pointed '));
       if (pointed) console.log(`  ${pointed}`);
+      const loud = said.find((l) => l.includes('RECHECK DID NOT SETTLE'));
+      if (loud) console.log(loud);
     } catch (err) {
       // Never the scan's problem: the postings are stored either way.
       console.log(`  (could not collapse duplicate spellings: ${err?.message || err})`);
@@ -490,5 +534,5 @@ function STOREHINT() {
 // class of fault recorded as F-181 (a test import overwrote his real backup)
 // and F-182 (importing the apply engine opened a browser on real postings).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(err => { console.error(err); process.exit(1); });
+  main().then(() => recheckIfOwed(), async (err) => { console.error(err); await recheckIfOwed(); process.exit(1); });
 }

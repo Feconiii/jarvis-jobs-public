@@ -94,6 +94,27 @@ try {
   const longFinal = readLog({ file: fl, last: 10 }).find((r) => r.kind === 'final');
   ok('a question over 400 characters is matched to its plan, not "not planned"', longFinal?.status === 'kept', longFinal?.status);
 
+  // F-820 / F-821: Jarvis's own resume and Lever's own spelling of the city are kept, not his answers.
+  const fk = path.join(dir, 'kept.jsonl');
+  const lurl = 'https://jobs.lever.co/x/1/apply';
+  logPlan({ pageUrl: lurl, job, file: fk, now: 6_000_000, fields: [{ label: 'Resume', type: 'file' }, { label: 'Current location', type: 'text' }],
+    actions: [{ label: 'Resume', type: 'file', action: 'upload', at: 0 }, { label: 'Current location', type: 'text', action: 'fill', value: 'Springfield, Washington', at: 1 }] });
+  logSnapshot({ pageUrl: lurl, job, stage: 'submit', button: 'Submit application', by: 'you', file: fk, now: 6_100_000,
+    fields: [{ label: 'Resume', type: 'file', value: '1 file(s) attached' }, { label: 'Current location', type: 'text', value: 'Springfield, WA, USA' }] });
+  const kf = Object.fromEntries(readLog({ file: fk, last: 10 }).filter((r) => r.kind === 'final').map((r) => [r.label, r.status]));
+  ok('F-820: the resume Jarvis attached is KEPT, not "you answered"', kf.Resume === 'kept', JSON.stringify(kf));
+  ok('F-821: the suggestion row for the same city is KEPT, not "changed"', kf['Current location'] === 'kept', JSON.stringify(kf));
+  const fg = path.join(dir, 'ladder.jsonl');
+  const gurl = 'https://job-boards.greenhouse.io/x/jobs/1';
+  logPlan({ pageUrl: gurl, job, file: fg, now: 7_000_000, fields: [{ label: 'Country', type: 'prompt' }, { label: 'Gender', type: 'prompt' }],
+    actions: [{ label: 'Country', type: 'prompt', action: 'prompt', value: 'United States of America', values: ['United States of America', 'United States', 'USA', '+1'], at: 0 },
+      { label: 'Gender', type: 'prompt', action: 'prompt', value: 'Male', values: ['Male', 'Man'], at: 1 }] });
+  logSnapshot({ pageUrl: gurl, job, stage: 'submit', button: 'Submit application', by: 'you', file: fg, now: 7_100_000,
+    fields: [{ label: 'Country', type: 'prompt', value: '+1' }, { label: 'Gender', type: 'prompt', value: 'Female' }] });
+  const gf = Object.fromEntries(readLog({ file: fg, last: 10 }).filter((r) => r.kind === 'final').map((r) => [r.label, r.status]));
+  ok('F-822: "+1", a spelling on the plan\'s own ladder, is KEPT', gf.Country === 'kept', JSON.stringify(gf));
+  ok('F-822: …while a choice off the ladder is still CHANGED', gf.Gender === 'changed', JSON.stringify(gf));
+
   // F-631: the extension test's fixture pages on the local dashboard are not applications.
   const fx = path.join(dir, 'fixture.jsonl');
   logPlan({ pageUrl: 'http://localhost:4300/__jarvis_fixture_a', job: null, file: fx,
@@ -187,6 +208,46 @@ try {
     ok('a change he pressed past is', past('Which office would you prefer to work from?', 'HP Inc.')?.answer === 'Palo Alto');
   }
   {
+    // WORK AUTHORIZATION IS NEVER BORROWED (his answer, 2026-11-04): his
+    // 2026-09-26 Yes on Intuitive's "without restrictions" must not come back.
+    const pf = path.join(dir, 'auth.jsonl');
+    const row = (label, answer) => JSON.stringify({ at: '2026-09-26T10:00:00Z', kind: 'final', by: 'you', host: 'jobs.smartrecruiters.com', pageUrl: 'https://jobs.smartrecruiters.com/Intuitive/x', company: 'Intuitive', label, type: 'prompt', answer, status: 'changed' });
+    fs.writeFileSync(pf, [
+      row('Are you legally authorized to work in the country where the job is located without restrictions?', 'Yes'),
+      row('Will you now or in the future require sponsorship for employment visa status?', 'No'),
+      row('Are you eligible to work in the US for any employer?', 'Yes'),
+      row('Which office would you prefer to work from?', 'Sunnyvale'),
+      row('Do you authorize us to conduct a background check?', 'Yes'),
+      row('Do you have any dietary or travel restrictions?', 'None'),
+      row('Would you like to opt in to text message updates?', 'Yes'),
+    ].join('\n') + '\n');
+    const past = pastAnswers({ file: pf });
+    // …and the list stays narrow (review): these are not work authorization.
+    ok('a background-check authorization is still his answer', past('Do you authorize us to conduct a background check?', 'Intuitive')?.answer === 'Yes');
+    ok('dietary or travel restrictions still are', past('Do you have any dietary or travel restrictions?', 'Intuitive')?.answer === 'None');
+    ok('an opt-in still is', past('Would you like to opt in to text message updates?', 'Intuitive')?.answer === 'Yes');
+    ok('"without restrictions" Yes at Intuitive is never his answer again, even at Intuitive',
+      past('Are you legally authorized to work in the country where the job is located without restrictions?', 'Intuitive') === null);
+    ok('…nor a sponsorship answer', past('Will you now or in the future require sponsorship for employment visa status?', 'Intuitive') === null);
+    ok('…nor "eligible to work for any employer"', past('Are you eligible to work in the US for any employer?', 'Intuitive') === null);
+    ok('an ordinary question at the same employer still is', past('Which office would you prefer to work from?', 'Intuitive')?.answer === 'Sunnyvale');
+  }
+  {
+    // …NOR EXPORT CONTROL, CITIZENSHIP OR CLEARANCE IN OTHER WORDS (week review
+    // F1, 2026-11-13): the reader kept these, so an old Yes was his "answer".
+    const pf = path.join(dir, 'auth2.jsonl');
+    const Qs = ['Are you legally allowed to work in the U.S.?', 'Are you a U.S. person as defined by ITAR/EAR?', 'Are you a foreign national?',
+      'Do you hold an active security clearance?', 'Will you have access to export-controlled technology?', 'What is your nationality?',
+      'Do you have the right to work in the United States?',
+      // week-fixes J2: two more ways forms ask it.
+      'Do you have current employment authorization in the U.S.?', 'Are you eligible for employment in the United States?'];
+    const row = (label, answer) => JSON.stringify({ at: '2026-09-26T10:00:00Z', kind: 'final', by: 'you', host: 'jobs.smartrecruiters.com', pageUrl: 'https://jobs.smartrecruiters.com/Intuitive/x', company: 'Intuitive', label, type: 'radio', answer, status: 'you answered' });
+    fs.writeFileSync(pf, [...Qs.map((q) => row(q, 'Yes')), row('Do you hear about us from a friend?', 'No')].join('\n') + '\n');
+    const past = pastAnswers({ file: pf });
+    for (const q of Qs) ok(`never his answer again: ${q}`, past(q, 'Intuitive') === null, JSON.stringify(past(q, 'Intuitive')));
+    ok('a question that only contains the letters "ear" still is', past('Do you hear about us from a friend?', 'Intuitive')?.answer === 'No');
+  }
+  {
     // THE SAME QUESTION IN OTHER WORDS (step 3, 2026-10-03): the employer's
     // name masked, nearly the same words — but never his relation to one
     // employer carried to another.
@@ -208,6 +269,78 @@ try {
       past('Are you open to business travel for this role?', 'Plug Power')?.answer === '25%');
     ok('a negated question never borrows from its positive twin',
       past('Are you not open to business travel?', 'Plug Power') === null);
+  }
+  {
+    // READ ONCE (S1, 2026-11-06): every plan appends to the log, and the whole
+    // 15 MB was parsed again per step. Only what was appended is read now.
+    const pf = path.join(dir, 'grow.jsonl');
+    const row = (label, answer) => JSON.stringify({ at: '2026-11-06T10:00:00Z', kind: 'final', by: 'you', host: 'x', pageUrl: 'https://x.example/apply', company: 'Acme', label, type: 'radio', answer, status: 'you answered' });
+    fs.writeFileSync(pf, row('Which office would you prefer to work from?', 'Austin') + '\n');
+    const first = pastAnswers({ file: pf });
+    ok('the first read finds his answer', first('Which office would you prefer to work from?', 'Acme')?.answer === 'Austin');
+    fs.appendFileSync(pf, JSON.stringify({ kind: 'plan', label: 'x' }) + '\n');
+    ok('a plan line appended leaves the same index', pastAnswers({ file: pf }) === first);
+    fs.appendFileSync(pf, row('What shift do you prefer to work?', 'Days') + '\n' + row('Which office would you prefer to work from?', 'Denver').slice(0, 40));
+    const grown = pastAnswers({ file: pf });
+    ok('an appended answer is found', grown('What shift do you prefer to work?', 'Acme')?.answer === 'Days');
+    ok('a half-written line is not read yet', grown('Which office would you prefer to work from?', 'Acme')?.answer === 'Austin');
+    fs.appendFileSync(pf, row('Which office would you prefer to work from?', 'Denver').slice(40) + '\n');
+    ok('…and is read once it is whole, the later answer winning', pastAnswers({ file: pf })('Which office would you prefer to work from?', 'Acme')?.answer === 'Denver');
+    // THE INCREMENTAL INDEX against a fresh read of the same bytes (review): many
+    // appends, in pieces cut at odd places, one of them inside a character of
+    // several bytes, some lines ending in CRLF.
+    const qs = [];
+    for (let i = 0; i < 12; i += 1) qs.push([`Which tool do you know best, number ${i}?`, `Tool ${i} ${i % 3 ? 'é' : '日本'}`]);
+    const bytes = Buffer.from(qs.map(([q, a], i) => row(q, a) + (i % 2 ? '\r\n' : '\n')).join(''), 'utf-8');
+    // One cut falls inside the 3-byte 日 of answer 3, whatever the row lengths are.
+    const inside = bytes.indexOf(Buffer.from('日', 'utf-8'), bytes.indexOf(Buffer.from('number 3?', 'utf-8'))) + 1;
+    const cuts = [...new Set([37, 300, inside, 999, Math.floor(bytes.length * 0.7), bytes.length])].filter((c) => c > 0 && c <= bytes.length).sort((a, b) => a - b);
+    let inc = null;
+    let at = 0;
+    for (const c of cuts) {
+      fs.appendFileSync(pf, bytes.subarray(at, c));
+      at = c;
+      inc = pastAnswers({ file: pf });   // the same file, read only past the last offset each time
+    }
+    const copy = path.join(dir, 'grow-copy.jsonl');
+    fs.copyFileSync(pf, copy);
+    const fresh = pastAnswers({ file: copy });
+    const all = [['Which office would you prefer to work from?'], ['What shift do you prefer to work?'], ...qs];
+    ok('incremental and fresh reads agree on every answer', all.every(([q]) => inc(q, 'Acme')?.answer === fresh(q, 'Acme')?.answer && fresh(q, 'Acme')),
+      JSON.stringify(all.map(([q]) => [inc(q, 'Acme')?.answer, fresh(q, 'Acme')?.answer])));
+    ok('a character of several bytes split across two reads arrives whole', inc(qs[3][0], 'Acme')?.answer === qs[3][1]);
+    ok('a CRLF line is read', inc(qs[1][0], 'Acme')?.answer === qs[1][1]);
+    // A rotation (the log moved to .1, a new one started) reads both again,
+    // here with the new log already LONGER than where the last read stopped.
+    const before = fs.statSync(pf).size;
+    fs.renameSync(pf, pf.replace(/\.jsonl$/, '.1.jsonl'));
+    fs.writeFileSync(pf, row('Are you open to business travel?', '10%') + '\n' + 'x'.repeat(before) + '\n');
+    const rot = pastAnswers({ file: pf });
+    ok('after a rotation the old answers are still there', rot('What shift do you prefer to work?', 'Acme')?.answer === 'Days');
+    ok('…with the new log\'s, though it is longer than the old offset', rot('Are you open to business travel?', 'Acme')?.answer === '10%');
+  }
+  {
+    // A LOG CUT SHORT OR REWRITTEN IN PLACE is read again from the start (review).
+    const pf = path.join(dir, 'cut.jsonl');
+    const row = (label, answer) => JSON.stringify({ at: '2026-11-06T10:00:00Z', kind: 'final', by: 'you', host: 'x', pageUrl: 'https://x.example/apply', company: 'Acme', label, type: 'radio', answer, status: 'you answered' });
+    fs.writeFileSync(pf, row('Which office would you prefer to work from?', 'Austin') + '\n' + row('What shift do you prefer to work?', 'Days') + '\n');
+    ok('read', pastAnswers({ file: pf })('What shift do you prefer to work?', 'Acme')?.answer === 'Days');
+    fs.writeFileSync(pf, row('Are you open to business travel?', '5%') + '\n');   // shorter, same file id
+    const cut = pastAnswers({ file: pf });
+    ok('a truncated log (no rotation) forgets what it no longer holds', cut('What shift do you prefer to work?', 'Acme') === null);
+    ok('…and holds what it does', cut('Are you open to business travel?', 'Acme')?.answer === '5%');
+    // The same file, rewritten in place, as long or longer: a different first line.
+    const longer = row('Are you open to relocation?', 'Yes, anywhere') + '\n' + row('What shift do you prefer to work?', 'Nights') + '\n';
+    fs.writeFileSync(pf, longer);
+    const re = pastAnswers({ file: pf });
+    ok('a log rewritten in place at a larger size is read from the start, not from the old offset', re('Are you open to relocation?', 'Acme')?.answer === 'Yes, anywhere' && re('Are you open to business travel?', 'Acme') === null);
+    // A complete last record with no newline (a write cut after the record).
+    const nl = path.join(dir, 'no-newline.jsonl');
+    fs.writeFileSync(nl, row('Which office would you prefer to work from?', 'Boston'));
+    ok('a whole read takes a complete last record that has no newline', pastAnswers({ file: nl })('Which office would you prefer to work from?', 'Acme')?.answer === 'Boston');
+    fs.appendFileSync(nl, '\n' + row('What shift do you prefer to work?', 'Swing') + '\n');
+    const nl2 = pastAnswers({ file: nl });
+    ok('…and once it ends, the next line is read after it', nl2('What shift do you prefer to work?', 'Acme')?.answer === 'Swing' && nl2('Which office would you prefer to work from?', 'Acme')?.answer === 'Boston');
   }
 } finally { rmSync(dir, { recursive: true, force: true }); }
 

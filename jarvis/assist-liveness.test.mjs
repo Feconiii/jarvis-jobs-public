@@ -156,3 +156,26 @@ test('non-numeric junk in the feed is ignored rather than trusted', () => {
   assert.ok(plan.feedSize >= MIN_FEED, 'the real ids still count');
   assert.ok(!plan.dead.some(d => d.req === '830001'), 'a listed req stays listed');
 });
+
+// ── the other direction (F-626) ─────────────────────────────────────
+
+test('A SHORT HARVEST IS NAMED: feed ids the store does not hold are counted', () => {
+  const co = CO();
+  upsertJobs([mk(U(840001), co), mk(U(840002), co)]);
+  const plan = planSweep(co, feed(840001, 840002, 840003));
+  // feed() pads with MIN_FEED + 5 ids the store has never seen, plus 840003.
+  assert.equal(plan.missing, MIN_FEED + 6);
+  assert.ok(plan.missingSample.includes('900000'));
+  assert.match(plan.harvestShort, /harvest the listings again/);
+});
+
+test('A RETIRED ROW THE BOARD STILL LISTS is named, never left silent', async () => {
+  const co = CO();
+  const url = U(850001);
+  upsertJobs([mk(url, co)]);
+  const { updateJob } = await import('./store.mjs');
+  updateJob(jobId(url), { goneAt: '2026-10-01T00:00:00.000Z' }, { rederive: true });
+  const plan = planSweep(co, feed(850001));
+  assert.equal(plan.retiredButListed, 1);
+  assert.deepEqual(plan.retiredButListedSample, ['850001']);
+});

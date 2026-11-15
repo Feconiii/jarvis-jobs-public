@@ -198,6 +198,24 @@ export default {
   ycRoleHintRe: /\b(?:hardware|robot|mechanical|mechatronic|manufactur|electrical|embedded|firmware|asic|fpga|chips?|silicon|semiconductor|battery|batteries|drone|aerospace|satellite|space|rocket|propulsion|nuclear|fusion|energy|factory|factories|industrial|automation|sensor|optic|photonic|laser|biotech|lab automation|medical device|3d print|additive|materials?|machining|machinist|machine shop|cnc|eVTOL|aircraft|vehicle|automotive|physical)/i,
   /** The Muse's job categories to read (its public API takes `category` more than once). */
   museCategories: ['Science and Engineering'],
+
+  // ── discover-radar.mjs ────────────────────────────────────────────
+  /**
+   * LinkedIn post searches for curated "(HIRING LIST)" posts: Grace Gong's
+   * weekly On My Radar lists (sourced from Harmonic) and the reposts of them.
+   * One topic per search: a bare "hiring list" search returns her legal,
+   * voice and eval lists first (2026-10-31).
+   */
+  radarQueries: [
+    'Grace Gong "HIRING LIST" robotics', 'Grace Gong "HIRING LIST" physical AI',
+    'Grace Gong "HIRING LIST" industrial', 'Grace Gong "HIRING LIST" hardware chips',
+    'Grace Gong "HIRING LIST" semiconductor', 'Grace Gong "HIRING LIST" autonomous',
+    'Grace Gong "HIRING LIST" space aerospace', 'Grace Gong "HIRING LIST" energy climate',
+    'Grace Gong "HIRING LIST" manufacturing materials', 'Grace Gong "HIRING LIST" medtech surgical',
+    'Grace Gong "HIRING LIST" deep tech', 'Grace Gong "HIRING LIST" drones defense',
+  ],
+  /** A list whose TITLE is hardware: every company on it counts. Others count company by company (ycRoleHintRe). */
+  radarListRe: /\b(?:robot\w*|physical ai|humanoid|hardware|chips?|semiconductor\w*|industrial|manufactur\w*|autonomous|self-driving|driving|space|aerospace|satellite|energy|climate|nuclear|fusion|batter\w*|materials?|deep tech|surg\w*|medtech|medical device|drones?|ev\b|electric vehicle|3d print\w*|additive)\b/i,
   /** What HN "Who is hiring" comments are searched for, per thread. */
   hnTerms: ['mechanical', 'hardware', 'robotics', 'manufacturing', 'mechatronics'],
 
@@ -230,8 +248,19 @@ export default {
   auditFamilyRe: /\b(?:engineer(?:ing)?|technician|machinist|mechanic(?:al)?|robotic|mechatronic|manufactur|hardware|firmware|embedded|electrical|controls?|automation|cad\b|designer|r&d|scientist|metrology|welder|assembler|fabricat|tooling|npi\b|quality|test\b|reliability|process|avionics|propulsion|thermal|optic|semiconductor|wafer)/i,
   /** Titles that are his field specifically (a same-name software board has none). */
   auditFieldRe: /\b(?:mechanical|mechanic|manufactur\w*|hardware|robot\w*|mechatronic\w*|process\s+engineer|equipment|test\s+engineer|electrical|controls?\b|automation|fabricat\w*|assembl\w*|machin(?:ist|ing|e\s+design)|thermal|propulsion|battery|optic\w*|semiconductor|wafer|npi\b|avionics|tooling|reliability|quality\s+engineer|technician|welder|field\s+service|production|materials?\b|industrial|design\s+engineer|systems\s+engineer|firmware|embedded|structur\w*|aerospace|vehicle|powertrain|hvac|ingenieur|ingeniero|engenheiro)/i,
+  /**
+   * Software and IT titles (F-635). A title that also says one of these counts
+   * as his field only when it carries a word from auditStrongFieldRe —
+   * "Software Test Engineer", "Production Support Engineer" and "Site
+   * Reliability Engineer" are IT; "Embedded Software Engineer" is not.
+   * TestingXperts (IT consulting, 179 postings) passed on titles like these.
+   */
+  auditOffFieldRe: /\b(?:software|developer|dev\s?ops|sre\b|site reliability|cloud|azure|aws\b|gcp\b|saas|big data|hadoop|spark\b|data (?:engineer|warehouse|platform)|etl\b|middleware|server admin\w*|sys(?:tems)?\s*admin\w*|administrator|oracle|primavera|sap\b|salesforce|servicenow|workday|dynamics 365|\.net\b|java\b|python\b|react\b|angular\b|node(?:\.?js)?\b|front[- ]?end|back[- ]?end|full[- ]?stack|web\b|mobile\b|ios\b|android\b|product engineer|qa\b|quality assurance|manual test\w*|automation test\w*|test automation|selenium|testing\b|penetration|cyber\w*|security (?:engineer|analyst)|network (?:engineer|admin\w*)|help ?desk|it (?:support|specialist|technician|analyst)|production support|application support|database|dba\b|sql\b|tableau|power bi|machine learning|ml engineer|ai engineer|llm)/i,
+  /** Hardware words no IT title carries; one of them keeps a title in his field. */
+  auditStrongFieldRe: /\b(?:mechanical|mechanic|manufactur\w*|hardware|robot\w*|mechatronic\w*|embedded|firmware|electrical|fabricat\w*|machin(?:ist|ing|e\s+design)|thermal|propulsion|battery|optic\w*|semiconductor|wafer|npi\b|avionics|tooling|welder|powertrain|hvac|aerospace|vehicle|equipment|assembl\w*|pcb|fpga|asic|rf\b|analog)/i,
   /** The audit's reasons, worded for this field. */
   auditNoFamilyWhy: (n, total) => `${n} of ${total} titles are engineering or technical work`,
+  auditOnlyOffFieldWhy: (n, total) => `all ${n} engineering titles of ${total} are software or IT (developer, cloud, testing, admin) — not a hardware employer`,
   auditNoFieldWhy: (total, n) => `0 of ${total} titles are hardware work (${n} engineering, all software or other) — a same-name board, or not a hardware employer`,
   auditOkNoun: 'engineering employers',
 };

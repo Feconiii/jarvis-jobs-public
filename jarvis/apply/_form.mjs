@@ -14,7 +14,7 @@
 //   - Unknown questions are left blank and reported, not guessed.
 //   - Every text fill is read back; values that didn't stick are flagged.
 
-import { resolveLabel as resolveLabelRaw, yesNo } from './_answers.mjs';
+import { resolveLabel as resolveLabelRaw, yesNo, FUTURE_SPONSORSHIP_ROWS, FEDERAL_CONTRACTOR_ROWS, YES_NOT_NOW, NOW_ONLY_ROW } from './_answers.mjs';
 
 /**
  * resolveLabel, with alternatives collapsed to something typable.
@@ -39,7 +39,23 @@ export function resolveLabel(label, profile, options = null) {
   if (!alts.length) return { kind: 'unknown', why: 'your profile leaves this blank' };
   const list = Array.isArray(options) ? options : [];
   const offered = list.length ? alts.find((a) => chooseOption(a, list) >= 0) : null;
-  return { ...r, value: offered || alts[0] };
+  // `value` stays the first alternative: most callers pass no options and pick
+  // from the menu afterwards, and his exact row ("Yes, but not until the
+  // future") has to reach chooseOption (F-1014 review). The alternatives travel
+  // along so a TEXT box can type what the planner types (typedAnswer).
+  return { ...r, value: offered || alts[0], alternatives: alts };
+}
+
+/**
+ * WHAT A TEXT BOX GETS (F-1014). The planner types the first answer that can
+ * stand alone, never a row-only answer, so a sponsorship text box gets "Yes"
+ * and not "Yes, but not until the future". Only for free-text fields: a menu
+ * takes `r.value` through chooseOption.
+ */
+export function typedAnswer(r) {
+  if (!r || r.kind !== 'answer') return null;
+  const alts = Array.isArray(r.alternatives) && r.alternatives.length ? r.alternatives : [r.value];
+  return alts.map(typedFormOf).find((w) => w != null) ?? r.value;
 }
 import { time } from './_timing.mjs';
 
@@ -134,9 +150,16 @@ export const RESUME_FIELD_RE = /resume|cv\b|curriculum\s*vitae|attach.*(resume|c
  * keeps the resume in. The resume goes in its own slot (F-352); this one is
  * left alone on purpose, and said so (F-359).
  */
-export const PARSE_SLOT_RE = /easy apply|autocomplete|auto-?fill|prefill|apply with (?:a |your )?(?:resume|cv)/i;
+// …and Oracle Recruiting's "Import your profile from resume" (F-794, Coherent
+// 2026-10-22). The resume went there instead of "Upload Resume"; Oracle parsed
+// it and re-filled the form, setting Willing to Relocate back to No, putting
+// years into the job dates' month boxes, and leaving the real slot empty.
+const IMPORT_FROM_RESUME = 'import\\s+(?:your\\s+|my\\s+)?(?:profile|information|info|details|data)\\s+from\\s+(?:your\\s+|a\\s+|my\\s+)?(?:resume|cv)';
+export const PARSE_SLOT_RE = new RegExp(`easy apply|autocomplete|auto-?fill|prefill|apply with (?:a |your )?(?:resume|cv)|${IMPORT_FROM_RESUME}`, 'i');
 
-export const NOT_RESUME_RE = /cover.?letter|portfolio|transcript|writing.?sample|certificat|reference|photo|passport|visa|licen[cs]e|easy apply|autocomplete|auto-?fill|prefill/i;
+// …and a video or audio slot is never the resume's (F-884: Paradox's "Upload
+// Video" on Schindler's posting was planned as "the only document upload").
+export const NOT_RESUME_RE = new RegExp(`cover.?letter|portfolio|transcript|writing.?sample|certificat|reference|photo|passport|visa|licen[cs]e|easy apply|autocomplete|auto-?fill|prefill|\\bvideo\\b|\\baudio\\b|${IMPORT_FROM_RESUME}`, 'i');
 
 /**
  * Is this file input the resume slot?
@@ -178,7 +201,11 @@ export function isResumeField(field) {
   if (/\b(resume|résumé|cv)\s*[/,&]|\b(resume|résumé|cv)\s+(and|or)\s+cover/i.test(label) && /cover.?letter/i.test(label)
     && !/portfolio|transcript|writing.?sample|photo|passport|easy apply|auto-?fill|prefill/i.test(label)) return true;
   if (NOT_RESUME_RE.test(label)) return false;
-  return RESUME_FIELD_RE.test(label) || !label.trim();
+  if (RESUME_FIELD_RE.test(label)) return true;
+  // AN UNLABELLED SLOT IS THE RESUME'S only when nothing beside it names
+  // another document (F-1013 #25, review 2026-11-05): an unlabelled slot under
+  // "Transcript (optional)" got the resume. A lone unlabelled slot still does.
+  return !label.trim() && !/transcript|portfolio|writing.?sample|cover|letter|photo|headshot|certificat|diploma|reference|passport|licen[cs]e|work.?sample|additional|other\s+(?:document|file)/i.test(String(field?.near || ''));
 }
 
 /** A slot that wants the cover letter as a file. */
@@ -207,7 +234,23 @@ export function isCoverLetterField(field) {
   return COVER_LETTER_FIELD_RE.test(label);
 }
 
-export const DEAD_POSTING_RE = /oops|gone too far|no longer (available|accepting|active|posted|open)|has been (filled|closed|removed)|position (closed|filled)|(job|position|posting|role|opening|vacancy)[^.]{0,40}(isn.?t|is not)\s+available|(page|job|position|posting|requisition|opening|vacancy)\s+(you\s+requested\s+)?(was|is|has been)?\s*(not found|closed|filled|removed|expired|unavailable)|(page|job|position|posting|requisition|opening|vacancy)[^.]{0,40}(does\s?n.?t|does not)\s+exist/i;
+/** A slot that wants a portfolio or work samples as a file (2026-10-22). */
+export const PORTFOLIO_FILE_RE = /portfolio|work.?samples?|samples?.of.(?:your.)?work/i;
+
+/**
+ * Is this file input a PORTFOLIO slot? Only by its own words: the slot must
+ * say portfolio or work samples and must not be the resume's or the letter's.
+ * "Resume or portfolio" is one slot and it is the resume's.
+ */
+export function isPortfolioFileField(field) {
+  const label = String(field?.label || '');
+  const ident = `${field?.id || ''} ${field?.name || ''}`;
+  if (isCoverLetterField(field)) return false;
+  if (/\b(resume|résumé|cv)\b/i.test(label) || RESUME_FIELD_RE.test(ident)) return false;
+  return PORTFOLIO_FILE_RE.test(label) || PORTFOLIO_FILE_RE.test(ident);
+}
+
+export const DEAD_POSTING_RE =/oops|gone too far|no longer (available|accepting|active|posted|open)|has been (filled|closed|removed)|position (closed|filled)|(job|position|posting|role|opening|vacancy)[^.]{0,40}(isn.?t|is not)\s+available|(page|job|position|posting|requisition|opening|vacancy)\s+(you\s+requested\s+)?(was|is|has been)?\s*(not found|closed|filled|removed|expired|unavailable)|(page|job|position|posting|requisition|opening|vacancy)[^.]{0,40}(does\s?n.?t|does not)\s+exist/i;
 
 export async function pageBlocker(page) {
   return await page.evaluate((deadSrc) => {
@@ -601,6 +644,24 @@ const US_STATES = {
   PR: 'Puerto Rico',
 };
 
+/**
+ * THE OTHER SPELLINGS OF ONE U.S. PLACE (P3), for a box that suggests places
+ * as you type and finds nothing for the first: "Springfield, Washington" →
+ * ["Springfield, WA", "Springfield"]; "Springfield, WA" → ["Springfield, Washington", "Springfield"].
+ * Only a "City, State" whose state is a real one; anything else gets no
+ * variants. A third part ("…, USA") is kept on the state form and dropped on
+ * the bare city.
+ */
+export function placeSpellings(value) {
+  const parts = String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 3) return [];
+  const [city, st, ...rest] = parts;
+  const code = Object.keys(US_STATES).find((k) => k === st.toUpperCase() || US_STATES[k].toLowerCase() === st.toLowerCase());
+  if (!code || !/[a-z]/i.test(city)) return [];
+  const other = st.toUpperCase() === code ? US_STATES[code] : code;
+  return [[city, other, ...rest].join(', '), city];
+}
+
 /** Normalize for comparison: lowercase, punctuation → space ("Self-Identify" ≡ "Self Identify"). */
 function norm(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -713,6 +774,20 @@ export function proficiencyRung(text) {
   return n ? Number(n[1]) : null;
 }
 
+/**
+ * WORK AUTHORIZATION, CITIZENSHIP, EXPORT CONTROL, CLEARANCE: answered by the
+ * rules in _answers.mjs alone, never by an answer he gave on an earlier form
+ * (his answer, 2026-11-04: his 2026-09-26 "without restrictions? Yes" at
+ * Intuitive must never come back). One list for both readers: answer-log's
+ * PAST_NEVER and apply-plan's WORK_AUTH_LABEL_RE. The two had drifted, and the
+ * week review (F1, 2026-11-13) found "legally allowed to work", "U.S. person
+ * under ITAR/EAR", "foreign national", "security clearance" and
+ * "export-controlled" in neither, so an old Yes came back where no rule spoke.
+ * Narrow where it must be: "I authorize a background check", "any dietary or
+ * travel restrictions?" and "opt in to texts" are not in it.
+ */
+export const WORK_AUTH_WORDS_RE = /\bauthori[sz]ed\b[^?]{0,80}\b(work|employment)\b|\bwork(ing)?\s+authori[sz]ation|\bauthori[sz]ation\s+to\s+work|\bsponsor|\bvisa\b|\bcitizen|\bwork\s+permit|\bimmigra|\bwithout\s+(any\s+)?restrictions?\b|\b(work|employment)\s+restrictions?\b|\beligib\w*\s+(to\s+work|for\s+employment)|\bemployment\s+authori[sz]ation|\blegally\s+(able|permitted|entitled|allowed|authori[sz]ed)\s+to\s+work|\bright\s+to\s+work\b|\bopt\b(?![\s-]*(in|out)\b)|\bcpt\b|\bead\b|\bh-?1b\b|\bgreen\s+card|\bpermanent\s+resident|\bu\.?\s?s\.?\s+persons?\b|\bitar\b|\bear\b|\bexport|\bforeign\s+nationals?\b|\bnationality\b|\bclearance\b/i;
+
 /** A menu's empty entry: SuccessFactors' "No Selection", "Select…", "--". */
 export const PLACEHOLDER_OPTION_RE = /^\s*(no\s+selection|none\s+selected|nothing\s+selected|select|choose|please\s+(select|choose)|select\s+(one|an?\s+option|a\s+value)|choose\s+(one|an?\s+option)|-+|—)\s*[.:…-]*\s*$/i;
 
@@ -775,7 +850,27 @@ function streetIndex(want, texts) {
   return plain ?? hits[0];
 }
 
+/**
+ * Answers that name ONE row and take no other (F-995 review): matched word for
+ * word or not at all, never by polarity or overlap. His sponsorship row.
+ */
+export const EXACT_ONLY_ANSWERS = new Set([...FUTURE_SPONSORSHIP_ROWS, ...FEDERAL_CONTRACTOR_ROWS].map((s) => norm(s)));
+
+/** Is this an answer that only ever picks its own row (never typed, never polarity-matched)? */
+export const isExactOnlyAnswer = (w) => EXACT_ONLY_ANSWERS.has(norm(w));
+/** What a text box gets for this answer: a row-only answer nothing, "Yes, not now" plain "Yes". */
+export const typedFormOf = (w) => (isExactOnlyAnswer(w) ? null : norm(String(w ?? '')) === norm(YES_NOT_NOW) ? 'Yes' : w);
+
 export function chooseOption(want, options) {
+  // HIS SPONSORSHIP YES IS NEVER "NOW" (re-review, 2026-11-04): the row a plain
+  // Yes would take, unless that row speaks only of now ("Yes, now", "Yes, I
+  // currently require…") — then nothing, and the question is left for him.
+  if (norm(String(want ?? '')) === norm(YES_NOT_NOW)) {
+    const own = (options || []).findIndex((o) => norm(String(o ?? '')) === norm(YES_NOT_NOW));
+    if (own >= 0) return own;
+    const i = chooseOption('Yes', options);
+    return i >= 0 && NOW_ONLY_ROW(options[i]) ? -1 : i;
+  }
   // A PLACEHOLDER IS NEVER AN ANSWER. TSMC's SuccessFactors menus open on "No
   // Selection", and "No" chose it — it starts with "no", and polarity read it
   // as the denial (2026-09-24). Blanked, so every step below skips it.
@@ -793,8 +888,51 @@ export function chooseOption(want, options) {
   const w = String(want == null ? '' : want);
   const nw = norm(w);
   if (!nw) return -1;
+  // A CATCH-ALL IS NOT A NEAR MISS (F-882). "Company Website" shares a word
+  // with "Other Website", and the source list chose it over LinkedIn. A row
+  // that starts "Other" answers only an answer that says "other".
+  if (!/\bother\b/i.test(w)) texts.forEach((t, i) => { if (/^\s*other\b/i.test(t)) texts[i] = ''; });
+  // …AND A QUALIFIER IN FRONT CHANGES THE THING (F-886). Ford's Oracle
+  // "Education Level" took "Post Bachelor's or equivalent" for "Bachelor's"
+  // (2026-10-23): it contains the want, and was the only row the search
+  // showed. A row that starts "Post", "Pre", "Non" or "Under" answers only a
+  // want that says so.
+  {
+    // A WORD after it, never a figure: "Under $50k" is a pay band, not a negation.
+    const q = (t) => (String(t).match(/^\s*(post|pre|non|under)[\s-]+(?=[a-z])/i) || [])[1];
+    // "Non-Hispanic" answers "Not Hispanic or Latino": non, not and no are one word here.
+    texts.forEach((t, i) => { const k = q(t); if (k && !new RegExp(/^non$/i.test(k) ? '\\b(non|not|no)\\b' : `\\b${k}\\b`, 'i').test(w)) texts[i] = ''; });
+  }
+
+  // 0000. THE ROW THE PLAN NAMED, WORD FOR WORD (F-995, 2026-11-04). "Yes, but
+  //       not until the future" against [Yes, now | Yes, but not until the
+  //       future | No] went down the polarity path and took the first "Yes"
+  //       row. An option whose text IS the answer is that answer.
+  {
+    const exact = clean.findIndex((t, i) => texts[i] && t === nw);
+    if (exact >= 0) return exact;
+    // …AND THAT ROW ONLY (review, 2026-11-04). Tried on any other list, its
+    // leading "Yes" took the FIRST Yes row by polarity — "Yes, now" over
+    // "Yes, in the future" — where a bare Yes refuses and the later "will
+    // require sponsorship in the future" alternatives find the right row.
+    if (EXACT_ONLY_ANSWERS.has(nw)) return -1;
+  }
 
   const find = (pred) => clean.findIndex((t, i) => texts[i] && pred(t));
+
+  // 000. A MONTH IN THE LIST'S OWN SPELLING (UKG, F-799): "August" against
+  //      "Jan | Feb | … | Aug" matched nothing and the job's dates were left
+  //      for him, while "May" (the same in both) went in. A full month name
+  //      takes its three-letter form ("Sept" too), and the other way round.
+  {
+    const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+    const m = MONTHS.findIndex((name) => nw === name || nw === name.slice(0, 3) || (name === 'september' && nw === 'sept'));
+    if (m >= 0) {
+      const forms = new Set([MONTHS[m], MONTHS[m].slice(0, 3), ...(m === 8 ? ['sept'] : [])]);
+      const hit = clean.findIndex((t, i) => texts[i] && forms.has(t.replace(/\.$/, '')));
+      if (hit >= 0) return hit;
+    }
+  }
 
   // 00. AN AMOUNT AGAINST A LIST OF RANGES (Phoenix Tailings, 2026-09-25): his
   //     "$90000/year" against "$50, 000 - $100, 000" / "$100, 000 - $150, 000"
@@ -860,6 +998,24 @@ export function chooseOption(want, options) {
       return m && norm(m[1]) === city && stateCode(m[2]) === st;
     });
     if (hit >= 0) return hit;
+    // ORACLE'S CITY ROWS ARE "City, County, ST" (F-810): the state is the
+    // LAST part, the county between.
+    const tail = texts.findIndex((t) => {
+      const parts = String(t || '').split(',').map((s) => s.trim()).filter(Boolean);
+      return parts.length >= 3 && norm(parts[0]) === city && stateCode(parts[parts.length - 1]) === st;
+    });
+    if (tail >= 0) return tail;
+  }
+  // A BARE CITY against rows that are places (F-810): "Springfield" against
+  // "Springfield, Springfield, WA | Airway Heights, Springfield, WA | … | Cheney, Springfield,
+  // WA" chose Cheney — every row CONTAINS "Springfield". The row whose first part
+  // IS the answer is the place he named.
+  // Only rows that END in a US state are places ("Korea, Democratic People's
+  // Republic of" is a country, and "Korea" is its own row).
+  const isPlace = (t) => { const p = String(t || '').split(',').map((s) => s.trim()).filter(Boolean); return p.length >= 2 && !!stateCode(p[p.length - 1]); };
+  if (/^[A-Za-z][A-Za-z .'-]*$/.test(w.trim()) && !yesNo(w) && texts.filter(isPlace).length >= 2) {
+    const first = texts.findIndex((t) => isPlace(t) && norm(t.split(',')[0]) === nw);
+    if (first >= 0) return first;
   }
 
   // 1. Yes/no answers are decided by polarity, first and last.
@@ -1231,8 +1387,20 @@ export function chooseOption(want, options) {
 
   // 5c. "Company website" is how his profile words it; employers write their
   //     own name — "Applied Materials Corporate Website".
+  //     …and only a row that IS the employer's site (F-996): "Website banner
+  //     ad" shares the one word and took his how-heard answer ahead of
+  //     LinkedIn. The row must say company / corporate / career / official,
+  //     or carry the employer's own word from the answer ("Maven Website" →
+  //     "Maven Robotics Website").
   if (idx === -1 && /\bwebsite\b/i.test(nw)) {
-    idx = find((t) => /\bwebsite\b/.test(t) && !/job board|social media|staffing|agency|job fair/.test(t));
+    const GENERIC = new Set(['website', 'web', 'site', 'company', 'companys', 'the', 'our', 'a', 'an', 'career', 'careers', 'corporate', 'official', 'page', 'browsing']);
+    const own = nw.split(' ').filter((x) => x && !GENERIC.has(x));
+    // "<Name> Website" — the row ENDS in the word — is how an employer names
+    // its own site ("FieldAI Website"); words after it describe something else.
+    const isEmployerSite = (t) => /\b(company|corporate|careers?|official|employer|our)\b/.test(t)
+      || /\bwebsite$/.test(t) && !/\b(third[\s-]?party|another|external|partner)\b/.test(t)
+      || own.some((x) => new RegExp(`(^| )${x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( |$)`).test(t));
+    idx = find((t) => /\bwebsite\b/.test(t) && !/job board|social media|staffing|agency|job fair/.test(t) && isEmployerSite(t));
   }
 
   // 6. Phone dialling code.
@@ -1377,7 +1545,10 @@ export const CERT_NOT_RE = /\bcitizen(ship)?\b|\bnaturaliz|permanent resident|gr
  */
 // "Check the box below to finalize your submission of interest." — JPL's
 // required box on its last step (2026-10-02); pressing Submit stays his.
-export const CERT_RE = /i\s+(?:[\w,]+[\s,]+){0,3}(certify|acknowledge|agree|consent|understand|confirm|authoriz\w+)|terms\s+(of|and)|privacy\s+(policy|notice)|accuracy\s+of|\bfinali[sz]e\s+your\s+(submission|application)\b/i;
+// …and SuccessFactors' required "Job-Specific Information — * Statement of
+// Agreement" (Veeco, 2026-10-22, F-833): a box named for the statement it
+// signs, with no "I agree" in its label.
+export const CERT_RE = /i\s+(?:[\w,]+[\s,]+){0,3}(certify|acknowledge|agree|consent|understand|confirm|authoriz\w+)|terms\s+(of|and)|privacy\s+(policy|notice)|accuracy\s+of|\bfinali[sz]e\s+your\s+(submission|application)\b|\b(statement|declaration)\s+of\s+(agreement|understanding|certification|acknowledg\w+|consent)\b|\bapplicant\s+(certification|acknowledg\w+|agreement|attestation)\b|(^|—\s*)\*?\s*acknowledge?ments?\s*\*?\s*(—|$)/i;
 
 /**
  * Fill the application form.
@@ -1861,7 +2032,7 @@ export async function fill(page, profile) {
         } else {
           // A number input rejects anything non-numeric ("Cannot type text into
           // input[type=number]"), so hand it just the digits.
-          const value = f.type === 'number' ? (String(r.value).match(/\d+/) || [''])[0] : r.value;
+          const value = f.type === 'number' ? (String(r.value).match(/\d+/) || [''])[0] : typedAnswer(r);   // a text box types what the planner types (F-1014)
           if (!value) { result.needsInput.push({ label: f.label, why: `no numeric value in "${r.value}"` }); continue; }
           await loc.fill(value, { timeout: 8000 });
           // Verify the value actually stuck (controlled React inputs can silently

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jarvis Apply",
-  "version": "1.106.0",
+  "version": "1.150.17",
   "description": "Fills a job application from the local Jarvis server, in the browser you are already signed into. One press follows the tab through every page of the application. Never presses Submit.",
   "permissions": [
     "scripting",
@@ -12,7 +12,8 @@
     "webNavigation",
     "contextMenus",
     "sidePanel",
-    "downloads"
+    "downloads",
+    "notifications"
   ],
   "side_panel": {
     "default_path": "panel.html"

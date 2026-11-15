@@ -68,16 +68,28 @@ export function readWords(text) {
   };
 }
 
+/**
+ * A posting on an application platform, any employer (2026-10-24: only
+ * amazon.jobs was ever lifted off a post). LinkedIn's own /jobs/ links are left
+ * out: a logged-out post page lists unrelated jobs beside the post.
+ */
+export const JOB_LINK = /https?:\/\/(?:[a-z0-9-]+\.)*(?:amazon\.jobs|greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs\.com|myworkdaysite\.com|smartrecruiters\.com|icims\.com|eightfold\.ai|jobvite\.com|workable\.com|rippling-ats\.com|ats\.rippling\.com|bamboohr\.com|oraclecloud\.com|successfactors\.com|teamtailor\.com|pinpointhq\.com|jobs\.personio\.(?:de|com)|tesla\.com\/careers)\/?[^\s"'<>\\]*/gi;
+
 /** Read one public post page. Returns null when it is not a post page. */
 export function parsePostHtml(html, url = '') {
   let ld = null;
   for (const m of String(html).matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)) {
     try {
       const j = JSON.parse(m[1]);
-      for (const it of Array.isArray(j) ? j : [j]) if (/SocialMediaPosting/.test(it?.['@type'] || '')) ld = it;
+      // A video post is a VideoObject (F-783: Sam Ortiza's and Josh
+      // Whitfield's Tutor posts read as "not a post"): its poster is in
+      // `creator`, its words in `description`.
+      for (const it of Array.isArray(j) ? j : [j]) if (/SocialMediaPosting|VideoObject/.test(it?.['@type'] || '')) ld = it;
     } catch { /* not JSON */ }
   }
   if (!ld) return null;
+  const video = /VideoObject/.test(ld['@type']);
+  if (video && !ld.author) ld = { ...ld, author: ld.creator };
   const ids = [...new Set([...String(html).matchAll(/urn:li:activity:(\d{15,20})/g)].map((m) => m[1]))];
   const own = (String(url).match(/activity-(\d{15,20})/) || [])[1] || ids[0] || '';
   const otherId = ids.find((x) => x !== own) || '';
@@ -85,7 +97,9 @@ export function parsePostHtml(html, url = '') {
   // card's title ("Robotics Systems Engineer II, Tech Deployment").
   // A plain reshare has no words of its own: its text field may carry the
   // ORIGINAL's words, which must never be credited to the resharer.
-  const text = squash(ld.articleBody || (ld.sharedContent ? '' : ld.text) || '');
+  // A video's description is the poster's own words even on a reshare: the
+  // original's words sit in sharedContent.headline.
+  const text = squash(ld.articleBody || (video ? ld.description || ld.headline : '') || (ld.sharedContent ? '' : ld.text) || '');
   const shared = ld.sharedContent?.author ? {
     author: { name: squash(ld.sharedContent.author.name), url: String(ld.sharedContent.author.url || ''), kind: kindOf(ld.sharedContent.author.url) },
     text: squash(ld.sharedContent.headline || ''),
@@ -94,7 +108,7 @@ export function parsePostHtml(html, url = '') {
     url: otherId ? `https://www.linkedin.com/feed/update/urn:li:activity:${otherId}/` : '',
   } : null;
   const shortLinks = [...new Set([...String(html).matchAll(/https:\/\/lnkd\.in\/[A-Za-z0-9_-]+/g)].map((m) => m[0]))];
-  const jobLinks = [...new Set([...decode(html).matchAll(/https?:\/\/(?:www\.)?amazon\.jobs\/[^\s"'<>]+/g)].map((m) => m[0]))];
+  const jobLinks = [...new Set([...decode(html).matchAll(JOB_LINK)].map((m) => m[0]))];
   return {
     url: String(url).split('?')[0],
     id: own,
@@ -219,7 +233,7 @@ export async function verifyLeadPosts(people, { fetchImpl = fetch, now = new Dat
 /** lnkd.in serves a page that names its target. */
 export async function resolveShort(link) {
   const html = await get(link, fetch);
-  return (decode(html).match(/https?:\/\/(?:www\.)?amazon\.jobs\/[^\s"'<>]+|https?:\/\/[^\s"'<>]*(?:greenhouse|lever|ashbyhq|myworkdayjobs|workday)[^\s"'<>]*/) || [])[0] || '';
+  return ([...decode(html).matchAll(JOB_LINK)][0] || [])[0] || '';
 }
 
 async function main() {

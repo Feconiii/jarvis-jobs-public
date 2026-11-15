@@ -122,7 +122,32 @@ export function parsePinpointResponse(json, companyName) {
       const province = typeof loc.province === 'string' ? loc.province.trim() : '';
       const location = name || [city, province].filter(Boolean).join(', ');
 
-      return { title, url, location, company: companyName };
+      const description = pinpointBody(j);
+      return { title, url, location, company: companyName, ...(description ? { description } : {}) };
     })
     .filter(Boolean);
+}
+
+/**
+ * The whole posting body. postings.json ships it in the same payload, split
+ * into `description` (a short intro), `key_responsibilities` and
+ * `skills_knowledge_expertise` (the requirements, where the degree and years
+ * lines live), each with its own header. Dropping them left 124 postings, 50
+ * at Impulse Space, with no description the reader could ever reach.
+ * HTML throughout — scan.mjs converts it once at the door.
+ */
+export function pinpointBody(j) {
+  const parts = [];
+  const add = (header, body) => {
+    if (typeof body !== 'string' || !body.trim()) return;
+    if (typeof header === 'string' && header.trim()) parts.push(`<h3>${header.trim()}</h3>`);
+    parts.push(body);
+  };
+  add(null, j?.description);
+  add(j?.key_responsibilities_header || 'Key responsibilities', j?.key_responsibilities);
+  add(j?.skills_knowledge_expertise_header || 'Skills, knowledge and expertise', j?.skills_knowledge_expertise);
+  // The closing section is where Impulse Space puts its ITAR / U.S.-person
+  // clause (214 of 216 postings), so the visa gate must see it.
+  add(j?.benefits_header || 'Benefits', j?.benefits);
+  return parts.join('\n');
 }

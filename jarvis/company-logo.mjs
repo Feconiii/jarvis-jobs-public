@@ -96,7 +96,7 @@ export const ATS_SLUGS = [
   { name: 'personio', host: /^([a-z0-9-]+)\.jobs\.personio\.(?:de|com)$/i, fromHost: 1 },
   { name: 'dover', host: /^jobs\.dover\.com$/i, fromPath: /^\/([a-z0-9_-]+)/i },
   { name: 'gem', host: /^jobs\.gem\.com$/i, fromPath: /^\/([a-z0-9_-]+)/i },
-  { name: 'ukg', host: /^recruiting\d*\.ultipro\.com$/i },
+  { name: 'ukg', host: /^(?:recruiting\d*\.ultipro\.com|[a-z0-9-]+\.rec\.pro\.ukg\.net)$/i },
   { name: 'oracle', host: /(^|\.)oraclecloud\.com$/i },
   { name: 'phenom', host: /(^|\.)phenompeople\.com$/i },
   { name: 'avature', host: /(^|\.)avature\.net$/i },

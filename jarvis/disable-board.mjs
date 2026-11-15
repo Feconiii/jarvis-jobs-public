@@ -84,7 +84,7 @@ async function main(argv) {
   const res = disableEntry(readFileSync(file, 'utf8'), name, why);
   if (res.reason === 'not-found') { console.error(`  No tracked company named exactly "${name}".`); return 1; }
 
-  const { db } = await import('./store.mjs');
+  const { db, removeUntouched } = await import('./store.mjs');
   const d = db();
   const total = d.prepare('SELECT COUNT(*) c FROM jobs WHERE company = ?').get(name).c;
   const ids = d.prepare("SELECT id FROM jobs WHERE company = ? AND status = 'new'").all(name).map(r => r.id);
@@ -95,14 +95,10 @@ async function main(argv) {
   // The entry first. If the rows went first and this failed, the next scan
   // would bring every one of them back.
   if (res.changed) writeFileSync(file, res.text);
-  d.exec('BEGIN');
-  for (const id of ids) {
-    d.prepare('DELETE FROM descriptions WHERE id = ?').run(id);
-    d.prepare('DELETE FROM details WHERE id = ?').run(id);
-    d.prepare('DELETE FROM jobs WHERE id = ?').run(id);
-  }
-  d.exec('COMMIT');
-  console.log('  Done.\n');
+  // Through the store's writer, under its lock (F-968): a scan writing at the
+  // same moment waits instead of meeting a half-removed board.
+  const removed = await removeUntouched(ids);
+  console.log(`  Done: ${removed} row(s) removed.\n`);
   return 0;
 }
 

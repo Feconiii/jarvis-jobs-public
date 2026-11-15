@@ -173,7 +173,7 @@ export const wrongBoardDisable = (notes) => /placeholder|not this company|wrong 
 
 // ── inputs ──────────────────────────────────────────────────────────
 
-async function simplifyListings({ refresh = false } = {}) {
+export async function simplifyListings({ refresh = false } = {}) {
   const fresh = existsSync(SIMPLIFY_FILE) && Date.now() - statSync(SIMPLIFY_FILE).mtimeMs < DAY;
   if (fresh && !refresh) return JSON.parse(readFileSync(SIMPLIFY_FILE, 'utf8'));
   try {
@@ -210,7 +210,7 @@ function spIndex() {
 
 // ── the search ──────────────────────────────────────────────────────
 
-const SHARED_HOST = /myworkdayjobs\.com|myworkdaysite\.com|greenhouse\.io|lever\.co|ashbyhq\.com|smartrecruiters\.com|workable\.com|icims\.com|oraclecloud\.com|bamboohr\.com|breezy\.hr|recruitee\.com|rippling\.com|eightfold\.ai|avature\.net|taleo\.net|successfactors|jobvite\.com|ultipro\.com|paylocity\.com|adp\.com|dayforcehcm\.com|paycomonline/i;
+const SHARED_HOST = /myworkdayjobs\.com|myworkdaysite\.com|greenhouse\.io|lever\.co|ashbyhq\.com|smartrecruiters\.com|workable\.com|icims\.com|oraclecloud\.com|bamboohr\.com|breezy\.hr|recruitee\.com|rippling\.com|eightfold\.ai|avature\.net|taleo\.net|successfactors|jobvite\.com|ultipro\.com|ukg\.net|paylocity\.com|adp\.com|dayforcehcm\.com|paycomonline/i;
 
 /** Every board we can confirm for this employer, largest first. */
 export async function boardsFor(c, d) {

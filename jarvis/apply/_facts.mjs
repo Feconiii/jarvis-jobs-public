@@ -109,6 +109,12 @@ const TOPICS = [
   },
 ];
 
+// A question about today alone: "now", "currently", with no future in it.
+// The answer writer's own rule, never a copy: a short copy here kept wanting
+// "No" for "currently, or do you anticipate" after F-951 widened the writer's
+// list, and left the question for him (F-953, 2026-11-02).
+import { presentOnly } from './_answers.mjs';
+
 /** Which basic question is this, and what must the answer say? null if none. */
 export function basicTopic(label, profile) {
   const q = String(label ?? '').replace(/\s+/g, ' ').trim();
@@ -117,7 +123,17 @@ export function basicTopic(label, profile) {
   for (const t of TOPICS) {
     if (!t.re.test(q)) continue;
     if (t.not && t.not.test(q)) continue;
-    const truth = t.truth(profile);
+    let truth = t.truth(profile);
+    // NOW IS NOT THE FUTURE (his rule, 2026-10-23; found blocked here
+    // 2026-10-26). "…without sponsorship NOW?" is Yes and "do you CURRENTLY
+    // require sponsorship?" is No for a student authorized to work today; the
+    // answer table said so, and this check called it a contradiction and left
+    // Zipline's and Terex's questions for him. Only a question about the
+    // present alone; anything reaching the future keeps the profile's truth.
+    if ((t.key === 'authorized-without-sponsorship' || t.key === 'sponsorship') && presentOnly(q)
+      && truthOf(profile?.answers?.authorized_to_work_us) === true) {
+      truth = t.key === 'authorized-without-sponsorship';
+    }
     return truth == null ? null : { key: t.key, truth };
   }
   return null;

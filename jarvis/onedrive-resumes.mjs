@@ -15,6 +15,7 @@
  */
 import { readdirSync, readFileSync, existsSync, statSync, mkdirSync, copyFileSync, writeFileSync, rmSync } from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import { displayTitle } from './outreach.mjs';
 import yaml from 'js-yaml';
@@ -51,6 +52,35 @@ function profileSetting(key) {
     return String(doc.resumes?.[key] || '').trim();
   } catch { return ''; }
 }
+/**
+ * OFF UNLESS TURNED ON (2026-11-14). His words, 11-13: "honestly we can stop
+ * the copying to onedrive thing i never use that, lets just turn it off for
+ * better time". The automatic copy (dashboard boot, hourly, after every resume
+ * build, after an apply) runs only when switched on, so it stays off on every
+ * way the dashboard is started. The code is kept; either of these turns it on:
+ *
+ *   JARVIS_ONEDRIVE=on            (JARVIS_ONEDRIVE=off always wins), or
+ *   config/profile.yml:
+ *     resumes:
+ *       onedrive: on
+ *
+ * Someone else who set resumes.onedrive_dir chose a folder, so for them that
+ * is on. `npm run jarvis:onedrive` by hand still copies.
+ */
+export function oneDriveSwitch({ env = process.env, profileFile = env.JARVIS_PROFILE || path.join(ROOT, 'config', 'profile.yml'), isHim = IS_HIM } = {}) {
+  const v = String(env.JARVIS_ONEDRIVE || '').trim().toLowerCase();
+  if (/^(off|0|false|no)$/.test(v)) return { on: false, why: 'switched off' };
+  if (/^(on|1|true|yes)$/.test(v)) return { on: true, why: 'JARVIS_ONEDRIVE=on' };
+  // Someone else who named a folder in the environment chose the copy too (review).
+  if (!isHim && String(env.JARVIS_ONEDRIVE_DIR || '').trim()) return { on: true, why: 'JARVIS_ONEDRIVE_DIR' };
+  let doc = {};
+  try { doc = yaml.load(readFileSync(profileFile, 'utf8')) || {}; } catch { /* no profile: off */ }
+  const set = doc.resumes?.onedrive;
+  if (set === true || /^(on|yes|true)$/i.test(String(set ?? ''))) return { on: true, why: 'resumes.onedrive in the profile' };
+  if (!isHim && String(doc.resumes?.onedrive_dir || '').trim() && !(set === false || /^(off|no|false)$/i.test(String(set ?? '')))) return { on: true, why: 'resumes.onedrive_dir in the profile' };
+  return { on: false, why: 'switched off' };
+}
+
 export const TOP = process.env.JARVIS_ONEDRIVE_FOLDER || profileSetting('onedrive_folder') || '00 JARVIS RESUMES';
 export const ATTACH = resumeFileName();
 
@@ -174,6 +204,7 @@ export function syncToOneDrive({ from = SENT, ...opts } = {}) {
     // Only HIS archive: a test's temporary build folder never reaches his OneDrive.
     if (path.resolve(from).toLowerCase() !== path.resolve(SENT).toLowerCase()) return { skipped: 'not his resume archive' };
     if (!opts.dest && !schoolOneDrive()) return { skipped: IS_HIM ? 'no school OneDrive folder' : 'OneDrive not configured' };
+    if (!oneDriveSwitch().on) return { skipped: 'switched off' };
     const { rows, ...r } = copyAll(opts);
     return r;
   } catch (e) {
@@ -181,7 +212,40 @@ export function syncToOneDrive({ from = SENT, ...opts } = {}) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/**
+ * OFF THE DASHBOARD'S THREAD (F-1053, 2026-11-14). syncToOneDrive is all
+ * synchronous file work: with 1,021 archived resumes it reads every sidecar
+ * and stats every copy, 1.6 to 2.3 s, and inside the dashboard that froze
+ * every request at boot, every hour, and after every resume build. The same
+ * sync runs here in a child process ("--sync"), and this resolves with its
+ * result. Never rejects. One at a time: a call while one runs gets that run's
+ * result and one more run is made after it, so nothing written meanwhile is
+ * missed. `env` adds to the child's environment (a test turns it off).
+ */
+let running = null; let again = null;
+export function syncInBackground({ from = SENT, env = {} } = {}) {
+  if (process.env.JARVIS_ONEDRIVE === 'off') return Promise.resolve({ skipped: 'switched off' });
+  // The same guard as syncToOneDrive, here so a test's archive never spawns anything.
+  if (path.resolve(from).toLowerCase() !== path.resolve(SENT).toLowerCase()) return Promise.resolve({ skipped: 'not his resume archive' });
+  // Off (2026-11-14): no child is started at all.
+  if (!oneDriveSwitch().on) return Promise.resolve({ skipped: 'switched off' });
+  if (running) { again = { from, env }; return running; }
+  running = new Promise((resolve) => {
+    try {
+      execFile(process.execPath, [fileURLToPath(import.meta.url), '--sync'], { env: { ...process.env, ...env }, windowsHide: true, timeout: 10 * 60 * 1000 }, (err, stdout) => {
+        try { resolve(JSON.parse(String(stdout).trim().split('\n').pop())); } catch { resolve({ error: String(err?.message || err || 'the OneDrive copy printed no result') }); }
+      });
+    } catch (e) { resolve({ error: String(e?.message || e) }); }
+  }).finally(() => {
+    running = null;
+    if (again) { const next = again; again = null; syncInBackground(next); }
+  });
+  return running;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) && process.argv.includes('--sync')) {
+  console.log(JSON.stringify({ ...syncToOneDrive(), pid: process.pid }));
+} else if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const dryRun = process.argv.includes('--dry-run');
   if (!schoolOneDrive()) {
     console.log(IS_HIM ? 'no school OneDrive folder found in your user folder — nothing copied'

@@ -136,6 +136,15 @@
   /* Set in from the title so it reads as annotation, not as part of the role. */
   .picknote { font-size:12px; color:var(--dim); margin-top:3px; padding-left:9px;
     border-left:2px solid var(--line2); max-width:62ch; line-height:1.45; }
+  /* The catch, as its own line under the reason (2026-11-03). */
+  .pickcatch { font-size:12px; color:#e3b341; margin-top:2px; padding-left:9px; max-width:62ch; line-height:1.45; }
+  .rankwhy { font-size:11px; color:var(--dim2); margin-top:2px; padding-left:9px; max-width:72ch; line-height:1.4; }
+  /* The Inbox's status strip: last search, filed, next run, survivors waiting. */
+  .searchstrip { font-size:12px; color:var(--dim); padding:6px 16px; border-bottom:1px solid var(--line2);
+    display:flex; flex-wrap:wrap; gap:4px 16px; align-items:center; }
+  .searchstrip b { color:var(--text, inherit); font-weight:600; }
+  .searchstrip input { width:3.2em; font-size:12px; padding:1px 4px; }
+  .searchstrip .stripalarm { color:var(--bad); font-weight:600; }
   .status-interested { color:#56d364; } .status-queued { color:var(--accent); } .status-applied { color:#e3b341; }
 
   .actionbar { position:fixed; bottom:0; left:0; right:0; z-index:30; background:var(--panel2); border-top:1px solid var(--line2); transform:translateY(100%); transition:transform .15s; }
@@ -185,6 +194,7 @@
   .iconbtn { background:transparent; border:1px solid var(--line2); color:var(--dim); border-radius:6px; padding:2px 7px; font-size:14px; cursor:pointer; line-height:1.3; }
   .iconbtn:hover { border-color:var(--accent); color:var(--accent); }
   .iconbtn.on { color:#ff6b81; border-color:#ff6b81; }
+  .iconbtn.armed { color:#ff6b81; border-color:#ff6b81; font-size:12px; white-space:nowrap; }
   .iconbtn.dim:hover { border-color:var(--warn); color:var(--warn); }
   /* The Outreach button on an application, and the people panel on the Outreach tab. */
   .iconbtn.leads { font-size:12px; margin-left:auto; white-space:nowrap; }
@@ -551,6 +561,7 @@
       <div class="showing" id="showing"></div>
     </div>
   </header>
+  <div class="searchstrip" id="searchstrip" hidden></div>
     <!-- STALE-EXTENSION WARNING, GLOBAL. It used to live only inside the card
          template, so it appeared while browsing cards and nowhere else — not on
          Review & Send, which is where he goes when an application matters. The
@@ -613,6 +624,25 @@ const S = { jobs:[], scans:[], counts:{}, filtered:[], sel:new Set(), cursor:0, 
   prevVisit: localStorage.getItem('jarvis-last-visit') || '' };
 localStorage.setItem('jarvis-last-visit', new Date().toISOString());
 const $ = s => document.querySelector(s);
+// EACH VIEW'S ANSWER BELONGS TO THE CLICK THAT ASKED FOR IT (F-1022, 2026-11-06).
+// "im in curated view and it shows applications i have to reclick for it to
+// load". The Applications board's fetch took 11 s on a busy server; he clicked
+// Curated meanwhile, and when the board's answer landed it mounted itself over
+// the Curated list. Every apply() starts a new view generation and aborts the
+// last one's main fetches; a render checks its ticket after each wait and draws
+// nothing when another view has been asked for since.
+S.viewGen = 0; S.viewAbort = null;
+function newViewTicket(){
+  S.viewGen += 1;
+  try { S.viewAbort?.abort(); } catch { /* already done */ }
+  S.viewAbort = new AbortController();
+  S.query = null;   // a list answer still in flight is not this view's
+  return viewTicket();
+}
+/** True while no newer view has been asked for than the one current when this was taken. */
+function viewTicket(){ const g = S.viewGen; return () => g === S.viewGen; }
+/** The current view's abort signal, for its main fetches. */
+function viewSignal(){ return S.viewAbort ? S.viewAbort.signal : undefined; }
 const el = (t,c,txt)=>{const e=document.createElement(t); if(c)e.className=c; if(txt!=null)e.textContent=txt; return e;};
 
 // A JOB URL COMES FROM AN ATS, NOT FROM US.
@@ -627,7 +657,18 @@ const el = (t,c,txt)=>{const e=document.createElement(t); if(c)e.className=c; if
 // http and https only. Anything else renders as plain text with no link, so a
 // strange posting is still visible and still decidable — it just cannot be
 // clicked into running.
-const safeHref = (u) => (/^https?:\/\//i.test(String(u || '')) ? String(u) : null);
+const safeHref = (u) => (/^https?:\/\//i.test(String(u || '')) ? hostedAt(String(u)) : null);
+
+// ASHBY BOARDS HOSTED ON THE EMPLOYER'S OWN SITE (F-319). Every
+// jobs.ashbyhq.com/formenergy/<id> page renders "Page not found" while the job
+// is live at formenergy.com/careers/?ashby_jid=<id>. The store keeps the Ashby
+// URL (the liveness API and the enricher read it); only the link he clicks
+// goes to the page that works.
+const ASHBY_HOSTED = { formenergy: 'https://formenergy.com/careers/?ashby_jid=' };
+function hostedAt(u) {
+  const m = u.match(/^https:\/\/jobs\.ashbyhq\.com\/([^/?#]+)\/([0-9a-f-]{36})/i);
+  return m && ASHBY_HOSTED[m[1].toLowerCase()] ? ASHBY_HOSTED[m[1].toLowerCase()] + m[2] : u;
+}
 
 // The list is a PAGE now, fetched with the filters applied by the database.
 // It used to be the whole store — 77 MB of JSON at 107k jobs, downloaded on
@@ -710,7 +751,7 @@ function renderCounts() {
     // 2026-09-07). A number that disagrees with its own destination is the
     // fault this file has fixed three times; hearted jobs are counted where
     // they now live, beside Applied.
-    `<span><b>${n((c.inbox||0)+(c.queued||0))}</b> inbox</span>`+
+    `<span><b>${n(c.inboxLive ?? ((c.inbox||0)+(c.queued||0)))}</b> inbox</span>`+
     `<span><b>${n(c.new)}</b> library</span>`+
     `<span><b>${n((c.interested||0))}</b> tracking</span>`+
     `<span><b>${n(c.applied)}</b> applied</span>`+
@@ -785,6 +826,7 @@ function renderSubview() {
 
 // ── filtering ──
 async function apply(keepPage) {
+  const stillOn = newViewTicket();
   const q = $('#q').value.trim().toLowerCase();
   const view = currentView();
   const tier = $('#tier').value, loc=$('#loc').value, visa=$('#visa').value, sort=$('#sort').value;
@@ -844,6 +886,7 @@ async function apply(keepPage) {
     $('#actionbar').classList.remove('show');
     $('#hub').style.display='';
     await renderBoard();
+    if (!stillOn()) return;   // he went to another view meanwhile (F-1022)
     // The board mounts above the table, and the hub sits above the table too —
     // so the board landed BELOW Review & Send. Put it first: what he has
     // applied to, then what is ready to send.
@@ -1083,7 +1126,8 @@ async function apply(keepPage) {
   // single-threaded server, freezes every other tab for as long as it runs.
   // Dead code in front of a landmine. The endpoint is still there for anything
   // that calls it directly; nothing in this page does.
-  const d = await fetch('/api/jobs?'+mine).then(r=>r.json()).catch(()=>null);
+  const d = await fetch('/api/jobs?'+mine, { signal: viewSignal() }).then(r=>r.json()).catch(()=>null);
+  if (!stillOn()) return;   // F-1022: another view was asked for meanwhile
   if (d && Array.isArray(d.jobs)) {
     if (!S.viewCache) S.viewCache = new Map();
     S.viewCache.set(ticket, d);
@@ -1137,8 +1181,21 @@ function paintPayload(d, view, ticket) {
     // above his own picks, dead at the bottom where they can be read and
     // ignored.
     const dead = (j) => (j.goneAt ? 1 : 0);
+    // "Filed today first" (2026-11-03), a chip in the list header.
+    const today = (j) => (S.filedFirst && j.status==='inbox' && filedToday(j) ? 1 : 0);
+    // A REACH AFTER THE FITS IN ITS BAND (his call, 2026-11-04). A pick the
+    // reader filed as a reach (its note opens "Reach: degree/field/level.")
+    // is listed after the plain fits of the same fit band, never above them;
+    // between bands the order is unchanged, and a header sort still overrides.
+    const BAND_RANK = { strong: 3, good: 2, fair: 1, low: 0 };
+    const band = (j) => (j.fit && !j.fit.blocked ? (BAND_RANK[j.fit.band] ?? 0) : 0);
+    // A STRETCH (his answer 2026-11-06: a robotics role asking 1-2 years) comes after the reaches of its band.
+    const reach = (j) => { const n = String(j.pickNote || ''); return /^\s*Reach:/i.test(n) ? 1 : /^\s*Stretch:/i.test(n) ? 2 : 0; };
+    // Only under a score order (relevance, fit): "newest" and "company" keep his choice (review, 2026-11-04).
+    const byScore = ['rel', 'fit'].includes(($('#sort')?.value) || 'rel') ? 1 : 0;
     S.filtered = [...S.filtered].sort((a,b)=>
-      (dead(a) - dead(b)) || ((b.status==='inbox') - (a.status==='inbox')));
+      (dead(a) - dead(b)) || (today(b) - today(a)) || ((b.status==='inbox') - (a.status==='inbox'))
+      || byScore * ((band(b) - band(a)) || (reach(a) - reach(b))));
     // …AND FOLDS (2026-10-16): "why are there so many dead jobs" — 23 closed
     // picks at the bottom of the Inbox still read as dead jobs. One chip says
     // how many and shows them again.
@@ -1309,8 +1366,14 @@ function visaChip(j){
   if (f.hardBlock)    return ['bad',  '⛔ block', 'This posting states a work-authorisation requirement — open it to read the exact sentence'];
   if (f.visaGood)     return ['good', '✓ sponsor (posting)', 'This posting itself says it offers visa sponsorship'];
   if (f.visaWarning)  return ['warn', '⚠ verify', 'This posting says something about work authorisation that is worth reading'];
+  // The employer's record from the Department of Labor disclosure file (F-982).
+  const pr = j.sponsorPrior;
+  if (pr && !pr.overruled && pr.petitions > 0)
+                      return ['good', `✓ H-1B record (${pr.petitions})`, `${pr.petitions} certified H-1B engineering petitions on record for this employer (Department of Labor disclosure data). THIS posting does not state sponsorship — confirm at application`];
   if (j.company_meta && j.company_meta.sponsors_h1b)
                       return ['good', '✓ sponsors (company)', 'Company has H-1B filing history; THIS posting does not state it — confirm at application'];
+  if (pr && !pr.overruled && pr.petitions === 0)
+                      return ['dim', '—', 'No certified H-1B engineering petitions found under this employer\'s name (a parent or legal name can file for it), and the posting says nothing about sponsorship — worth confirming at application'];
   return ['dim', '—', 'Posting says nothing about visa sponsorship either way — not a disqualifier, worth confirming at application'];
 }
 
@@ -1469,6 +1532,16 @@ async function render() {
     chip.onclick = ()=>{ S.showDupes = !S.showDupes; apply(true); };
     showing.appendChild(chip);
   }
+  if (view==='inbox') {
+    const n = S.filtered.filter((j) => j.status==='inbox' && filedToday(j)).length;
+    if (n) {
+      const chip = el('button','iconbtn dim', S.filedFirst ? `${n} filed today shown first ✕` : `${n} filed today — show first`);
+      chip.style.marginLeft='8px'; chip.style.fontSize='11px';
+      chip.onclick = ()=>{ S.filedFirst = !S.filedFirst; apply(true); };
+      showing.appendChild(chip);
+    }
+  }
+  renderSearchStrip(view);
   if (S.closedFolded) {
     const chip = el('button','iconbtn dim', S.showClosed ? `showing ${S.closedFolded} closed — fold them` : `${S.closedFolded} closed posting${S.closedFolded===1?'':'s'} folded — show`);
     chip.style.marginLeft='8px'; chip.style.fontSize='11px';
@@ -1531,7 +1604,15 @@ async function render() {
     const hide=el('button','iconbtn dim','✕'); hide.title='Hide this job — it asks why (✕ again hides without a reason)'; hide.setAttribute('aria-label','Hide this job');
     hide.onclick=e=>{e.stopPropagation(); askHide(j.id);};
     const muteCo=el('button','iconbtn dim','⊘'); muteCo.title='Hide ALL jobs from '+j.company; muteCo.setAttribute('aria-label','Hide all jobs from '+j.company);
-    muteCo.onclick=e=>{e.stopPropagation(); hideCompany(j.company);};
+    // TWO CLICKS, NOT ONE (F-956). It sits beside ✕ on every row; one click
+    // hid a whole employer, and the list reached 111 with companies he went on
+    // to apply to. The first click asks; a second within 5 s hides.
+    muteCo.onclick=e=>{
+      e.stopPropagation();
+      if(muteCo.dataset.armed){ hideCompany(j.company); return; }
+      muteCo.dataset.armed='1'; muteCo.classList.add('armed'); muteCo.textContent='Hide all '+j.company+'?';
+      setTimeout(()=>{ delete muteCo.dataset.armed; muteCo.classList.remove('armed'); muteCo.textContent='⊘'; }, 5000);
+    };
     acts.appendChild(heart); acts.appendChild(hide); acts.appendChild(muteCo); c1.appendChild(acts); tr.appendChild(c1);
     // rel
     // Fit is the headline number; the old keyword relevance stays beside it as
@@ -1590,6 +1671,15 @@ async function render() {
     // reasoning is just a shorter list — he should never have to take the
     // ordering on faith.
     if(j.pickNote){ const pn=el('div','picknote', j.pickNote); wrap.appendChild(pn); }
+    // THE CATCH, AS A FIELD (2026-11-03): read out of the note by the server.
+    if(j.pickCatch){ const pc=el('div','pickcatch','Catch: '+j.pickCatch); wrap.appendChild(pc); }
+    // WHY THIS RANK: the parts of fit and his own lines that put it here.
+    if(j.rankWhy){ const rw=el('div','rankwhy','Why here: '+j.rankWhy); rw.title='The Inbox is ordered by fit. These are the parts that carried it, what held it back, and your preferences.md lines that moved it.'; wrap.appendChild(rw); }
+    // FILED TODAY: put in his inbox since midnight.
+    if(currentView()==='inbox' && j.status==='inbox' && filedToday(j)){
+      const ft=el('span','badge b-good','filed today'); ft.style.marginLeft='6px';
+      ft.title='Put in your inbox today'; tl.appendChild(ft);
+    }
     const head=el('div','rowhead'); head.appendChild(logoEl(j.company, j.url)); head.appendChild(wrap);
     c3.appendChild(head); tr.appendChild(c3);
     // age
@@ -1597,8 +1687,8 @@ async function render() {
     ageEl.title = (j.postedAt? 'Posted ':'First seen ') + new Date(ageOf(j)).toLocaleDateString();
     cAge.appendChild(ageEl); tr.appendChild(cAge);
     // pay — stated as the posting states it, blank when it says nothing
-    const cPay=el('td'); const payTxt=fmtPay(j.salary);
-    if (payTxt){ const pe=el('span','badge b-good',payTxt); pe.title = j.salary.interval==='hour' ? 'Hourly rate from the posting (~$'+Math.round(j.salary.max/1000)+'k/yr at 2080h)' : 'Annual range from the posting'; cPay.appendChild(pe); }
+    const cPay=el('td'); const paySrc=j.salary || j.pickPay || null; const payTxt=fmtPay(paySrc);
+    if (payTxt){ const pe=el('span','badge b-good',payTxt); pe.title = j.salary ? (j.salary.interval==='hour' ? 'Hourly rate from the posting (~$'+Math.round(j.salary.max/1000)+'k/yr at 2080h)' : 'Annual range from the posting') : 'Pay the pick note quotes from the posting'; cPay.appendChild(pe); }
     else cPay.appendChild(el('span','hint','—'));
     tr.appendChild(cPay);
     // location
@@ -1666,6 +1756,48 @@ async function render() {
 // Pay is stored annualised so one scale sorts the whole store, but an hourly
 // job has to READ as hourly — showing "$71k" for a posting that says $34/hour
 // is a number he never saw and cannot repeat back to a recruiter.
+/** Put in his inbox since local midnight. */
+function filedToday(j){
+  const t = Date.parse(j.statusChangedAt || '');
+  const d = new Date(); d.setHours(0,0,0,0);
+  return Number.isFinite(t) && t >= d.getTime();
+}
+
+/**
+ * THE INBOX STATUS STRIP (2026-11-03): when the last search ran and what it
+ * did, when the next one runs, how many fits wait in the library, and the
+ * top-up he can change. Fetched at most once a minute.
+ */
+let STRIP = { at: 0, data: null };
+async function renderSearchStrip(view){
+  const box = $('#searchstrip'); if (!box) return;
+  if (view !== 'inbox') { box.hidden = true; return; }
+  if (!STRIP.data || Date.now() - STRIP.at > 60_000) {
+    try { STRIP = { at: Date.now(), data: await (await fetch('/api/search-status')).json() }; } catch { return; }
+  }
+  const d = STRIP.data; box.hidden = false; box.innerHTML = '';
+  const when = (iso) => { if (!iso) return '—'; const t = new Date(iso); const today = new Date().toDateString() === t.toDateString();
+    return (today ? '' : t.toLocaleDateString(undefined, { month:'short', day:'numeric' }) + ' ') + t.toLocaleTimeString(undefined, { hour:'numeric', minute:'2-digit' }); };
+  const part = (html) => { const s = el('span'); s.innerHTML = html; box.appendChild(s); };
+  // The search's own alarm (F-981): first, in red, one sentence each.
+  for (const a of d.alarms || []) { const s = el('span'); s.className = 'stripalarm'; s.textContent = `⚠ ${a}`; box.appendChild(s); }
+  const l = d.last;
+  part(l ? `Last search <b>${when(l.at)}</b>: ${l.noop ? (l.why || 'nothing to do') : `filed <b>${l.filed}</b>${l.topup ? ` (${l.topup} top-up)` : ''}`}` : 'No search has run yet');
+  if (d.lastFiled && (!l || l.filed === 0)) part(`last filing <b>${when(d.lastFiled.at)}</b> (${d.lastFiled.filed})`);
+  part(`next search <b>${when(d.nextRun)}</b>`);
+  if (d.survivorsWaiting != null) part(`<b>${d.survivorsWaiting.toLocaleString()}</b> fits in the library not yet read`);
+  if (d.topUp != null) {
+    const s = el('span'); s.appendChild(document.createTextNode('top-up per search: '));
+    const inp = el('input'); inp.type='number'; inp.min='0'; inp.max='30'; inp.value=String(d.topUp);
+    inp.title = 'New fits each scheduled search adds even when the inbox is full (0 turns it off)';
+    inp.onchange = async () => {
+      try { const r = await (await fetch('/api/settings', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ dailyTopUp: Number(inp.value) }) })).json();
+        inp.value = String(r.values.dailyTopUp); STRIP.data.topUp = r.values.dailyTopUp; } catch { /* left as typed */ }
+    };
+    s.appendChild(inp); box.appendChild(s);
+  }
+}
+
 function fmtPay(s){
   if(!s || !s.max) return '';
   if(s.interval === 'hour'){
@@ -1827,7 +1959,7 @@ function renderCards(){
         <div>
           <h4 style="margin:0 0 4px">Description</h4>
           <div class="desc" id="carddesc"><em class="hint">loading posting…</em></div>
-          <div style="margin-top:9px"><a href="${esc(j.url)}" target="_blank">Open original posting ↗</a></div>
+          <div style="margin-top:9px"><a href="${esc(safeHref(j.url)||'')}" target="_blank">Open original posting ↗</a></div>
         </div>
         <div class="cardside" id="cardside"></div>
       </div>
@@ -2511,7 +2643,7 @@ function detailHtml(job, slim){
   if(t.experience.evidence&&t.experience.evidence.length){ html+=`<h4>Experience</h4><div class="hint">${esc(t.experience.note)}</div>`; for(const e of t.experience.evidence)html+=`<div class="quote">“${esc(e)}”</div>`; }
   if(t.relevance.matched&&t.relevance.matched.length) html+=`<h4>Why it surfaced</h4><div class="hint">signals: ${t.relevance.matched.map(esc).join(', ')}</div>`;
   html+=`<h4 style="margin-top:10px">Description</h4><div class="desc">${job.description?esc(job.description):'<em>'+noDescriptionNote(job)+'</em>'}</div>`;
-  html+=`<div style="margin-top:8px"><a href="${esc(job.url)}" target="_blank">Open original posting ↗</a></div>`;
+  html+=`<div style="margin-top:8px"><a href="${esc(safeHref(job.url)||'')}" target="_blank">Open original posting ↗</a></div>`;
   return html;
 }
 async function loadDetail(id, slim){
@@ -2572,8 +2704,9 @@ function persist(body, path='/api/action'){
   return fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})
     .then(r=>{ if(!r.ok) throw 0; return r.json(); })
     // The server counts what it actually wrote; the optimistic pills defer to it.
-    .then(d=>{ if(d && d.counts){ S.counts = d.counts; renderCounts(); } })
-    .catch(()=>load());
+    .then(d=>{ if(d && d.counts){ S.counts = d.counts; renderCounts(); } return true; })
+    // Resolves false on a failed write, so a caller can tell it did not happen.
+    .catch(()=>{ load(); return false; });
 }
 /** A job's own id plus every duplicate collapsed into it. */
 function withDupes(j){ return [j.id, ...(j._dupeIds || [])]; }
@@ -2874,7 +3007,7 @@ document.addEventListener('keydown',e=>{
     else if(e.key===' '){ e.preventDefault(); cardMove(1); }
     else if(e.key==='q'){ e.preventDefault(); cardAct('queued'); }
     else if(e.key==='Backspace'){ e.preventDefault(); cardMove(-1); }
-    else if(e.key==='o'&&c){ window.open(c.url,'_blank'); }
+    else if(e.key==='o'&&c){ const h=safeHref(c.url); if(h) window.open(h,'_blank'); }
     else if(e.key==='/'){ e.preventDefault(); $('#q').focus(); }
     return;
   }
@@ -2884,7 +3017,7 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='j'){ moveCursor(1); }
   else if(e.key==='k'){ moveCursor(-1); }
   else if(e.key==='x'&&j){ toggleSelLight(j.id); }
-  else if(e.key==='o'&&j){ window.open(j.url,'_blank'); }
+  else if(e.key==='o'&&j){ const h=safeHref(j.url); if(h) window.open(h,'_blank'); }
   else if(e.key==='Enter'&&j){ toggleOpen(j.id); }
   else if(e.key==='i'&&j){ singleAct(j.id,'interested'); }
   else if(e.key==='q'&&j){ singleAct(j.id,'queued'); }
@@ -3106,13 +3239,45 @@ function renderSheet(pipeline, mailEv, leadInfo = {}){
     // Pressing it puts the job on the Outreach tab; sorting brings the chosen ones together.
     { k:'outreach', label:'Outreach', v:(j)=>(leadInfo[j.id] ? 1 + (leadInfo[j.id].count || 0) : 0), text:(j)=>(leadInfo[j.id] ? 'Chosen' : 'Not chosen'), options:['Chosen','Not chosen'] },
     { k:'note', label:'Your notes', v:(j)=>String(j.userNote||'').toLowerCase(), text:(j)=>j.userNote },
+    // REMOVE (2026-10-21: "sometimes i accidentally heart sth i diddnt apply").
+    // A card that was never an application goes back to the Library; no text,
+    // so it has no filter, no sort and no part in the search.
+    { k:'remove', label:'', nosort:true, v:()=>0 },
   ];
   SHEET.cols = SHEET.cols || {};
+  // Only a card nobody has answered can be "not an application": an accidental
+  // heart is Tracking, or Applied when the extension filled it. A card with a
+  // reply, an interview, an offer or a rejection is an application.
+  const REMOVABLE = new Set(['interested', 'applied']);
+  // The last removal, so it can be put back. The same change as "Stop tracking"
+  // (singleAct → 'new'), done here so the sheet keeps its undo bar instead of
+  // being redrawn by a full reload.
+  const undoBar = el('span', 'm'); tools.insertBefore(undoBar, count);
+  async function removeCard(j){
+    const was = j.status, wasAt = j.statusChangedAt;
+    if (!(await persist({ ids: withDupes(j), status: 'new' }))) return false;
+    j.status = 'new';
+    const at = pipeline.indexOf(j); if (at >= 0) pipeline.splice(at, 1);
+    undoBar.innerHTML = '';
+    undoBar.append(document.createTextNode(`Removed ${coName(j.company)} · ${j.title} `));
+    const u = el('button', 'btn', 'Undo');
+    u.onclick = async () => {
+      u.disabled = true;
+      // The card's own status date goes back with it: its Applied date and
+      // days in status stay what they were.
+      if (!(await persist({ ids: withDupes(j), status: was, ...(wasAt ? { changedAt: wasAt } : {}) }))) { u.disabled = false; return; }
+      j.status = was; j.statusChangedAt = wasAt;
+      pipeline.splice(Math.min(at, pipeline.length), 0, j); undoBar.innerHTML = ''; draw();
+    };
+    undoBar.appendChild(u);
+    draw();
+    return true;
+  }
   const table = el('table', 'sheet');
   const thead = el('thead'); const hr = el('tr');
   for (const c of COLS) {
     const th = el('th', null, c.label + (SHEET.sort === c.k ? (SHEET.dir > 0 ? ' ▲' : ' ▼') : ''));
-    th.onclick = () => { if (SHEET.sort === c.k) SHEET.dir = -SHEET.dir; else { SHEET.sort = c.k; SHEET.dir = c.k === 'company' || c.k === 'title' || c.k === 'location' ? 1 : -1; } draw(); };
+    th.onclick = c.nosort ? null : () => { if (SHEET.sort === c.k) SHEET.dir = -SHEET.dir; else { SHEET.sort = c.k; SHEET.dir = c.k === 'company' || c.k === 'title' || c.k === 'location' ? 1 : -1; } draw(); };
     hr.appendChild(th);
   }
   let filt = filterRow(COLS, SHEET.cols, () => draw());
@@ -3186,7 +3351,7 @@ function renderSheet(pipeline, mailEv, leadInfo = {}){
     const m = members.map((j) => mailEv.latest?.[j.id]).filter(Boolean).sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at))).pop();
     if (m) mc.appendChild(mailLine(m, true));
     tr.appendChild(mc);
-    tr.appendChild(el('td')); tr.appendChild(el('td')); tr.appendChild(el('td'));
+    tr.appendChild(el('td')); tr.appendChild(el('td')); tr.appendChild(el('td')); tr.appendChild(el('td'));
     return tr;
   }
   /** One posting's line; `sub` when it sits under its role's folded line. */
@@ -3231,6 +3396,15 @@ function renderSheet(pipeline, mailEv, leadInfo = {}){
         if (r && r.ok) { saved = ta.value; j.userNote = ta.value; ta.style.borderColor = ''; } else { ta.style.borderColor = '#d29922'; ta.title = 'not saved — the dashboard did not answer'; }
       };
       nc.appendChild(ta); tr.appendChild(nc);
+      const rc = el('td');
+      if (REMOVABLE.has(j.status)) {
+        const rm = el('button', 'iconbtn dim', '✕');
+        rm.title = 'Not an application: take it off this sheet (back to the Library). You can undo it.';
+        rm.setAttribute('aria-label', 'Remove from applications');
+        rm.onclick = async (e) => { e.stopPropagation(); rm.disabled = true; if (!(await removeCard(j))) rm.disabled = false; };
+        rc.appendChild(rm);
+      }
+      tr.appendChild(rc);
       return tr;
     }
   }
@@ -3240,6 +3414,7 @@ function renderSheet(pipeline, mailEv, leadInfo = {}){
 }
 
 async function renderBoard(){
+  const stillOn = viewTicket();
   $('#tbl').style.display='none';
   $('#empty').style.display='none';
   $('#board')?.remove(); $('#boardempty')?.remove(); $('#mailbar')?.remove(); $('#appsbar')?.remove();
@@ -3263,7 +3438,7 @@ async function renderBoard(){
   // pair. Measured 2026-09-22, the board was four round trips deep before it
   // drew a single card.
   let [pipeline, leadInfo, mailSt, mailEv] = await Promise.all([
-    fetch('/api/jobs?limit=1000&sort=fit&roleKey=1&status='+STAGES.map(s=>s.key).join(',')+hide)
+    fetch('/api/jobs?limit=1000&sort=fit&roleKey=1&status='+STAGES.map(s=>s.key).join(',')+hide, { signal: viewSignal() })
       .then(r=>r.json()).then(d=>d.jobs).catch(()=>[]),
     // Which cards already have leads found, or research running.
     fetch('/api/outreach/leads/summary').then(r=>r.json()).then(d=>d.jobs||{}).catch(()=>({})),
@@ -3271,6 +3446,7 @@ async function renderBoard(){
     fetch('/api/mail/status').then(r=>r.json()).catch(()=>null),
     fetch('/api/mail/events').then(r=>r.json()).catch(()=>({ latest:{}, recent:[] })),
   ]);
+  if (!stillOn() || !['applications','tracker'].includes(currentView())) return;   // F-1022: another view was asked for while the board loaded
   // A CLOSED POSTING HE ONLY HEARTED IS FOLDED (2026-10-16): 17 of the
   // Tracking cards were jobs nobody can apply to any more. Anything past
   // Tracking is his record and stays as it is.
@@ -3357,7 +3533,8 @@ function mailLine(e, compact = false){
   if (e.to_status && !e.undone_at){
     const u = el('button','iconbtn dim', compact ? '↶' : 'undo'); u.style.fontSize='11px';
     u.title = `Put this card back to "${e.from_status}"`;
-    u.onclick = async()=>{ u.disabled = true; await OJ('/api/mail/undo', { msgId: e.msg_id }); renderBoard(); };
+    // A card he moved on since the email is left alone (409): say so on the button instead of redrawing as if undone.
+    u.onclick = async()=>{ u.disabled = true; const r = await OJ('/api/mail/undo', { msgId: e.msg_id }); if (r.status === 409) { u.textContent = compact ? '·' : 'moved on'; u.title = r.error; return; } renderBoard(); };
     line.appendChild(u);
   }
   return line;
@@ -3755,8 +3932,8 @@ async function renderSkipInsights(hub){
         <div class="hint" style="opacity:.75">You skipped: ${p.evidence.map(e=>esc(String(e).slice(0,44))).join(' · ')}</div>
         <div class="hint" style="opacity:.75">Would also remove: ${p.examples.map(e=>esc(String(e).slice(0,44))).join(' · ')}</div>
         <div style="margin-top:8px;display:flex;gap:8px">
-          <button class="go" onclick='acceptRule(${JSON.stringify(JSON.stringify({action:p.action,rule:p.rule,company:p.target}))}, "${id}")'>${p.action==='hide-company'?'Hide them':'Add the rule'}</button>
-          <button onclick="document.getElementById('${id}').remove()">Not that</button>
+          <button class="go" data-payload="${esc(JSON.stringify({action:p.action,rule:p.rule,company:p.target}))}" onclick="acceptRule(this.dataset.payload, '${id}')">${p.action==='hide-company'?'Hide them':'Add the rule'}</button>
+          <button data-payload="${esc(JSON.stringify({action:p.action,target:p.target,rule:p.rule}))}" onclick="declineRule(this.dataset.payload, '${id}')">Not that</button>
         </div>
       </div>`;
     }
@@ -3797,6 +3974,15 @@ async function renderSkipInsights(hub){
     html += `<div class="hint" style="margin-top:12px;opacity:.75">Every note you have written is covered by a rule.</div>`;
   }
   box.innerHTML = html;
+}
+
+// "Not that" is remembered, so the same proposal never comes back.
+async function declineRule(payload, id){
+  const node = document.getElementById(id);
+  const r = await fetch('/api/decline-rule',{method:'POST',headers:{'content-type':'application/json'},body:payload}).then(x=>x.json()).catch(()=>null);
+  if(!node) return;
+  if(r?.ok) node.remove();
+  else node.innerHTML = `<div class="hint">Could not record that: ${esc(r?.error||'no response')}</div>`;
 }
 
 async function acceptRule(payload, id){
@@ -3843,25 +4029,54 @@ function resetFilters(){
 }
 
 async function renderHome(){
+  const stillOn = viewTicket();
   const hub = $('#hub'); hub.innerHTML='';
   hub.appendChild(el('div','hint','Loading overview…'));
   let d;
-  try { d = await (await fetch('/api/overview')).json(); }
-  catch { hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load the overview — is the server still running?')); return; }
+  try { d = await (await fetch('/api/overview', { signal: viewSignal() })).json(); }
+  catch { if (!stillOn()) return; hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load the overview — is the server still running?')); return; }
   // AN ANSWER WITH NO NUMBERS IN IT (2026-10-16): right after a restart, while
   // the background counter was still busy, /api/overview answered an error
   // object, `d.stat` was undefined and the page threw on `s.readable` — a blank
   // Overview twice in a minute. Say so and ask again.
+  if (!stillOn() || currentView() !== 'home') return;   // F-1022
   if (!d || !d.stat) {
     hub.innerHTML='';
     hub.appendChild(el('div','empty', `The overview numbers are still being counted${d && d.error ? ` (${d.error})` : ''} — trying again in a few seconds.`));
     clearTimeout(renderHome._retry);
-    renderHome._retry = setTimeout(() => { if (SUB.inbox === 'home' || location.hash === '#home') renderHome(); }, 5000);
+    renderHome._retry = setTimeout(() => { if (currentView() === 'home') renderHome(); }, 5000);
     return;
   }
   hub.innerHTML='';
 
   const staleHome = staleBanner(d.code); if (staleHome) hub.appendChild(staleHome);
+  // OLD NUMBERS SAY THEY ARE OLD (F-1027): after a restart the tiles are the
+  // last count kept on disk while a fresh one runs (about two minutes).
+  const asOfMs = d.asOf ? Date.parse(d.asOf) : NaN;
+  if (Number.isFinite(asOfMs) && Date.now() - asOfMs > 10 * 60 * 1000) {
+    const at = new Date(asOfMs);
+    const when = at.toDateString() === new Date().toDateString() ? at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : at.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const note = el('div', 'hint', `Counts as of ${when}; they are recounted every 10 minutes.`);
+    note.id = 'home-asof';
+    hub.appendChild(note);
+  }
+
+  // OPEN AGAIN, AFTER HE APPLIED (F-1026 review): the posting he applied to
+  // closed and is listed again under another address. His application stays on
+  // the old card, so the new one is named here instead of hidden.
+  if (Array.isArray(d.reopened) && d.reopened.length) {
+    const box = el('div', 'hint');
+    box.id = 'home-reopened';
+    box.appendChild(el('b', '', `Open again — you applied to the old posting (${d.reopened.length}):`));
+    for (const x of d.reopened.slice(0, 20)) {
+      const line = el('div');
+      line.appendChild(document.createTextNode(`${x.company} — ${x.title} (${x.status}) · `));
+      const a = el('a', '', 'the new listing'); a.href = x.liveUrl; a.target = '_blank'; a.rel = 'noopener';
+      line.appendChild(a);
+      box.appendChild(line);
+    }
+    hub.appendChild(box);
+  }
 
   // HIS PACE FIRST (2026-10-16): "how many applications i have per day on avg
   // to keep track of if im slacking or not". Confirmed applications only.
@@ -4026,11 +4241,13 @@ async function renderHome(){
 // links to the EXACT page the application was left on, lists what still needs a
 // human, and lets the status be marked Applied once you have clicked Submit.
 async function renderReview(){
+  const stillOn = viewTicket();
   const hub = $('#hub'); hub.innerHTML='';
   hub.appendChild(el('div','hint','Loading prepared applications…'));
   let d;
-  try { d = await (await fetch('/api/prepared')).json(); }
+  try { d = await (await fetch('/api/prepared', { signal: viewSignal() })).json(); }
   catch { d = null; }
+  if (!stillOn() || !['applications','review'].includes(currentView())) return;   // F-1022
   hub.innerHTML='';
   // A 404 still parses as JSON, so `d` can be {error:'not found'} with no rows —
   // and reading d.rows then threw, leaving a completely blank page. A blank page
@@ -4260,12 +4477,13 @@ const dayOf = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { mont
 async function renderOutreach(quiet){
   if (OUTREACH_OPEN){ const id = OUTREACH_OPEN; OUTREACH_OPEN = null; return openOutreachJob(id); }
   const seq = ++OUT_SEQ;
+  const stillOn = viewTicket();
   const hub = $('#hub');
   if (!quiet){ hub.innerHTML=''; hub.appendChild(el('div','hint','Loading outreach…')); }
   let d;
   try { d = await (await fetch('/api/outreach/queue')).json(); }
-  catch { if (seq === OUT_SEQ){ hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load outreach.')); } return; }
-  if (seq !== OUT_SEQ) return;
+  catch { if (seq === OUT_SEQ && stillOn()){ hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load outreach.')); } return; }
+  if (seq !== OUT_SEQ || !stillOn() || currentView() !== 'outreach') return;
   hub.innerHTML='';
 
   const hero = el('div','hero');
@@ -4300,6 +4518,30 @@ async function renderOutreach(quiet){
     hub.appendChild(p);
   }
 
+  const ready = readyToSend(d);
+  if (ready) hub.appendChild(ready);
+  const watched = leadWatchPanel(d.watch);
+  if (watched) hub.appendChild(watched);
+  // A session started earlier (or from another dashboard tab) shows up here.
+  // "tell u straight up to send" (2026-10-24): `node jarvis/send-outreach.mjs`
+  // opens /?send=all#outreach (or ?send=dana,sam) in his Chrome, which is the
+  // same as pressing Send all here. The flag is dropped from the address so a
+  // reload does not start a second session.
+  const sendArg = new URLSearchParams(location.search).get('send');
+  // ?credits=all|dana,sam: `send-outreach.mjs --credits` asked for the InMail check.
+  const credArg = new URLSearchParams(location.search).get('credits');
+  if (credArg){
+    history.replaceState(null, '', location.pathname + location.hash);
+    checkInMail(credArg === 'all' ? [] : credArg.split(',').map(s=>s.trim()).filter(Boolean));
+  }
+  if (sendArg){
+    history.replaceState(null, '', location.pathname + location.hash);
+    SEND_ASKED = true;
+    // ?send=schedule:<id>: the server opened this for a scheduled send that is due.
+    const sched = /^schedule:/.test(sendArg) ? sendArg.slice(9) : '';
+    const names = sched || sendArg === 'all' ? [] : sendArg.split(',').map(s=>s.trim()).filter(Boolean);
+    sendAll(document.querySelector('#ready-send button') || el('button'), names, sched);
+  } else if (!SEND_ASKED){ SEND_ASKED = true; pollSendSession(); }
   hub.appendChild(outreachSheet(d, seq));
   hub.appendChild(linkedinPanel(d, seq));
 
@@ -4307,6 +4549,252 @@ async function renderOutreach(quiet){
   if (d.jobs.some(j=>j.leads?.status === 'running')){
     setTimeout(()=>{ if (seq === OUT_SEQ && currentView() === 'outreach') renderOutreach(true); }, 8000);
   }
+}
+
+// ── Ready to send (2026-10-23) ───────────────────────────────────────
+//
+// "if we gonna store it in the terminal make sure ui is hella clean and not
+// cluttered and after sending collapse it". Approved messages wait here, not
+// in filled tabs. Since 2026-10-24 (Chrome, not Opera) "Send all" asks the
+// Jarvis extension to open them in one Chrome window, a tab each, filled; each
+// drops off this list once it is sent. One line per person; the message opens
+// on a click, and a short status shows only while a session runs.
+const READY_OPEN = new Set();
+let SEND_SESSION = null;     // the extension's outreach-status answer
+let SEND_POLL = 0;
+let SEND_ASKED = false;
+const SEND_LABEL = { queued:'waiting', filling:'filling…', ready:'ready: press Send', careful:'careful', sent:'sent', failed:'not filled', closed:'tab closed', unclear:'check it', timeout:'not sent' };
+async function pollSendSession(){
+  clearTimeout(SEND_POLL);
+  const r = await extensionAsk({ type:'outreach-status' });
+  const before = SEND_SESSION;
+  SEND_SESSION = r?.session || null;
+  // A finished session from earlier is history, not news.
+  if (SEND_SESSION?.phase === 'done' && Date.now() - (SEND_SESSION.startedAt || 0) > 30 * 6e4) SEND_SESSION = null;
+  const sentNow = (SEND_SESSION?.entries || []).filter(e=>e.status==='sent' && !(before?.entries || []).some(b=>b.id===e.id && b.status==='sent')).length;
+  if (currentView() !== 'outreach') return;
+  if (sentNow) renderOutreach(true);
+  else { const p = document.getElementById('ready-send'); const d = p && p.__d; if (d) p.replaceWith(readyToSend(d)); }
+  if (SEND_SESSION && SEND_SESSION.phase !== 'done') SEND_POLL = setTimeout(pollSendSession, 3000);
+}
+// ── Check InMail (2026-10-26) ────────────────────────────────────────
+// "build a inmail checker maybe sth that clicks on message and see what it
+// says". The extension opens each saved person's message window in a
+// background window, reads LinkedIn's line, closes it; the answers live on the
+// server (/api/outreach/credits) and show as a tag on each row.
+let OUT_CREDITS = null;      // { byId, left, leftAt } from the server
+let CREDIT_RUN = null;       // the extension's check, while it runs
+let CREDIT_NOTE = '';        // how the last check ended, when it has something to say
+async function loadCredits(){
+  OUT_CREDITS = OUT_CREDITS || { byId:{}, left:null };
+  try { OUT_CREDITS = await (await fetch('/api/outreach/credits')).json(); } catch { /* keep the empty one */ }
+  const p = document.getElementById('ready-send'); if (p && p.__d) p.replaceWith(readyToSend(p.__d));
+}
+async function checkInMail(names = []){
+  const r = await extensionAsk({ type:'outreach-credits', ...(names.length ? { names } : {}) });
+  CREDIT_NOTE = '';
+  if (!r?.ok){ CREDIT_NOTE = r?.error || 'The Jarvis extension did not answer: reload it at chrome://extensions.'; loadCredits(); return; }
+  CREDIT_RUN = r.check?.phase === 'checking' ? r.check : null;
+  if (!CREDIT_RUN) CREDIT_NOTE = r.check?.note || '';
+  const poll = async ()=>{
+    const s = await extensionAsk({ type:'outreach-credits-status' });
+    const checking = s?.check?.phase === 'checking';
+    CREDIT_RUN = checking ? s.check : null;
+    if (!checking) CREDIT_NOTE = s?.check?.note || '';
+    await loadCredits();
+    if (CREDIT_RUN) setTimeout(poll, 3000);
+  };
+  setTimeout(poll, 2000);
+  loadCredits();
+}
+async function sendAll(btn, names = [], schedule = ''){
+  btn.disabled = true; btn.textContent = 'Opening…';
+  const r = await extensionAsk({ type:'outreach-send', ...(names.length ? { names } : {}), ...(schedule ? { schedule } : {}) });
+  if (!r){
+    btn.disabled = false; btn.textContent = 'Send all';
+    SEND_SESSION = { phase:'done', note:'The Jarvis extension did not answer. Load it in Chrome (chrome://extensions, Load unpacked, jarvis/extension) or reload it there, then press again.', entries:[] };
+    const p = document.getElementById('ready-send'); if (p && p.__d) p.replaceWith(readyToSend(p.__d));
+    return;
+  }
+  pollSendSession();
+}
+// Scheduled send (2026-10-24, "can we schedule send it? thats probably the
+// most annoying thing timing"; then a WINDOW, "11am to 1pm, and any time within
+// that that laptop is on it sends it"): the list is frozen when he sets it; the
+// first moment in the window the laptop is on, the server opens this tab and
+// the extension presses Send on each message whose checks pass. A window the
+// laptop was off for moves to the next weekday.
+let SCHED_OPEN = false;
+function nextWeekday(){
+  const t = new Date(); t.setDate(t.getDate() + 1);
+  while (t.getDay() === 0 || t.getDay() === 6) t.setDate(t.getDate() + 1);
+  const pad = (n)=>String(n).padStart(2,'0');
+  return `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;
+}
+const whenText = (at, until)=>{
+  const a = new Date(at), hm = (d)=>d.toLocaleString('en-US',{ hour:'numeric', minute:'2-digit' });
+  return `${a.toLocaleString('en-US',{ weekday:'short', month:'short', day:'numeric' })}, ${hm(a)}${until ? '–' + hm(new Date(until)) : ''}`;
+};
+function scheduleLine(d, p){
+  const box = el('div'); box.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:2px 2px 6px';
+  const redraw = async ()=>{ SCHED_OPEN = false; renderOutreach(true); };
+  for (const s of d.schedules || []){
+    const line = el('div','m'); line.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+    if (s.status === 'scheduled' || s.status === 'launched'){
+      line.appendChild(el('span', null, `${s.status === 'launched' ? 'Sending now' : 'Scheduled'} ${whenText(s.at, s.until)}: ${s.names.join(', ')}${s.status === 'scheduled' && s.rolls ? ' (laptop was off; moved to this day)' : ''}`));
+      if (s.status === 'scheduled'){
+        const c = el('button','btn','Cancel');
+        c.onclick = async ()=>{ c.disabled = true; await fetch('/api/outreach/schedule/cancel', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: s.id }) }); redraw(); };
+        line.appendChild(c);
+      }
+    } else if (Date.now() - Date.parse(s.at) < 2 * 864e5 && (s.status === 'done' || s.status === 'missed')){
+      line.textContent = s.status === 'missed'
+        ? `Scheduled send ${whenText(s.at, s.until)} was missed: ${s.note || 'the computer was asleep'}.`
+        : `Scheduled send ${whenText(s.at, s.until)}: sent ${(s.sent || []).length} of ${s.ids.length}.${(s.left || []).length ? ' Left for you: ' + s.left.map(l=>`${l.name} (${l.note})`).join('; ') + '.' : ''}`;
+    } else continue;
+    box.appendChild(line);
+  }
+  if (SCHED_OPEN){
+    const f = el('div'); f.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+    const day = el('input'); day.type = 'date'; day.value = nextWeekday();
+    const from = el('input'); from.type = 'time'; from.value = '11:00';
+    const to = el('input'); to.type = 'time'; to.value = '13:00';
+    const go = el('button','btn','Set');
+    const msg = el('span','m', 'Sent the first time the laptop is on in that window, a minute or two apart. Laptop off the whole time: the next weekday, same hours.');
+    go.onclick = async ()=>{
+      go.disabled = true;
+      const r = await fetch('/api/outreach/schedule', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ at: new Date(`${day.value}T${from.value}`).toISOString(), until: new Date(`${day.value}T${to.value}`).toISOString() }) }).then(r=>r.json()).catch(()=>({ error:'the dashboard did not answer' }));
+      if (r.error){ msg.textContent = r.error; go.disabled = false; return; }
+      redraw();
+    };
+    f.appendChild(day); f.appendChild(from); f.appendChild(el('span','m','to')); f.appendChild(to); f.appendChild(go); f.appendChild(msg);
+    box.appendChild(f);
+  }
+  return box.childNodes.length ? box : null;
+}
+// People he already found, re-read every few days (jarvis/lead-watch.mjs,
+// 2026-10-24): a new hiring post of theirs, and whoever it names, already sits
+// in that job's leads below; this says so, and who may have left.
+function leadWatchPanel(w){
+  if (!w || Date.now() - Date.parse(w.at) > 7 * 864e5) return null;
+  if (!(w.found || []).length && !(w.moved || []).length) return null;
+  const p = el('div','panel');
+  const ago = String(w.at).slice(0,10);
+  p.appendChild(el('h3', null, (w.found || []).length ? `New hiring posts from people you found (${w.found.length})` : 'People you found'));
+  p.appendChild(el('div','m', `From their public profiles, read ${ago}. They are in that job's leads below.`));
+  for (const f of w.found || []){
+    const row = el('div'); row.style.cssText = 'padding:6px 2px;border-top:1px solid var(--line,#30363d)';
+    const who = el('span', null, f.name); who.style.fontWeight = '600';
+    row.appendChild(who);
+    row.appendChild(el('span','m', ` ${f.isNew ? `· named by ${f.via} ` : ''}· ${f.date} `));
+    const a = el('a', null, 'post'); a.href = f.url; a.target = '_blank'; a.rel = 'noopener';
+    row.appendChild(a);
+    if (f.quote) row.appendChild(el('div','m', `“${f.quote}”`));
+    p.appendChild(row);
+  }
+  if ((w.moved || []).length) p.appendChild(el('div','m', `May have left: ${w.moved.map(m=>`${m.name} (page shows ${m.shows || 'no employer'}, not ${m.company})`).join('; ')}.`));
+  return p;
+}
+
+function readyToSend(d){
+  const rows = []; let older = 0;
+  // The send session's own window: a draft older than 21 days comes up only
+  // when he names the person, so it is a count here, not a row.
+  const fresh = (c)=>Date.now() - Date.parse(c.created_at || 0) <= 21 * 864e5;
+  for (const j of d.jobs) for (const c of j.contacts){
+    if (!(c.draft && !c.sent_at && !c.replied_at && !c.do_not_contact && c.linkedin_url)) continue;
+    if (fresh(c)) rows.push({ j, c }); else older++;
+  }
+  const S = SEND_SESSION;
+  const live = S && S.phase !== 'done';
+  if (!rows.length && !S?.note && !(d.schedules || []).some(s=>s.status !== 'cancelled' && Date.now() - Date.parse(s.at) < 2 * 864e5)) return null;
+  const p = el('div','panel');
+  p.id = 'ready-send'; p.__d = d;
+  const h = el('div'); h.style.cssText = 'display:flex;align-items:baseline;gap:10px;flex-wrap:wrap';
+  h.appendChild(el('h3', null, `${rows.length} ready to send`));
+  const hint = live
+    ? (S.phase === 'watching' ? 'All tabs are up in the Outreach window. Look each over and press Send; each closes and leaves this list once sent.'
+      : S.phase === 'sending' ? 'Scheduled send: pressing Send on each one that checks out, a minute or two apart…'
+      : 'Opening and filling each tab in a new Chrome window…')
+    : `One Chrome window opens with a tab for each, filled with subject, message and resume. You press Send.${older ? ` (${older} older unsent drafts stay in the sheet below.)` : ''}`;
+  const hintEl = el('span','m', hint); hintEl.style.flex = '1';
+  h.appendChild(hintEl);
+  if (rows.length){
+    const btn = el('button','btn', live ? (S.phase === 'watching' ? 'Watching…' : S.phase === 'sending' ? 'Sending…' : 'Filling…') : 'Send all');
+    btn.disabled = !!live;
+    btn.onclick = ()=>sendAll(btn);
+    if (!live){
+      const cb = el('button','btn', CREDIT_RUN ? 'Checking…' : 'Check InMail');
+      cb.disabled = !!CREDIT_RUN;
+      cb.title = 'Opens each one\'s message window in the background and reads what LinkedIn says: free message, or an InMail credit. Types nothing.';
+      cb.onclick = ()=>checkInMail();
+      h.appendChild(cb);
+      const sb = el('button','btn','Schedule'); sb.onclick = ()=>{ SCHED_OPEN = !SCHED_OPEN; p.replaceWith(readyToSend(d)); }; h.appendChild(sb);
+    }
+    h.appendChild(btn);
+  }
+  p.appendChild(h);
+  if (OUT_CREDITS === null) loadCredits();
+  const credLine = [
+    OUT_CREDITS?.left != null ? `${OUT_CREDITS.left} InMail credit${OUT_CREDITS.left === 1 ? '' : 's'} left (as of ${new Date(OUT_CREDITS.leftAt).toLocaleDateString('en-US',{month:'short',day:'numeric'})})` : '',
+    CREDIT_RUN ? `Checking InMail: ${CREDIT_RUN.entries?.filter(e=>e.credit || e.note).length || 0} of ${CREDIT_RUN.entries?.length || '…'}` : CREDIT_NOTE,
+  ].filter(Boolean).join(' · ');
+  if (credLine){ const cl = el('div','m', credLine); cl.style.cssText = 'padding:2px 2px 4px;font-size:12px'; p.appendChild(cl); }
+  const sl = scheduleLine(d, p);
+  if (sl) p.appendChild(sl);
+  const notes = [S?.note, S?.noResume?.length ? `Left out, no resume on the application: ${S.noResume.join(', ')}.` : ''].filter(Boolean);
+  // Connect after each send (2026-10-26): the sent leave the list, so say here who got an invitation.
+  const conn = (S?.entries || []).filter(e=>e.status==='sent' && e.connect);
+  if (conn.length){
+    const ok = conn.filter(e=>/^(CONNECTED|ALREADY)/.test(e.connect)).map(e=>`${e.name.split(/\s+/)[0]}${/^ALREADY/.test(e.connect) ? ' (already)' : ''}`);
+    const no = conn.filter(e=>!/^(CONNECTED|ALREADY)/.test(e.connect)).map(e=>`${e.name.split(/\s+/)[0]}: ${e.connect.replace(/^(STOP|CHECK): /,'')}`);
+    const n = el('div','m', [ok.length ? `Connect sent: ${ok.join(', ')}.` : '', no.length ? `Not connected: ${no.join('; ')}.` : ''].filter(Boolean).join(' '));
+    n.style.cssText = 'padding:2px 2px 6px'; p.appendChild(n);
+  }
+  const byId = new Map((S?.entries || []).map(e=>[e.id, e]));
+  const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column';
+  for (const { j, c } of rows){
+    const open = READY_OPEN.has(c.id);
+    const st = byId.get(c.id);
+    const line = el('div'); line.style.cssText = 'display:flex;gap:10px;align-items:center;padding:7px 2px;border-top:1px solid var(--line,#30363d);cursor:pointer';
+    line.appendChild(el('span','m', open ? '▾' : '▸'));
+    line.appendChild(logoEl(coName(j.company), j.url, 'sm'));
+    const who = el('span', null, c.name); who.style.fontWeight = '600';
+    line.appendChild(who);
+    const role = el('span','m', `${coName(j.company)} · ${j.title}`);
+    role.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1';
+    line.appendChild(role);
+    // Free message or InMail, as LinkedIn said it (Check InMail, 2026-10-26).
+    const cr = OUT_CREDITS?.byId?.[c.id];
+    if (cr){
+      const k = el('span','m', cr.kind === 'free' ? 'free' : cr.kind === 'inmail' ? 'InMail' : '?');
+      k.style.cssText = `white-space:nowrap;font-size:11px;font-weight:600;padding:1px 6px;border-radius:9px;border:1px solid currentColor;${cr.kind === 'free' ? 'color:var(--ok,#3fb950)' : cr.kind === 'inmail' ? 'color:var(--warn,#d29922)' : ''}`;
+      k.title = cr.line || cr.note || 'LinkedIn showed neither';
+      line.appendChild(k);
+    }
+    if (st){
+      const bad = /failed|careful|unclear|timeout/.test(st.status);
+      const s = el('span','m', SEND_LABEL[st.status] || st.status);
+      s.style.cssText = `white-space:nowrap;font-weight:600;${bad ? 'color:var(--warn,#d29922)' : st.status === 'ready' ? 'color:var(--ok,#3fb950)' : ''}`;
+      if (st.note) s.title = st.note;
+      line.appendChild(s);
+    } else if (c.subject){ const s = el('span','m', c.subject); s.style.cssText = 'white-space:nowrap;opacity:.8'; line.appendChild(s); }
+    line.onclick = ()=>{ if (READY_OPEN.has(c.id)) READY_OPEN.delete(c.id); else READY_OPEN.add(c.id); p.replaceWith(readyToSend(d)); };
+    list.appendChild(line);
+    // Something he must know about this one (not filled, already sent, no
+    // resume): one short line under it, only then.
+    if (st?.note){
+      const n = el('div','m', st.note); n.style.cssText = 'padding:0 0 6px 28px;font-size:12px';
+      list.appendChild(n);
+    }
+    if (open){
+      const body = el('div'); body.style.cssText = 'white-space:pre-wrap;font-size:13px;line-height:1.45;padding:4px 0 10px 28px;opacity:.9';
+      body.textContent = c.draft;
+      list.appendChild(body);
+    }
+  }
+  p.appendChild(list);
+  return p;
 }
 
 // ── Outreach as a sheet (2026-09-26) ─────────────────────────────────
@@ -4581,6 +5069,7 @@ function toDownloadsLink(resumeUrl, status){
   return a;
 }
 
+const CARD_OPEN = new Set();
 function contactCard(c, refresh, job = null){
   const card = el('div'); card.style.cssText = 'border:1px solid var(--line,#30363d);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px';
   const head = el('div'); head.style.cssText = 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap';
@@ -4599,6 +5088,22 @@ function contactCard(c, refresh, job = null){
   if (c.email){ const m = el('button','btn', c.email); m.title = 'Click to copy'; m.onclick = ()=>{ navigator.clipboard?.writeText(c.email); m.textContent = 'Copied'; setTimeout(()=>m.textContent = c.email, 1200); }; tools.appendChild(m); }
   head.appendChild(tools);
   card.appendChild(head);
+  // SENT FOLDS TO ONE LINE (2026-10-23, "after sending collapse it"): who, the
+  // date, their profile, and the two things left to do with it.
+  const done = !!(c.sent_at || c.replied_at || c.status === 'replied');
+  if (done){
+    const t = el('button','btn', CARD_OPEN.has(c.id) ? 'Hide' : 'Show message');
+    t.onclick = ()=>{ if (CARD_OPEN.has(c.id)) CARD_OPEN.delete(c.id); else CARD_OPEN.add(c.id); card.replaceWith(contactCard(c, refresh, job)); };
+    tools.prepend(t);
+    if (!CARD_OPEN.has(c.id)){
+      card.style.padding = '6px 10px';
+      if (c.status !== 'replied' && !c.replied_at && !c.do_not_contact){
+        const r = el('button','btn','They replied'); r.onclick = async()=>{ r.disabled = true; await OJ('/api/outreach/mark',{ contactId: c.id, what: 'replied' }); refresh(); };
+        tools.prepend(r);
+      }
+      return card;
+    }
+  }
   for (const extraLine of [(c.scores || c.signal || c.lead_type) ? excellenceLine(c) : null, leadWhyLine(c), signalLine(c.signal), personalLine(c.personal)]) if (extraLine) card.appendChild(extraLine);
 
   const out = el('div','m');
@@ -4954,11 +5459,13 @@ async function openOutreachJob(id){
 
 // ── Resumes: the PDFs, previewed inline ────────────────────────────
 async function renderResumes(){
+  const stillOn = viewTicket();
   const hub = $('#hub'); hub.innerHTML='';
   hub.appendChild(el('div','hint','Loading resumes…'));
   let d;
-  try { d = await (await fetch('/api/resumes')).json(); }
-  catch { hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load resumes.')); return; }
+  try { d = await (await fetch('/api/resumes', { signal: viewSignal() })).json(); }
+  catch { if (!stillOn()) return; hub.innerHTML=''; hub.appendChild(el('div','empty','Could not load resumes.')); return; }
+  if (!stillOn() || currentView() !== 'resumes') return;   // F-1022
   hub.innerHTML='';
 
   const stale = staleBanner(d.code); if (stale) hub.appendChild(stale);
@@ -4995,7 +5502,7 @@ async function renderResumes(){
   const bt = el('thead'); bt.appendChild(bh); base.appendChild(bt);
   const bb = el('tbody'); base.appendChild(bb);
   // Only the BASES: each lane folder also holds a working copy per job ("Alex
-  // Ha - <Company> - <Role>.pdf", 200 of 204 on 2026-09-30), and every one of
+  // Rivera - <Company> - <Role>.pdf", 200 of 204 on 2026-09-30), and every one of
   // those is in the sent list below. They go in a closed section at the end.
   const isBase = (r) => isPlainResumeFile(r.file) || !!r.job;
   const working = d.resumes.filter((r)=>!isBase(r));
@@ -5165,8 +5672,13 @@ function renderScan(){
 // ── self-refreshing progress (the terminal keeps itself fresh) ──
 let lastBatchDone = null;
 async function pollProgress(){
+  // ONE POLL AT A TIME, AND NONE IN A HIDDEN TAB (F-1022). Every 5 s whatever
+  // happened: with /api/progress taking 5 s on a busy server the polls piled
+  // up behind each other and kept the server busier still.
+  if (pollProgress.busy || document.hidden) return;
+  pollProgress.busy = true;
   try {
-    const d = await (await fetch('/api/progress')).json();
+    const d = await (await fetch('/api/progress', { signal: AbortSignal.timeout(20000) })).json();
     const row = $('#progressrow'); row.style.display='flex';
     const cov = d.coverage || {readable:0, read:0};
     const pct = cov.readable ? Math.round(100*cov.read/cov.readable) : 0;
@@ -5193,6 +5705,10 @@ async function pollProgress(){
       else if (d.batch && d.batch.failed > 0 && d.batch.done >= d.batch.total) {
         txt += ` · last batch: ${d.batch.ok} read, ${d.batch.failed} unreachable`;
       }
+      // A run the daily allowance held back read as one that found nothing (F-448).
+      if (!d.batch?.stalled && d.batch?.paced > 0) {
+        txt += ` · ${d.batch.paced} waiting for tomorrow's read limit${(d.batch.pacedServices || []).length ? ` (${d.batch.pacedServices.slice(0, 3).join(', ')})` : ''}`;
+      }
       txt += d.auto ? ' · auto' : ' · auto off';
     }
     $('#ptext').textContent = txt;
@@ -5215,7 +5731,7 @@ async function pollProgress(){
         || Date.now() - LAST_TOUCH < 60000 || currentView() === 'inbox';
       if (!first && !busy) load();
     }
-  } catch { /* server briefly busy — try again next tick */ }
+  } catch { /* server briefly busy — try again next tick */ } finally { pollProgress.busy = false; }
 }
 /** When he last clicked or typed — a background reload waits a minute after it. */
 let LAST_TOUCH = 0;

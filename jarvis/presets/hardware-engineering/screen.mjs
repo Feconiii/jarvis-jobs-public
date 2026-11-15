@@ -36,6 +36,36 @@ const STATUS = {
   no_sponsorship_needed: 'Authorized to work in the U.S., no sponsorship needed.',
 };
 
+/** One line on the employer for bar 3: its class and its H-1B record, when the curator knows them. */
+function employerLine(job) {
+  const kind = {
+    // A star has passed the startup tests by being on the list (F-948:
+    // Standard Bots, Normal Computing, Matic Robots, Heron Power and Medra were
+    // dropped for "survivability" because their postings named no funding).
+    star: 'on his frontier list — he wants it. It has ALREADY PASSED his startup tests (moat, flashy product, survivability, capital): never drop it for funding, headcount or survivability the posting does not mention.',
+    name: 'a big name he counts (established chips, big medtech, carmakers, big machine makers, big tech).',
+    role: 'an industrial conglomerate — the role decides.',
+    backup: 'a contract manufacturer — "only as backup": KEEP only a clearly strong fit, otherwise MAYBE at most.',
+    // F-948, his decision 2026-11-05: a VC hiring list is not funding; only a known round is.
+    vc: 'a startup he knows to be FUNDED (a known funding round): it passes survivability and capital without the posting naming money or headcount. Judge moat, flashy product and sponsorship from the posting.',
+    other: 'not a name he knows — judge it as a startup by the tests below, or as a traditional company.',
+  }[job.employerClass] || 'judged by the rules below.';
+  const h1b = Number.isFinite(job.h1b) ? ` Certified H-1B engineering petitions on record: ${job.h1b}.` : '';
+  const robotics = ROBOTICS_EMPLOYERS.test(String(job.company || '').trim()) ? ' A ROBOTICS COMPANY (the 1-2 years stretch rule applies).' : '';
+  return `${kind}${h1b}${robotics}`;
+}
+
+/**
+ * ROBOTICS COMPANIES for the stretch rule (his answer 2026-11-06, "5. ye": a
+ * role asking 1-2 years is read as a stretch fit at ROBOTICS companies only).
+ * His robotics-first company list of 2026-11-06 plus the robotics names on his
+ * frontier list. Tesla stays capped and is not here.
+ */
+// Whole names, never a prefix that answers for another company (review
+// 2026-11-06: "Figure Lending", "Agility Logistics", "Sunday Natural",
+// "Rebuild Manufacturing" are not his robotics companies).
+const ROBOTICS_EMPLOYERS = /^(?:figure(?:\s+ai)?|apptronik|boston dynamics|agility robotics|1x(?:\s+technologies)?|sunday robotics|sunday|skild(?:\s+ai)?|collaborative robotics|cobot|persona ai|physical intelligence|neuralink|google deepmind|deepmind|symbotic|dexterity|mujin|mytra|pickle robot(?:\s+company)?|intuitive surgical|intuitive|stryker|johnson\s*(?:&|and)\s*johnson|medra|formlabs|path robotics|standard bots|divergent(?:\s+technologies)?|universal robots|teradyne robotics|mobile industrial robots|re:build manufacturing|re:build|skydio|zipline|bedrock robotics|field ai|gecko robotics|the bot company|dyna robotics|genesis ai|foundation robotics|weave robotics|matic robots)(?:,?\s+(?:inc|llc|corp(?:oration)?|co|ltd|gmbh|ag|technologies|holdings)\.?)?$/i;
+
 /**
  * The whole brief the curator's reader gets for one posting. Moved from
  * curate.mjs promptFor(); for the default person it returns the same string.
@@ -58,22 +88,39 @@ BOTH BARS MUST HOLD FOR KEEP:
 1. Qualified as written.
    - Degree: Bachelor's in Mechanical, or "Engineering" / "a related technical field" generally, passes. If it lists only other disciplines (Electrical, Chemical, Computer, CS, Materials, Physics) with no mechanical and no general engineering: DROP. Master's/PhD required: DROP.
    - Years: "0", "0-2", new grad, entry level, "internships/co-ops count" pass. Preferred years up to 2 are fine.
+     A ROLE MADE FOR GRADUATING STUDENTS NEVER FAILS ON YEARS (his rule, 2026-11-06): when the title or the posting names a new-grad, university-hire, early-career or graduate program, or a graduating class ("May 2027 Graduates", "Class of 2027"), a years line in it that starts at 1 or 2 ("1-3", "1+", "2+") means internships and co-ops, which he has. Never DROP such a role for that line. Judge it on everything else, and still DROP it if its graduation window excludes ${person.gradLabel}. A new-grad title that asks for 3+ years is still mislabelled and still a DROP (the rule below).
      A RANGE THAT STARTS AT ZERO PASSES, whatever its top: "0-3", "0–5", "0+" all include no experience (2026-10-16: Queue's Mechanical Engineer, "0–3 years of hands-on mechanical or mechatronic engineering experience", was dropped as if it said 1-3 — he found it in the library and applied). The upper number is the band they hire across, not a bar.
+     AT A ROBOTICS COMPANY (the employer line says so), A REQUIRED 1 OR 2 YEARS IS A STRETCH, NOT A DROP (his rule, 2026-11-06: "ye"). A required years line that starts at 1 or 2 ("1-2", "1-3", "2+", "2-4") is answered MAYBE when the role passes everything else. The note STARTS with that years line quoted word for word. 3+ is still a DROP. Field service, technical support and quality roles stay DROPs as before.
      ONE YEAR IS A MAYBE, NOT A DROP (his decision, 2026-10-04: about half of every posting read was turned down on years, and he has two engineering internships). A REQUIRED "1 year" or "1+": MAYBE. A REQUIRED "1-2": MAYBE only when the posting itself says internships, co-ops or academic projects count toward it; otherwise DROP. For either MAYBE the note STARTS with the years line quoted word for word. A REQUIRED "1-3", "2+" or more: DROP. A years line under "Minimum qualifications", "Required" or "What we're looking for" IS required unless that line itself says preferred (F-622). THREE OR MORE YEARS PREFERRED COUNTS AS REQUIRED: DROP (his words: "if it says 3 yoe preferred 100% it means mandatory"). A "new grad" or "entry level" title that asks for 3+ years anywhere: DROP ("how the actual fuck you gonna say 3-5 yrs of experience and label it new grad").
    - A pay grade of E2 or higher anywhere in the posting (Applied Materials style "E2", "E3"), unless it is a graduate or rotation program: DROP ("stop showing me e2 e3 level roles for amat").
    - PLC programming named as required: DROP (he has none).
    - A graduation window excluding ${person.gradLabel}: DROP. Internships and co-ops: DROP.
-2. Relevant: semiconductor/semicap, robotics and automation, medical devices, EV/battery/energy hardware, commercial aerospace (eVTOL, commercial aircraft, delivery drones — never defense or spacecraft), high-tech manufacturing, VEHICLES AND HEAVY MACHINERY (automotive including non-EV, trucks, agricultural, construction and mining equipment), or ENERGY (power generation, utilities, oil & gas equipment and plants) — he widened it on 2026-10-08 to be "less picky on how cool it is" — AND the work is mechanical, manufacturing, equipment, process, test or automation engineering. DROP electrical/circuit/PCB, firmware, software, IT, pure chemistry, HVAC/MEP/building, civil/construction, grid/transmission/protection electrical work, facilities/compliance desks, sales.
-   CONSUMER PRODUCTS only from a high-prestige employer that is growing (Apple, Garmin, Milwaukee Tool/TTI, Eight Sleep tier). A narrow or novelty product line is a DROP even when the role itself is fine (razors, telescopes, gym equipment, hair dryers, barcode printers, cable sleeving — 2026-10-08: "why would i want to work there over amat").
+2. Relevant: semiconductor/semicap, robotics and automation, medical devices, EV/battery/energy hardware, commercial aerospace (eVTOL, commercial aircraft, delivery drones — never defense or spacecraft), high-tech manufacturing, VEHICLES AND HEAVY MACHINERY (automotive including non-EV, trucks, agricultural, construction and mining equipment), or ENERGY (power generation, utilities, oil & gas equipment and plants) — he widened it on 2026-10-08 to be "less picky on how cool it is", and narrowed WHO on 2026-10-25 (bar 3) — AND the work is mechanical, manufacturing, equipment, process or automation engineering. DROP electrical/circuit/PCB, firmware, software, IT, pure chemistry, HVAC/MEP/building, civil/construction, grid/transmission/protection electrical work, facilities/compliance desks, sales. EXCEPTION: AI data-center hardware is his ("all of it", 2026-10-25) — liquid cooling, rack, thermal and data-center mechanical work at an AI or cloud company is read as usual.
+   TEST ROLES: DROP ("avoid test roles", 2026-10-25) — test, validation, verification and reliability engineer roles, lab or production. He wants design, process, equipment or manufacturing ownership.
+   THERMAL ROLES: DROP ("for thermal jobs I think it's a waste of time, not my interest plus no expertise", 2026-11-05) — a role whose core is thermal systems or thermal engineering, HVAC, heat transfer, or thermal management or analysis, whatever its title says. A role that only mentions thermal in passing (one duty among many, a nice-to-have) is read as usual. The AI data-center exception above still stands.
+   CONSUMER PRODUCTS only from a high-prestige employer that is growing (Apple, Dyson, WHOOP, Eight Sleep tier; not Garmin, Peloton, GoPro, iRobot, Sonos). A narrow or novelty product line is a DROP even when the role itself is fine (razors, telescopes, gym equipment, hair dryers, barcode printers, cable sleeving — 2026-10-08: "why would i want to work there over amat").
 Also DROP: night/graveyard/2nd/3rd/swing shift, compressed 12-hour or weekend-only schedules; security clearance; defense or weapons; spacecraft, satellites, launch vehicles.
    An AEROSPACE SUPPLIER that names military, defense or space programs among its markets is a DROP, not a MAYBE, when this site's product could be defense-bound (Ducommun, 2026-10-03: "check for ITAR at the application step" is a catch he never takes). A diversified company whose posting is for a clearly civilian business unit is read as usual.
    THE TEST IS THIS SITE'S OWN PRODUCT, never a parent company's list of markets (2026-10-16): Dodge Industrial's "Manufacturing Engineer - Entry level" builds industrial power-transmission parts (bearings, gearboxes, couplings) and was dropped because its parent RBC Bearings names defense among its customers. An industrial plant is not an aerospace supplier because its owner also sells to defense. Drop only when the posting itself, or the site's product, is aerospace or defense.
-${auth}KINDS OF WORK HE HAS TURNED DOWN — DROP: any FIELD role ("ban all field jobs, they are not a good career path") EXCEPT a robotics one — field robotics, robotics field service, forward-deployed robotics engineering are fine ("the only field roles i accept are robotics"); non-robotics field service, service or maintenance engineering, quality engineer, industrial engineer, sustaining engineering, flight test, a rotation program longer than two years ("4 yr rotation is crazy").
+${auth}3. HIS KIND OF EMPLOYER (his taste quiz, 2026-10-25: "a lot of them just dont sponsor but they dont say it, especially legacy dinosaur companies or traditional industries, plus it looks lame … in reality i want flashiness and prestige or good career"). This employer is ${employerLine(job)}
+   - A small or mid-size TRADITIONAL company is a DROP however good the role: lighting, HVAC, building products, construction, small auto-parts suppliers, commodity industrial, plastics, tires, narrow product lines. "Why would I want to work for a lighting or HVAC or construction company or some tier 2 supplier for cars."
+   - A STARTUP that is NOT on his frontier list must pass all five of his tests, from the posting itself: a product moat and future prospects; a flashy product; survivability — at least $20M raised or 40+ people; real capital behind it; and nothing saying it will not sponsor. Missing any one: DROP, and name the one in "why". One he knows to be funded (a known funding round) has already passed survivability and capital; being on a VC hiring list is not funding.
+   - An INDUSTRIAL CONGLOMERATE (Honeywell, Eaton, Emerson, 3M, Parker, ITW) is a dinosaur to him: KEEP only when the product or the work itself is exciting and moving fast — new product development on something impressive. Sustaining a mature line: DROP.
+   - The name beats the title: a manufacturing, process or equipment role at a star is worth more to him than a design role somewhere he would not brag about. A small town is fine when the name is big. The pay floor holds everywhere.
+KINDS OF WORK HE HAS TURNED DOWN — DROP: any FIELD role ("ban all field jobs, they are not a good career path") EXCEPT a robotics one — field robotics, robotics field service, forward-deployed robotics engineering are fine ("the only field roles i accept are robotics"); non-robotics field service, service or maintenance engineering, quality engineer, industrial engineer, sustaining engineering, flight test, a rotation program longer than two years ("4 yr rotation is crazy").
 ALSO TURNED DOWN — DROP (read off his inbox, 2026-10-16: "some ass companies in picks … u should know me well enough to see what i would skip"):
    - NUCLEAR PLANTS, NUCLEAR UTILITIES AND FLEET SUPPORT: Westinghouse, Constellation, Zachry and their like ("i dont like nuclear", 2026-09-02). The energy widening of 2026-10-08 does not reach them. A new-reactor STARTUP building its own hardware (Radiant) is read as usual — he tried to apply there.
    - Driving or flight VALIDATION, where the job is running the vehicle and logging features (ADAS driving validation; "all i do is flying or test the flying i dont see the engineering").
    - Refinery or plant ROTATING EQUIPMENT and reliability engineering — that is maintenance.
    - Material Review Board / material review engineering — that is quality.
+   READ OFF HIS OWN SKIP NOTES, 2026-10-23 TO 11-02 (each one a posting a reader had put in front of him):
+   - A DEGREE LADDER IS JUDGED AT THE BACHELOR'S RUNG. "Doctorate and 0 years; Master's and 2 years; Bachelor's and 5 years" means HE needs 5 years: DROP. The zero belongs to a degree he does not hold (KLA Manufacturing Systems Engineer: "literally says bachelor with 5 years does reader not have basic comprehension???").
+   - SAFETY ROLES: product safety, EHS, safety compliance engineer — DROP ("fuck safety jobs", Applied Materials' NCG Product Safety Engineer).
+   - OPERATIONS ENGINEER roles that run a site's day-to-day (Amazon "Operations Engineer, GES", "AMZL Operations Integration Engineering"): DROP as the wrong kind of work. Not a drop: process, equipment or automation engineering that designs or improves the line.
+   - A SPECIALIST ROLE WHOSE CORE SKILL HIS FACTS NEVER SHOW — power-generation fluids, welding procedure (PWS) engineering, body-in-white design — DROP even at a name he loves ("i love the company but no chance i get this i have 0 relevant experience", xAI Fluids Engineer).
+   - THE ONE-YEAR MAYBE IS FOR GENERAL ENGINEERING EXPERIENCE. A required year IN A NAMED FIELD he has none of (AISIN: one year in that manufacturing field, "min 1 year in field i dont have + small company = guaranteed rejection") is a DROP.
+   - SYSTEMS ENGINEERING THAT IS REQUIREMENTS PAPERWORK — writing requirement documents, keeping the register, tracing to tests (Pickle Robot's Junior Systems Engineer) — is administration: DROP.
+   - "More software than hardware" (Nimble Robotics' field role): when most listed duties are software, scripting or IT, it is software, whatever the title says.
    - Packaging engineering (package design, sealing, validation), at any company.
    - Facilities and utility operations: bulk gas, chemical distribution, plant utilities, facilities systems.
    - Applications engineering that is order configuration, CPQ, quoting or sales support; a "Product Engineer" that is product management.
@@ -85,15 +132,17 @@ MAYBE (not KEEP): heavy travel, applications engineer, or a real doubt you can n
 A POSTING THAT STATES NO REQUIREMENTS — no degree, no years, no qualifications — cannot be checked against bar 1: DROP, never MAYBE (2026-10-04: six CNH cards filed as "the description has no requirements, check before applying"; his rule is that nothing goes in his inbox that the description does not prove he qualifies for).
 
 ALREADY AT THIS COMPANY (applied, in his list, rejected or hidden): ${prior.length ? prior.join('; ') : 'nothing'}
-The same or nearly the same title already on that list: DROP, and say which. A title that differs only in the CITY or SITE it names is a separate opening at another site, not a duplicate: read it as usual (Applied Materials' Kalispell, MT new-grad ME role was dropped against the Santa Clara one he applied to, 2026-10-03).
+The same or nearly the same title already on that list: DROP, and say which. A title that differs only in the CITY or SITE it names is a separate opening at another site, not a duplicate: read it as usual (Applied Materials' Kalispell, MT new-grad ME role was dropped against the Santa Clara one he applied to, 2026-10-03). Each entry names its site: one marked OTHER SITE is a separate opening he would apply to, never a duplicate, and neither is an entry with the same title that was [rejected] at another site. Drop as a duplicate only the same title at the SAME SITE, the same requisition, or the same title he [hidden].
 
 POSTING: ${job.company} — ${job.title} — ${job.location || ''}
 ---
 ${String(description || '').slice(0, 14000)}
 ---
 
+REACH (a label only; it changes no verdict, 2026-11-04, F-934): for a KEEP or MAYBE, say whether it is a reach and of which kind. "degree": his degree is not among the degrees the posting lists. "field": the core work is another discipline (electronics, sensors, optics, chemistry or materials, software). "level": the level or the pay asks for more experience than a new graduate has. Otherwise null.
+
 Answer with ONE line of JSON and nothing else:
-{"verdict":"KEEP"|"MAYBE"|"DROP","why":"<the deciding fact, one line>","note":"<KEEP/MAYBE only: two plain sentences for his card. First: the concrete overlap with his experience above. Second: why he can win it, quoting the posting's years or new-grad words. For MAYBE start with the catch. No hype.>"}`;
+{"verdict":"KEEP"|"MAYBE"|"DROP","why":"<the deciding fact, one line>","note":"<KEEP/MAYBE only: two plain sentences for his card. First: the concrete overlap with his experience above. Second: why he can win it, quoting the posting's years or new-grad words. For MAYBE start with the catch. No hype.>","reach":null|"degree"|"field"|"level"}`;
 }
 
 export default {
@@ -146,22 +195,36 @@ export default {
     'petroleum', 'mining', 'nuclear engineering', 'agricultural',
     'environmental engineering', 'geology', 'engineering science',
   ],
-  /** Text that looks like a degree token and is not ("MS Office"); null = none blanked (his screening as it was). */
-  notADegree: null,
+  /**
+   * Text that looks like a degree token and is not: "MS Office", "MS Excel",
+   * "MS-Office-Kenntnisse", "MS SQL Server", a "CRM MS Dynamics" title. Each is
+   * Microsoft software, never a Master of Science (F-755: such rows were blocked
+   * as Master's-only).
+   */
+  notADegree: /\bMS[\s-]+(?:Office|Excel|Word|PowerPoint|Access|Project|Outlook|Teams|Dynamics|Visio|SQL|365|SharePoint|Windows|Exchange|Azure|Power\s?(?:BI|Apps|Automate|Platform))\b/i,
 
   // ── eligibility.mjs ───────────────────────────────────────────────
-  /** A degree line naming his field, or engineering generally. */
-  hisField: /\b(mechanical|mechatronic|manufactur\w*|industrial engineer\w*|any engineering|all engineering|engineering discipline|\bstem\b|engineering (technology|science))\b/i,
-  /** Somebody else's degree; only used to detect a list that excludes him. */
-  otherField: /\b(electrical|electronic|computer (science|engineering)|software|comp sci|cs\b|data science|information (systems|technology)|chemical engineer|chemistry|biology|biomedical|civil engineer|finance|accounting|business administration|marketing|human resources|supply chain|nursing|physics)\b/i,
+  /** A degree line naming his field, or engineering generally.
+   *  F-771: "Mechatronics" (plural) failed the closing \b, so "Bachelor’s degree
+   *  in Electrical Engineering, Computer Engineering, Mechatronics, or …" read as
+   *  a list without him; and "BS in EE/CS/ME/Controls" names him as ME (capitals
+   *  only — "me" is a word), as do BSME and MSME. */
+  hisField: /\b(mechanical|mechatronic\w*|manufactur\w*|industrial engineer\w*|any engineer\w*|all engineering|engineering discipline|\bstem\b|engineering (technology|science)|(?-i:ME)|b\.?s\.?m\.?e|m\.?s\.?m\.?e)\b/i,
+  /** Somebody else's degree; only used to detect a list that excludes him.
+   *  ("BSEE" and "MSEE" are one word, and named nothing on their own. "BSCS" is
+   *  left out: "BSCs" is also building-service contractors.) */
+  otherField: /\b(electrical|electronic|computer (science|engineering)|software|comp sci|cs\b|data science|information (systems|technology)|chemical engineer|chemistry|biology|biomedical|civil engineer|finance|accounting|business administration|marketing|human resources|supply chain|nursing|physics|bs\s?ee|ms\s?ee|bsece)\b/i,
   /** His field named generically ("Engineering" with no other discipline in front). */
   genericField: /(?<!\b(?:electrical|electronic|computer|software|chemical|civil|biomedical|biological|nuclear|petroleum|environmental|agricultural|architectural|marine|mining|data|financial|sales)\s{1,3})\bengineering\b/i,
   /** Titles that are unambiguously another discipline's work. */
-  otherTitle: /\b(asic|rtl|verilog|vhdl|firmware|design for test|\bdft\b|physical design|analog|circuit design|\bsoc\b|tapeout|mask operations|wafer test|software (development )?engineer|\bsde\b|full[- ]stack|web developer|web front[- ]end|data (scientist|analyst|engineer)|business (analyst|intelligence)|machine learning (engineer|scientist)|cybersecurity|security analyst|network engineer|cloud (hardware|infrastructure|engineer)|devops|\bsre\b|marketing|sales|recruit|human resources|finance|accountant|legal|paralegal|nurse|supply chain|\bbuyer\b|procurement|logistics|account manager|data science|\banalyst,|,\s*analyst|manufacturing it\b|\bit\s+analyst)/i,
-  /** Other-discipline words that only count when the title does not also name his work. */
-  softOtherTitle: /\b(verification|machine learning|product support|customer (success|support)|workflow automation)\b/i,
+  otherTitle: /\b(asic|rtl|verilog|vhdl|firmware|design for test|\bdft\b|physical design|analog|circuit design|\bsoc\b|tapeout|mask operations|wafer test|software (dev(elopment)? )?engineer|\bsde\b|full[- ]stack|web developer|web front[- ]end|data (scientist|analyst|engineer)|business (analyst|intelligence)|machine learning (engineer|scientist)|cybersecurity|security analyst|network engineer|cloud (hardware|infrastructure|engineer)|devops|\bsre\b|marketing|sales|recruit|human resources|finance|accountant|legal|paralegal|nurse|\bbuyer\b|procurement|account manager|data science|\banalyst,|,\s*analyst|manufacturing it\b|\bit\s+analyst)/i,
+  /** Other-discipline words that only count when the title does not also name his work.
+   *  F-771: "supply chain" and "logistics" moved here from otherTitle — Apptronik's
+   *  "Manufacturing Engineer (Supply Chain) - Electromechanical" and Garmin's
+   *  "Process Engineer 2 - Global Service/Reverse Logistics" are his titles. */
+  softOtherTitle: /\b(verification|machine learning|product support|customer (success|support)|workflow automation|supply chain|logistics)\b/i,
   /** A title that names his work. */
-  hisTitle: /\b(mechanical|mechatronic|manufactur\w+|industrial engineer|process engineer|equipment engineer|fab automation|factory automation|robotics and automation|tooling|machining|fixture|thermal|hvac|quality engineer|reliability engineer|field service)\b/i,
+  hisTitle: /\b(mechanical|mechatronic\w*|manufactur\w+|industrial engineer|process engineer|equipment engineer|fab automation|factory automation|robotics and automation|tooling|machining|fixture|thermal|hvac|quality engineer|reliability engineer|field service)\b/i,
   /** The reason a subject-excluded posting carries. */
   subjectExcludedReason: 'names degree subjects and mechanical is not one',
 
@@ -257,7 +320,15 @@ export default {
   /** A title in his line of work, for the "primary discipline" rule (title is lower-cased). */
   disciplineTitle: /\bengineer(ing)?\b/,
   /** A primary-role word that also answers for these ("mechatronics is robotics work by another name"). */
-  disciplineAliases: { robotics: ['mechatronic'] },
+  // "Robot Field Engineer" (Maven), "Robotic System Integration Engineer" and
+  // "Humanoid Engineer, Manipulation" (Field AI), all applied to outside Jarvis
+  // (F-1044), read "Only a weak engineering signal", 4 of 28: \brobotics never
+  // matches "robot" or "robotic". Robot Framework is a software test tool.
+  disciplineAliases: { robotics: ['mechatronic', 'robot(?!\\s+framework)', 'humanoid'] },
+  /** A title word that is the discipline only when the posting is in that field (fit.mjs classifyField). */
+  disciplineInField: { manipulation: 'robotics' },
+  /** Titles that carry a discipline's word for another line of work. */
+  disciplineNotTitle: /\brobot\s+framework\b|\brobotic\s+process\s+automation\b|\brpa\b/,
   /** The archetype vocabulary scoreRole falls back to when no target role is in the title. */
   roleFallbackWords: ['mechanical', 'manufacturing', 'automation', 'robotics', 'process', 'equipment',
     'industrial', 'mechatronic', 'design engineer', 'test engineer', 'quality engineer'],
@@ -381,15 +452,150 @@ export default {
   handsOn: { bonus: 6, why: 'hands-on' },
 
   // ── curate.mjs ────────────────────────────────────────────────────
-  /** Titles that fail his standing rules on their face. */
+  /** Titles that fail his standing rules on their face. Welding/joining as the one process: his words 2026-11-06, "i dont like specific sub process welding is kinda lame". */
   titleOut: /\b(senior|sr\.?|staff|principal|manager|director|head of|intern(ship)?|co-?op|technician|operator|assembler|machinist|apprentice|night|graveyard|3rd shift|third shift)\b|\b(III|IV)\b|\bengineer\s+[3-5]\b|\bE[3-5]\b/i,
+  /**
+   * A TITLE CENTRED ON ONE SUB-PROCESS (his words 2026-11-06, "i dont like
+   * specific sub process welding is kinda lame"): welding or joining. A title
+   * that lists two or more other processes beside it ("Manufacturing Engineer
+   * (Welding, Machining, Assembly)") is a broad role and stays.
+   */
+  subProcessTitle: /\b(?:weld|welds|welding|joining)\b/i,
+  broadProcessTitle: /\b(?:machin\w*|assembl\w*|cnc|casting|mold\w*|moulding|stamping|fabricat\w*|paint\w*|coating|forming|extrusion|plating)\b/gi,
   /** Applied Materials' E2 grade: out unless a graduate or rotation program. */
   e2Out: /\bE2\b(?!E)/,
-  /** The employers he goes for, read first. */
-  frontier: /^(tesla|applied materials|micron|amazon|kla|lam research|asml|nvidia|openai|anthropic|tsmc|intel|samsung|sk hynix|tokyo electron|xai|google|alphabet|apple|meta|microsoft|1x|figure|boston dynamics|agility|apptronik|physical intelligence|skild|sunday|machina|gradient|neuralink|atomic semi|hadrian|divergent|form energy|redwood|zipline|joby|archer|rivian|lucid|zoox|waymo|nuro|fluidstack|crusoe|lambda|cerebras|groq|tenstorrent|etched|lightmatter|psiquantum|commonwealth fusion|helion|onto innovation|axcelis|entegris|wolfspeed|lumentum|coherent)\b/i,
+  /**
+   * The employers he goes for. Since 2026-10-25 ("a lot of these companies i
+   * legit dont want to work for, i wanna aim for the damn stars") this is the
+   * GATE, not just the reading order: the curator files nobody else into his
+   * inbox (starsOnly). Everything else stays in the library, flagged as usual;
+   * a heart still keeps any job. Add a name here when he names one.
+   */
+  frontier: /^(tesla|applied materials|micron|amazon|kla|lam research|asml|nvidia|openai|anthropic|tsmc|intel|samsung|sk hynix|tokyo electron|xai|google|alphabet|apple|meta|microsoft|1x|figure|boston dynamics|agility|apptronik|physical intelligence|skild|sunday|machina|gradient|neuralink|atomic semi|hadrian|divergent|form energy|redwood|zipline|joby|archer|rivian|lucid|zoox|waymo|nuro|fluidstack|crusoe|lambda|cerebras|groq|tenstorrent|etched|lightmatter|psiquantum|commonwealth fusion|helion|onto innovation|axcelis|entegris|wolfspeed|lumentum|coherent|texas instruments|globalfoundries|amd|qualcomm|asm(?: international| america)?$|intuitive surgical|formlabs|field ai|applied intuition|standard bots|dexterity|path robotics|collaborative robotics|bedrock robotics|gecko robotics|the bot company|dyna robotics|genesis(?: ai)?$|persona ai|foundation robotics|weave robotics|wayve|aurora innovation|periodic labs|lila sciences|vulcanforms|radiant(?: industries| nuclear)?$|kairos power|terrapower|oklo|x-energy|fervo|base power|spacex|blue origin|astranis|nasa jet propulsion|california institute of technology jet propulsion|waabi|heron power|normal computing|matic robots)\b/i,
+  /**
+   * HIS EMPLOYER TASTE (quiz, 2026-10-25). The curator sorts every employer into
+   * one of four classes (curate.mjs employerClass) and files only the first
+   * three. "a lot of them just dont sponsor but they dont say it especially
+   * legacy dinosaur companies or traditional industries, plus it looks lame …
+   * in reality i want flashiness and prestige or good career."
+   *   star  — `frontier` above.
+   *   name  — a big name he'd put on a resume: every established chip company
+   *           ("all of them"), big medtech ("big medtech is fine too"), carmakers
+   *           and the big suppliers (Bosch/Denso tier), big legacy machine makers
+   *           ("yes, a big name counts"), big tech hardware.
+   *   role  — industrial conglomerates: "if they have a cool product or the work
+   *           is cool … i do view them as dinosaurs … depend heavily on role and
+   *           work"; often no sponsorship. Lincoln Electric is out ("narrow, meh").
+   *   other — filed only when the posting itself names top investors or big
+   *           funding ("only with top investors or big funding").
+   */
+  starsOnly: true,
+  bigNames: /^(thermo fisher|arthrex|renesas|arm|schaeffler|festo|aeva|analog devices|western digital|onsemi|on semiconductor|nxp|microchip|infineon|stmicroelectronics|st microelectronics|broadcom|marvell|seagate|sandisk|kioxia|skyworks|qorvo|texas instruments|globalfoundries|brooks automation|azenta|veeco|ultra clean|ichor|mks instruments|advanced energy|kulicke|amkor|enphase|first solar|nextracker|qcells|hanwha|fluence|corning|coreweave|panasonic|toyota battery|xpeng|weride|pony\.ai|dyson|whoop|eight sleep|medtronic|stryker|boston scientific|abbott|johnson & johnson|johnson and johnson|j&j|edwards lifesciences|ge healthcare|siemens healthineers|philips|baxter|becton dickinson|zimmer biomet|dexcom|insulet|hologic|resmed|toyota|american honda|honda|general motors|gm\b|ford|hyundai|kia|nissan|bmw|mercedes|volkswagen|stellantis|subaru|mazda|volvo|scout motors|slate auto|bosch|robert bosch|denso|magna|zf\b|continental|aisin|ge vernova|general electric|caterpillar|john deere|deere|cummins|siemens|cnh|paccar|komatsu|hitachi|mitsubishi|kawasaki|lg energy|lg electronics|sk on|samsung sdi|hp inc|hp$|hewlett packard|dell|cisco|supermicro|super micro|ibm|oracle|dyson)\b/i,
+  roleDecides: /^(ge aerospace|airbus|honeywell|3m|emerson|eaton|parker hannifin|parker|itw|illinois tool works|ingersoll rand|danaher|dover|rockwell automation|abb|schneider electric|ametek|fortive|xylem)\b/i,
+  /** Contract manufacturers: "not too interested, only as backup" — read after everyone else he would file. */
+  backup: /^(jabil|flex ltd|flex$|flextronics|celestica|sanmina|plexus|benchmark electronics)\b/i,
+  /**
+   * Employers he counts as funded though their postings name no investors
+   * (his answer 2026-11-02, "Funded startups"): a known round, so survivability
+   * and capital pass; moat, product and sponsorship still count. A startup on
+   * a VC hiring list is NOT added here for being listed (F-948, 2026-11-05):
+   * only a known funding round counts. A newly funded startup he names is added here by hand.
+   */
+  fundedNames: /^(re:?build|atmoszero|gander robotics|unlimited industries|thorlabs)\b/i,
+  /**
+   * Never filed, whatever the posting says (quiz, 2026-10-25): aerospace that is
+   * defense or will not sponsor (Pratt, RTX, Textron, Gulfstream: ~0 H-1B
+   * engineering petitions, or every posting says no), Lincoln Electric ("narrow,
+   * meh"), HVAC and elevators, oil & gas and chemicals ("Corning yes, the rest
+   * no"), Gotion, engineering services and staffing, fading consumer brands.
+   */
+  notHisKind: /^(lincoln electric|pratt & whitney|pratt and whitney|rtx|raytheon|collins aerospace|textron|bell textron|gulfstream|general dynamics|trane|carrier|johnson controls|otis|lennox|daikin|gotion|quest global|cyient|belcan|aerotek|tata|infosys|hcl|wipro|peloton|gopro|irobot|sonos|exxon|exxonmobil|chevron|slb|schlumberger|baker hughes|halliburton|nov\b|shell|bp\b|conocophillips|dow\b|dow chemical|dupont|air liquide|linde|air products|basf|eastman chemical|lyondellbasell)\b/i,
+  /**
+   * A big name is filed only on evidence it sponsors (2026-10-25: "a lot of them
+   * just dont sponsor but they dont say it, especially legacy dinosaur
+   * companies"). Fewer certified H-1B engineering petitions than this in the
+   * coverage ledger, and no sponsorship line in the posting: not filed.
+   * GE Vernova had 11 across 5,220 postings; Cummins 501; Caterpillar 60.
+   */
+  sponsorBar: 20,
+  /**
+   * A ROLE MADE FOR HIS GRADUATING CLASS NEVER FAILS ON YEARS (his rule,
+   * 2026-11-06, through the first mate). Formlabs' "Manufacturing Engineer -
+   * May 2027 Graduates" was cut for "1-3 years": in a program for new
+   * graduates that line means internships and co-ops, and he has those
+   * (Applied Materials, Acme Steel). A title naming such a program, or a posting
+   * that calls itself one, skips the years bar; the graduation-window rule
+   * still decides whether his class is the one it hires. ONLY a years line
+   * starting at 1 or 2 ("1-3", "2+"): a new-grad title asking 3+ is still
+   * mislabelled and dropped (his earlier rule, "3-5 yrs … label it new grad").
+   */
+  gradProgramMaxYears: 2,
+  /** Robotics companies, where a required 1-2 years is a stretch, not a drop (his answer 2026-11-06, "5. ye"). */
+  roboticsEmployers: ROBOTICS_EMPLOYERS,
+  stretchMaxYears: 2,
+  gradProgram: {
+    title: /\bnew[\s-]*(?:college[\s-]*)?grad(?:uate)?s?\b|\bncg\b|\buniversity\s+(?:grad(?:uate)?s?|hires?|program)\b|\brecent\s+grad(?:uate)?s?\b|\bearly[\s-]career\b|\bgraduate\s+(?:program|engineer|rotation|development|scheme|trainee)\b|\bgraduate\s+(?:mechanical|manufacturing|process|robotics|mechatronics|design|equipment)\s+engineer\b|\bengineer,?\s*graduate\b|\brotational\s+program\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d\d\s+grad(?:uate)?s?\b|\bclass\s+of\s+20\d\d\b|\b20\d\d\s+(?:new\s+)?grad(?:uate)?s?\b|\bcampus\s+hire\b/i,
+    body: /\b(?:this|our|the)\s+(?:is\s+an?\s+)?(?:new[\s-]*grad(?:uate)?|university[\s-]*(?:grad(?:uate)?|hire|recruiting)|early[\s-]career|graduate|rotational|campus)\s+(?:program|role|position|opportunity|hire|hiring)\b|(?<!\bnot\s)(?<!n't\s)(?<!\bnot\s(?:been\s)?)\bdesigned\s+for\s+(?:new|recent)\s+(?:college\s+)?grad(?:uate)?s\b|\bfor\s+(?:new|recent)\s+(?:college\s+)?grad(?:uate)?s\s+(?:graduating|who\s+(?:will\s+)?graduate)\b/i,
+  },
+  /** He avoids test roles ("avoid test roles", 2026-10-25): test, validation, reliability. */
+  testRole: /\b(test|testing|validation|verification|reliability)\s+(engineer|engineering|specialist|lead)\b|\b(test|validation|reliability)\s*\/\s*\w+\s+engineer\b|\bv&v\b/i,
+  /**
+   * Work he does not want, by the title alone, each with his words (the
+   * reader's brief carries the same rule for a role whose title hides it).
+   * Thermal, 2026-11-05: "for thermal jobs I think it's a waste of time, not
+   * my interest plus no expertise". A title whose core is thermal: Thermal
+   * (Systems/Design/Fluids/Management/Analysis) Engineer, "Mechanical
+   * Engineer - Thermal", HVAC, heat transfer, thermodynamics. Not thermal
+   * PROCESS work at a fab (furnaces, anneal: a process role) or thermal spray,
+   * and not AI data-center cooling (his "all of it", 2026-10-25).
+   */
+  notInterest: [
+    {
+      key: 'thermal',
+      // The thermal word (aerothermal, thermofluids too), up to three words,
+      // then the role ("Thermal Integration Engineer", "Thermofluids Analyst",
+      // "Thermal CAE Engineer", "Thermal Systems Design, Hybrid Powertrain") —
+      // unless a word between names his own work (manufacturing, process,
+      // quality, sourcing…: "Thermal Cooling Manufacturing Engineer" is a
+      // manufacturing role); or the role, then thermal ("Mechanical Engineer -
+      // Thermal", "Engineer - Thermal Dynamics").
+      title: /\bhvac\b|\bheat[\s-]+transfer\b|\bthermodynamic\w*|\b(?:(?:aero)?thermal(?![\s-]+(?:process\w*|spray))|thermo[\s-]?fluids?)(?:[\s/&,-]+(?!(?:manufactur|process|quality|supply|sourcing|procure|mechanical|field|service|sustaining|industriali[sz]|equipment|sales|commercial)\w*)[a-z0-9]+){0,3}?(?:[\s/&,-]+(?:engineer\w*|analyst|scientist|specialist|architect|lead|designer|researcher)\b|[\s/&-]+design\b(?=\s*(?:[,(–—-]|$)))|\b(?:engineer\w*|analyst|scientist)\b[^,()]{0,30}?(?:\s*[,(–—-]\s*|\s+)\(?(?:(?:aero)?thermal(?![\s-]+(?:process\w*|spray))|thermo[\s-]?fluids?)\b/i,
+      // AI and cloud data-center cooling (his "all of it", 2026-10-25); a
+      // title that pairs thermal with mechanical work, which is his; and one
+      // of his own roles on a thermal product ("Manufacturing Engineer 3
+      // (Thermal)", "Failure Analysis Engineer - Power & Thermal").
+      unless: /\b(?:data[\s-]?cent(?:er|re)s?|datacenter|liquid[\s-]+cooling|immersion|server|rack|gpu|cloud|ai[\s-]+(?:infrastructure|hardware|chip))\b|\bmechanical\s*(?:and|&|\/)\s*thermal\b|\bthermal\s*(?:and|&|\/)\s*mechanical\b|\bthermo[\s-]?mechanical\b|\b(?:manufactur\w*|process|quality|sourcing|supplier|sustaining|equipment|failure\s+analysis|field\s+service)\s+engineer/i,
+      why: 'not his interest: thermal',
+      said: '"for thermal jobs I think it\'s a waste of time, not my interest plus no expertise" (2026-11-05)',
+    },
+  ],
+  /** A startup that names top investors or real money in its own posting ("$20M+ raised or 40+ people"). */
+  funded: /\b(series\s+[a-f]\b|raised\s+(?:over\s+|more\s+than\s+|nearly\s+)?\$\s?\d|\$\s?\d+(?:\.\d+)?\s?(?:b|bn|billion)\b(?![^.]{0,40}\brevenue)|\$\s?(?:[2-9]\d|\d{3})\s?(?:m|mm|million)\b(?![^.]{0,40}\brevenue)|unicorn|andreessen|a16z|sequoia|founders fund|lux capital|khosla|kleiner perkins|general catalyst|thrive capital|index ventures|\baccel\b|greylock|lightspeed venture|coatue|8vc|y combinator|breakthrough energy|lowercarbon|dcvc|eclipse ventures|valor equity|bezos expeditions|google ventures)/i,
   /** Employers he has capped (the curator never files one unasked). */
   capped: /^tesla\b/i,
   curatePrompt,
+  /**
+   * Reader turn-downs the brief above says are NOT drops (F-767). A DROP whose
+   * `why` matches `why` and not `unless` is asked once more with `rule` added.
+   * The industry widening of 2026-10-08: Oceaneering's 0-2-year ME was dropped
+   * "as oil and gas", Rosenbauer's for "fire-truck (heavy vehicle)
+   * manufacturing". Nuclear, refinery reliability, utility operations and the
+   * rest stay out, so a reason naming them is left alone.
+   */
+  /**
+   * Words that make a hand turn-down about the employer or its product line,
+   * beyond "sector", "industry", "products" (F-731): a turn-down for one of
+   * these carries to the employer's same-titled posting at another site.
+   */
+  employerTurnDown: /\b(?:nuclear|food|beverage|buildings|building\s+(?:products?|systems|materials)|plumbing|lighting|elevators?|wiring|defen[cs]e|weapons|military|spacecraft|satellites?|launch\s+vehicles?|tobacco)\b/i,
+  readerDropExceptions: [
+    {
+      key: 'widened-sectors',
+      why: /\b(?:oil[\s-]*(?:&|and)[\s-]*gas|oilfield|offshore|subsea|drilling|energy|power\s+generation|automotive|vehicles?|trucks?|fire[\s-]?trucks?|heavy[\s-]+(?:vehicles?|machinery|equipment)|agricultur\w*|construction\s+(?:and\s+mining\s+)?equipment|mining|off[\s-]highway)\b[^.]{0,80}?\b(?:outside|not\s+(?:one\s+of\s+)?his|isn['’]t\s+(?:one\s+of\s+)?his|(?:target|his)\s+(?:industr|sector)|irrelevant|not\s+relevant)|\b(?:outside|not\s+(?:one\s+of\s+)?his|isn['’]t\s+(?:one\s+of\s+)?his)\b[^.]{0,40}?\b(?:industr|sector)\w*[^.]{0,60}?\b(?:oil|gas|energy|automotive|vehicles?|trucks?|agricultur\w*|mining|machinery)\b/i,
+      unless: /\b(?:nuclear|refiner\w*|rotating\s+equipment|reliability|field\s+(?:service|role|job|engineer)|maintenance|hvac|building|plumbing|grid|transmission|substation|utility\s+operations|facilities|defen[cs]e|weapons|military|spacecraft|satellites?|launch)\b/i,
+      rule: 'Vehicles and heavy machinery (automotive including non-EV, trucks, agricultural, construction and mining equipment) and energy (power generation, oil & gas equipment and plants) have been IN his sectors since 2026-10-08: an industry on that list is not a reason to drop.',
+    },
+  ],
 
   // ── skip-learn.mjs ────────────────────────────────────────────────
   /** A note naming an employer-level disqualifier: one skip is enough to propose. */

@@ -26,7 +26,7 @@ const SOURCE = readFileSync(path.join(HERE, 'background.js'), 'utf-8');
  * Load background.js into a sandbox with a fake browser and a fake network.
  * `routes` maps a path to a handler; anything unrouted 404s.
  */
-function load({ routes = {}, reachable = ['http://localhost:4300'], manifestVersion = '1.1.0', sidePanel = null, injectFails = false } = {}) {
+function load({ routes = {}, reachable = ['http://localhost:4300'], manifestVersion = '1.1.0', sidePanel = null, injectFails = false, timeLimits = false } = {}) {
   const calls = [];
   const listeners = {};
   const badges = [];
@@ -131,8 +131,12 @@ function load({ routes = {}, reachable = ['http://localhost:4300'], manifestVers
       const pathname = url.slice(base.length).split('?')[0];
       const route = routes[pathname];
       if (!route) return { ok: false, status: 404, json: async () => ({ error: 'no such route' }) };
-      return route(opts, calls);
+      // A request given a time limit is let go when it runs out, as Chrome's fetch does.
+      const answer = Promise.resolve(route(opts, calls, url));
+      if (!opts.signal) return answer;
+      return Promise.race([answer, new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason), { once: true }))]);
     },
+    ...(timeLimits ? { AbortSignal } : {}),
   };
   // A service worker's global IS `self`. background.js hangs runOnTab there so a
   // Playwright harness that has loaded the real extension can drive it.
@@ -159,6 +163,101 @@ const okToken = () => ({ ok: true, status: 200, json: async () => ({ token: TOKE
 function ask(listeners, msg) {
   return new Promise((resolve) => { listeners.message(msg, {}, resolve); });
 }
+
+// S3 (2026-11-06): time limits on the dashboard. Times are scaled down 100x in these tests.
+const hang = () => new Promise(() => {});
+test('S3: finding the dashboard asks both addresses at once — one that hangs does not hold up the other', async () => {
+  const { sandbox } = load({ timeLimits: true, reachable: ['http://localhost:4300', 'http://127.0.0.1:4300'], routes: {
+    '/api/apply-token': (o, c, url) => (url.startsWith('http://localhost') ? hang() : okToken()),
+    '/api/resume-name': okJson({ name: 'x' }),
+  } });
+  sandbox.__jarvisTimeScale = 0.01;
+  const t = Date.now();
+  const r = await sandbox.api('/api/resume-name');
+  assert.equal(r.name, 'x');
+  assert.ok(Date.now() - t < 1000, `answered by the address that answers, at once (${Date.now() - t} ms)`);
+});
+
+test('S3: a dashboard that never answers is "not answering (busy, or stuck)", not "not running", and is given up on quickly', async () => {
+  const { sandbox } = load({ timeLimits: true, reachable: ['http://localhost:4300', 'http://127.0.0.1:4300'], routes: { '/api/apply-token': hang } });
+  sandbox.__jarvisTimeScale = 0.01;   // 2.5 s → 25 ms
+  sandbox.__jarvisReconnectMs = 5;
+  const t = Date.now();
+  await assert.rejects(sandbox.api('/api/resume-name'), /not answering \(busy, or stuck\)/);
+  assert.ok(Date.now() - t < 2000, `gave up in ${Date.now() - t} ms`);
+});
+
+test('S3: a dashboard that refuses the connection is still "not running"', async () => {
+  const { sandbox } = load({ timeLimits: true, reachable: [] });
+  sandbox.__jarvisReconnectMs = 5;
+  await assert.rejects(sandbox.api('/api/resume-name'), /the Jarvis dashboard is not running/);
+});
+
+test('S3: a quick route the dashboard sits on is given up on at its limit, asked once, with words he can act on', async () => {
+  const { sandbox, calls } = load({ timeLimits: true, routes: { '/api/apply-token': okToken, '/api/plan': hang } });
+  sandbox.__jarvisTimeScale = 0.01;   // 60 s → 600 ms
+  const t = Date.now();
+  await assert.rejects(sandbox.api('/api/plan', { method: 'POST', body: {} }), /did not answer \/api\/plan within 60 s — it is busy/);
+  const took = Date.now() - t;
+  assert.ok(took >= 500 && took < 3000, `about the scaled limit: ${took} ms`);
+  assert.equal(calls.filter((c) => c.url.includes('/api/plan')).length, 1, 'a busy dashboard is not asked twice');
+});
+
+test('S3: a route that is slow on purpose (writing an answer) is never cut off', async () => {
+  const { sandbox } = load({ timeLimits: true, routes: {
+    '/api/apply-token': okToken,
+    '/api/answer': () => new Promise((r) => setTimeout(() => r({ ok: true, status: 200, json: async () => ({ text: 'written' }) }), 900)),
+  } });
+  sandbox.__jarvisTimeScale = 0.01;   // a quick route would be given up on at 600 ms
+  const r = await sandbox.api('/api/answer', { method: 'POST', body: {} });
+  assert.equal(r.text, 'written');
+});
+
+test('S3: one address refusing at once while the other answers slowly still connects', async () => {
+  const { sandbox } = load({ timeLimits: true, reachable: ['http://127.0.0.1:4300'], routes: {   // localhost refuses
+    // Slow, but well inside its 25 ms (scaled) limit: 5 ms, so a busy test machine never flakes it (review).
+    '/api/apply-token': () => new Promise((r) => setTimeout(() => r(okToken()), 5)),
+    '/api/resume-name': okJson({ name: 'y' }),
+  } });
+  sandbox.__jarvisTimeScale = 0.01;   // 25 ms each
+  assert.equal((await sandbox.api('/api/resume-name')).name, 'y');
+});
+
+test('S3: one address refusing while the other hangs is "not answering", not "not running"', async () => {
+  const { sandbox } = load({ timeLimits: true, reachable: ['http://127.0.0.1:4300'], routes: { '/api/apply-token': hang } });
+  sandbox.__jarvisTimeScale = 0.01;
+  sandbox.__jarvisReconnectMs = 5;
+  await assert.rejects(sandbox.api('/api/resume-name'), /not answering \(busy, or stuck\)/);
+});
+
+test('S3: a quick route given up on says the last step may already be recorded', async () => {
+  const { sandbox } = load({ timeLimits: true, routes: { '/api/apply-token': okToken, '/api/filled': hang } });
+  sandbox.__jarvisTimeScale = 0.01;
+  await assert.rejects(sandbox.api('/api/filled', { method: 'POST', body: {} }), /may already have recorded the last step/);
+});
+
+test('S3: past 3 s a tab\'s own waiting call is named on its progress line, never another tab\'s or one with no tab, and the note goes once it answers', async () => {
+  const release = {};
+  const { sandbox } = load({ timeLimits: true, routes: {
+    '/api/apply-token': okToken,
+    '/api/answer-snapshot': () => new Promise((r) => { release.mine = () => r({ ok: true, status: 200, json: async () => ({}) }); }),
+    '/api/answer': () => new Promise((r) => { release.other = () => r({ ok: true, status: 200, json: async () => ({}) }); }),
+    '/api/page-errors': () => new Promise((r) => { release.untabbed = () => r({ ok: true, status: 200, json: async () => ({}) }); }),
+  } });
+  const t0 = Date.now();
+  const mine = sandbox.api('/api/answer-snapshot', { tabId: 7, method: 'POST', body: {} });
+  const other = sandbox.api('/api/answer', { tabId: 9, method: 'POST', body: {} });
+  const untabbed = sandbox.api('/api/page-errors', { method: 'POST', body: {} });
+  await new Promise((r) => setTimeout(r, 20));   // the token is fetched and every call is in flight
+  // The clock is passed in, so nothing here races a timer.
+  assert.equal(sandbox.slowNote(7, t0 + 1000), '', 'not yet at 1 s');
+  assert.match(sandbox.slowNote(7, t0 + 5000), /^Dashboard slow to answer \(5 s on answer-snapshot\), still waiting$/);
+  assert.match(sandbox.slowNote(9, t0 + 5000), /on answer\)/, 'the other tab hears only its own');
+  assert.equal(sandbox.slowNote(8, t0 + 60_000), '', 'a tab with nothing waiting hears nothing — the untabbed call is never counted');
+  release.mine(); await mine;
+  assert.equal(sandbox.slowNote(7, t0 + 60_000), '', 'quiet again once it answered');
+  release.other(); release.untabbed(); await Promise.all([other, untabbed]);
+});
 
 test('it finds the dashboard and carries the token on every call', async () => {
   const { listeners, calls } = load({
@@ -560,6 +659,85 @@ test('an Apply link that opens a NEW tab hands the arming and the id to it', asy
   assert.equal((await sandbox.armedState(11)).id, 'job-10', 'the second event for the same tab changes nothing');
   await fire.created({ id: 12, openerTabId: 99 });
   assert.equal(await sandbox.armedState(12), null, 'a tab opened from an unarmed tab is not');
+});
+
+test('A TAB REMEMBERS THE POSTING IT CAME FROM, armed or not, and its form is shown as that job (F-791)', async () => {
+  // Veeco: the posting names itself, its SuccessFactors portal names nothing.
+  const POSTING = 'https://careers.veeco.com/job/San-Jose-Manufacturing-Equipment-Engineer-CA-95101/1439543300/';
+  const FORM = 'https://career8.successfactors.com/portalcareer?_s.crb=VVtlgnsAOsx';
+  const asked = [];
+  const urls = new Map([[30, POSTING]]);
+  const { sandbox, listeners, fire } = load({
+    routes: {
+      '/api/apply-token': okToken,
+      '/api/panel': (opts, calls) => {
+        const u = new URL(calls.at(-1).url);
+        asked.push(u.searchParams);
+        // The server's rule: the page first, the remembered id only when the page names nothing.
+        if (u.searchParams.get('pageUrl') === POSTING || u.searchParams.get('id') === 'job-veeco') {
+          return { ok: true, status: 200, json: async () => ({ job: { id: 'job-veeco', title: 'Manufacturing Equipment Engineer', company: 'Veeco' }, fit: {}, application: null }) };
+        }
+        return { ok: false, status: 404, json: async () => ({ error: 'this page is not a posting in your store' }) };
+      },
+    },
+  });
+  sandbox.chrome.tabs.get = async (id) => ({ id, url: urls.get(id) || '', title: '', status: 'complete', windowId: 1 });
+  sandbox.chrome.scripting.executeScript = async () => [{ result: '' }];
+  const fromPanel = (msg) => new Promise((resolve) => { listeners.message(msg, {}, resolve); });
+
+  assert.equal((await fromPanel({ type: 'panel', tabId: 30 })).data.job.id, 'job-veeco', 'the posting is found by its own address');
+  assert.equal(await sandbox.armedState(30), null, 'nothing armed the tab');
+
+  // Apply → the portal, in the same tab.
+  urls.set(30, FORM);
+  await fire.committed({ tabId: 30, frameId: 0, url: FORM });
+  const onForm = await fromPanel({ type: 'panel', tabId: 30 });
+  assert.equal(onForm.ok, true, JSON.stringify(onForm));
+  assert.equal(asked.at(-1).get('id'), 'job-veeco', 'the form is asked about as the posting he came from');
+  assert.equal(onForm.data.job.company, 'Veeco');
+
+  // …or in a tab the page opened.
+  urls.set(31, FORM);
+  await fire.target({ tabId: 31, sourceTabId: 30 });
+  await fire.committed({ tabId: 31, frameId: 0, url: FORM });
+  assert.equal((await fromPanel({ type: 'panel', tabId: 31 })).data?.job?.id, 'job-veeco', 'the child tab carries it too');
+
+  // A press on the form starts THAT application.
+  await sandbox.press({ id: 31, url: FORM });
+  assert.equal((await sandbox.armedState(31))?.id, 'job-veeco', 'the press arms the tab with the job it came from');
+});
+
+test('…AND FORGETS IT once the tab is on another posting, another site, or two hours later (F-791)', async () => {
+  const { sandbox, fire } = load({ routes: { '/api/apply-token': okToken } });
+  const seed = async (tabId, url) => { await sandbox.seeJob(tabId, { id: `job-${tabId}`, company: 'Texas Instruments' }, url); };
+
+  await seed(40, 'https://careers.ti.com/en/sites/CX_1/job/25017157');
+  await fire.committed({ tabId: 40, frameId: 0, url: 'https://careers.ti.com/en/sites/CX/job/25017157/apply/section/1' });
+  assert.equal((await sandbox.seenJob(40))?.id, 'job-40', 'its own form keeps it');
+  await fire.committed({ tabId: 40, frameId: 0, url: 'https://careers.ti.com/en/sites/CX/job/25099999/apply/section/1' });
+  assert.equal(await sandbox.seenJob(40), null, 'another requisition of the same kind drops it');
+
+  await seed(41, 'https://www.linkedin.com/jobs/view/robotics-engineer-at-convergix-automation-solutions-4467626400');
+  await fire.committed({ tabId: 41, frameId: 0, url: 'https://convergix.rec.pro.ukg.net/CON1096CVAU/JobBoard/52250257-f25d-4ad3-b69e-53bc735d981a/OpportunityApply?opportunityId=6f41c0f1-f013-445a-a361-db72efd4e989' });
+  assert.equal((await sandbox.seenJob(41))?.id, 'job-41', 'LinkedIn to the employer\'s application system keeps it');
+  await fire.committed({ tabId: 41, frameId: 0, url: 'https://accounts.google.com/signin/v2' });
+  assert.equal((await sandbox.seenJob(41))?.id, 'job-41', 'a sign-in page on the way keeps it');
+  await fire.committed({ tabId: 41, frameId: 0, url: 'https://news.example.com/today' });
+  assert.equal(await sandbox.seenJob(41), null, 'browsing to another site drops it');
+
+  await seed(42, 'https://www.linkedin.com/jobs/view/4467626400');
+  await fire.committed({ tabId: 42, frameId: 0, url: 'https://www.linkedin.com/jobs/view/4461501227' });
+  assert.equal(await sandbox.seenJob(42), null, 'another LinkedIn job drops it');
+
+  await seed(43, 'https://careers.veeco.com/job/x/1439543300/');
+  vm.runInContext('globalThis.__realNow = Date.now; Date.now = () => globalThis.__realNow() + 2 * 60 * 60 * 1000 + 1000;', sandbox);
+  try {
+    assert.equal(await sandbox.seenJob(43), null, 'two hours on, it is gone');
+  } finally { vm.runInContext('Date.now = globalThis.__realNow;', sandbox); }
+
+  await seed(44, 'https://careers.veeco.com/job/x/1439543300/');
+  await fire.removed(44);
+  assert.equal(await sandbox.seenJob(44), null, 'a closed tab forgets it');
 });
 
 test('a navigation DURING a run is not lost — it runs once more after', async () => {
@@ -1467,6 +1645,14 @@ test('F-399: what a later run answers leaves the "left for you" list', async () 
   // Compared as text: the array comes from the worker's own realm.
   assert.equal(JSON.stringify([...st.acc.unanswered]), JSON.stringify(['step 1: Website']),
     `only what is still his stays; got ${JSON.stringify([...st.acc.unanswered])}`);
+
+  // F-909: a label that merely appears INSIDE a longer question does not
+  // answer it (TI's required visa question vanished from the list).
+  const VISA = 'U.S. Immigration Form: Do you currently hold an H, L, E, J, or F nonimmigrant visa?';
+  await askFrom(listeners, 41, { type: 'filled', result: { filled: 0, checked: 0, uploaded: false, sawForm: true, pageUrl: PAGE, unanswered: [VISA] } });
+  await askFrom(listeners, 41, { type: 'filled', result: { filled: 1, checked: 0, uploaded: false, sawForm: true, pageUrl: PAGE, answered: ['visa', 'Form'], unanswered: [] } });
+  st = await sandbox.armedState(41);
+  assert.ok([...st.acc.unanswered].includes(VISA), `the unanswered visa question stays; got ${JSON.stringify([...st.acc.unanswered])}`);
 });
 
 test('F-571: a frame that never loads does not hold the set-up injections — the fill still goes in', async () => {
@@ -1505,4 +1691,1086 @@ test('a filled LinkedIn message tab is kept in memory; other LinkedIn pages are 
   await sandbox.keepOpenLinkedInComposes();
   assert.deepEqual(kept.at(-1), [11, false]);
   assert.equal(kept.length, 3);
+});
+
+test('F-825: the panel puts the resume in an EMBEDDED form\'s slot, never "no file slot" (Zipline\'s Greenhouse iframe, 2026-10-22)', async () => {
+  const { listeners, sandbox } = load({
+    routes: {
+      '/api/apply-token': okToken,
+      '/api/apply-resume': () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(4) }),
+    },
+  });
+  const targets = [];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    targets.push(o.target);
+    if (o.target.allFrames) {
+      assert.equal(o.args[3], true, 'the probe of every frame carries no file');
+      return [
+        { frameId: 0, result: { ok: false, why: 'this page has no file slot' } },
+        { frameId: 7, result: { ok: true, named: true, label: 'Resume/CV' } },
+        { frameId: 9, result: { ok: true, named: false, label: 'Attach' } },
+      ];
+    }
+    return [{ frameId: o.target.frameIds?.[0], result: { ok: true, name: 'Alex Rivera Resume.pdf', label: 'Resume/CV' } }];
+  };
+  const r = await new Promise((resolve) => { listeners.message({ type: 'attach-file', tabId: 4, what: 'resume', id: 'job-1', pageUrl: 'https://www.zipline.com/open-roles/1' }, {}, resolve); });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(JSON.stringify(targets.at(-1).frameIds), '[7]', 'the file goes only to the frame whose slot is named for it');
+  assert.equal(targets.filter((t) => !t.allFrames).length, 1, 'and to one frame only');
+});
+
+test('F-826: a call refused mid-restart waits for the dashboard to come back', async () => {
+  const reachable = [];
+  const { listeners, sandbox } = load({
+    reachable,
+    routes: {
+      '/api/apply-token': okToken,
+      '/api/plan': () => ({ ok: true, status: 200, json: async () => ({ summary: {}, actions: [] }) }),
+    },
+  });
+  sandbox.__jarvisReconnectMs = 50;
+  reachable.push('http://localhost:4300');
+  const first = await ask(listeners, { type: 'plan', fields: [], pageUrl: 'https://x.test/apply' });
+  assert.equal(first.ok, true);
+  reachable.length = 0;                                       // the dashboard restarts…
+  setTimeout(() => reachable.push('http://localhost:4300'), 120);   // …and is back 120 ms later
+  const second = await ask(listeners, { type: 'plan', fields: [], pageUrl: 'https://x.test/apply' });
+  assert.equal(second.ok, true, `the call waited for it: ${JSON.stringify(second)}`);
+});
+
+// ── THE OUTREACH SEND SESSION IN CHROME (2026-10-24) ─────────────────
+// "can we just use chrome": Chrome ignores the debugging port on its main
+// profile, so the Opera fill runs in the extension. One window, a tab each,
+// filled in the page's world; each tab marked sent and closed once its text
+// is in the thread. Nothing presses Send.
+function outreachLoad({ people, gateUrl = null, due = false, sendable = () => true, already = () => false, connectAnswer = () => 'CONNECTED: invitation sent, shows Pending', creditFor = () => 'free message', kind = '', queueFails = 0 } = {}) {
+  const marks = [];
+  const results = [];
+  const notes = [];
+  const credits = [];
+  const h = load({
+    routes: {
+      '/api/apply-token': okToken,
+      // The server says autoSend only for a due schedule ("s1" here, when `due`).
+      '/api/outreach/send-queue': (opts, calls) => {
+        // The queue's first reads fail (F-938): a slow or erroring dashboard.
+        if (calls.filter((c) => /send-queue/.test(c.url)).length <= queueFails) return { ok: false, status: 500, json: async () => ({ error: 'the dashboard was busy' }) };
+        const sid = (calls.at(-1).url.match(/[?&]schedule=(s\d+)/) || [])[1];
+        const asked = !!sid;
+        return { ok: true, status: 200, json: async () => ({ people, stale: [], noResume: [], ...(asked && due ? { autoSend: true, schedule: sid } : {}), ...(asked && kind ? { kind } : {}) }) };
+      },
+      '/api/outreach/mark': (opts) => { marks.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({ contact: {} }) }; },
+      '/api/outreach/schedule/result': (opts) => { results.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({ ok: true }) }; },
+      '/api/outreach/credit': (opts) => { credits.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({ ok: true }) }; },
+    },
+  });
+  const { sandbox } = h;
+  sandbox.chrome.notifications = { create: (...a) => notes.push(a) };
+  sandbox.__jarvisOutreachScale = 0.002;
+  const tabs = new Map();   // tabId -> { url, open, sent, fills }
+  const runs = [];
+  let nextTab = 300;
+  const open = (url) => { const id = nextTab++; tabs.set(id, { url: gateUrl && tabs.size === 0 ? gateUrl : url, open: true, sent: false, fills: 0 }); return id; };
+  sandbox.chrome.windows.create = async (o) => { h.windows.push(o); return { id: 77, tabs: [{ id: open(o.url) }] }; };
+  sandbox.chrome.windows.update = async () => ({});
+  sandbox.chrome.windows.remove = async () => {};
+  sandbox.chrome.tabs.create = async (o) => ({ id: open(o.url), windowId: o.windowId });
+  sandbox.chrome.tabs.get = async (id) => { const t = tabs.get(id); if (!t?.open) throw new Error('No tab with id'); return { id, url: t.url, status: 'complete' }; };
+  sandbox.chrome.tabs.remove = async (id) => { const t = tabs.get(id); if (t) t.open = false; };
+  sandbox.chrome.tabs.update = async (id, o) => { const t = tabs.get(id); if (t && o.url) t.url = o.url; return { id }; };
+  sandbox.chrome.tabs.query = async () => [];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    runs.push({ tabId: o.target.tabId, world: o.world, fn: o.func?.name, args: o.args });
+    const t = tabs.get(o.target.tabId);
+    if (o.func.name === 'fill' && o.args[0].peek) { t.fills += 1; return [{ result: t.fills === 1 ? 'RETRY: opening the full-page compose; run step 1 again' : `OPEN: the compose form is open for ${o.args[0].name}` }]; }
+    if (o.func.name === 'fill') { t.fills += 1; return [{ result: t.fills === 1 ? 'RETRY: opening the full-page compose; run step 1 again' : 'FILLED: subject set, 120 words in the box' }]; }
+    if (o.func.name === 'attach') return [{ result: `ATTACHED: ${o.args[0].as}. Ready for him to press Send` }];
+    if (o.func.name === 'creditLine') return [{ result: creditFor(o.target.tabId, t) }];
+    if (o.func.name === 'connect') { t.connected = (t.connected || 0) + 1; return [{ result: connectAnswer(o.target.tabId) }]; }
+    if (o.func.name === 'sentCheck') return [{ result: t.sent ? { inBox: false, onPage: 2 } : already(o.target.tabId) ? { inBox: true, onPage: 2 } : { inBox: true, onPage: 0 } }];
+    if (o.func.name === 'send') {
+      if (!sendable(o.target.tabId)) return [{ result: 'STOP: the resume does not show as attached' }];
+      if (o.args[0].dry) return [{ result: 'SENDABLE: addressed, subject, text and resume all check out' }];
+      t.sent = true;
+      return [{ result: 'PRESSED: Send' }];
+    }
+    return [{ result: null }];
+  };
+  const until = async (ok, what) => { for (let i = 0; i < 400; i++) { if (ok()) return; await new Promise((r) => setTimeout(r, 10)); } assert.fail(`timed out waiting for ${what}: ${JSON.stringify(sandbox.outreachSummary())}`); };
+  return { ...h, marks, results, notes, credits, tabs, runs, until };
+}
+const pressed = (runs) => runs.filter((x) => x.fn === 'send' && !x.args[0].dry);
+
+const PEOPLE = [
+  { id: 'c1', name: 'Dana Lee', first: 'Dana', profile: 'https://www.linkedin.com/in/dana', subject: 'S1', message: 'Hi Dana,\nI applied for the Mechanical Engineer role on your team last week and wanted to reach out.', as: 'Alex Rivera Resume - A - B.pdf', pdf: 'JVBERi0=' },
+  { id: 'c2', name: 'Sam Roe', first: 'Sam', profile: 'https://www.linkedin.com/in/sam', subject: 'S2', message: 'Hi Sam,\nI applied for the Robotics Engineer role on your team and would value your opinion on my fit.', as: 'Alex Rivera Resume - C - D.pdf', pdf: 'JVBERi0=' },
+];
+
+test('Send all: one focused window, a tab each, filled in the page world with the resume bytes', async () => {
+  const { listeners, sandbox, windows, runs, until } = outreachLoad({ people: PEOPLE });
+  const r = await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+  assert.equal(r.ok, true);
+  await until(() => sandbox.outreachSummary()?.phase === 'watching', 'all tabs filled');
+  assert.equal(windows.at(-1).focused, true, 'its own focused window: the editor wants a focused page');
+  const s = sandbox.outreachSummary();
+  assert.deepEqual(s.entries.map((e) => [e.name, e.status, e.credit]), [['Dana Lee', 'ready', 'free message'], ['Sam Roe', 'ready', 'free message']]);
+  assert.ok(runs.every((x) => x.world === 'MAIN'), 'the page world, as the DevTools route ran it');
+  assert.equal(runs.filter((x) => x.fn === 'fill').length, 4, 'a RETRY (the full-page compose) is run again once loaded');
+  const att = runs.find((x) => x.fn === 'attach');
+  assert.equal(att.args[0].pdf, 'JVBERi0=');
+  assert.equal(att.args[0].as, 'Alex Rivera Resume - A - B.pdf');
+  sandbox.chrome.runtime.sendMessage = undefined;
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+test('F-938: a send queue that fails twice is asked again and the session runs; three misses end it with the reason written down', async () => {
+  {
+    const { listeners, sandbox, until } = outreachLoad({ people: PEOPLE, queueFails: 2 });
+    await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+    await until(() => sandbox.outreachSummary()?.phase === 'watching', 'the third read to fill the tabs');
+    assert.equal(sandbox.outreachSummary().entries.length, 2);
+    sandbox.chrome.runtime.sendMessage = undefined;
+    await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+  }
+  {
+    const { listeners, sandbox, until } = outreachLoad({ people: PEOPLE, queueFails: 3 });
+    await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+    await until(() => sandbox.outreachSummary()?.phase === 'done', 'the session to end');
+    const s = sandbox.outreachSummary();
+    assert.match(String(s.note || ''), /Could not read the send queue from the dashboard after 3 tries .*Nothing was sent/, JSON.stringify(s));
+    assert.equal((s.entries || []).length, 0);
+  }
+});
+
+test('a sent message is marked sent and its tab closes; a closed tab is left unmarked', async () => {
+  const { listeners, sandbox, tabs, marks, until } = outreachLoad({ people: PEOPLE });
+  await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'watching', 'watching');
+  const [a, b] = [...tabs.keys()];
+  tabs.get(a).sent = true;     // he pressed Send on Dana's
+  tabs.get(b).open = false;    // and closed Sam's
+  await until(() => sandbox.outreachSummary()?.phase === 'done', 'the session to end');
+  assert.deepEqual(marks, [{ contactId: 'c1', what: 'sent' }], 'only the one he sent is marked');
+  assert.deepEqual(sandbox.outreachSummary().entries.map((e) => e.status), ['sent', 'closed']);
+  await until(() => tabs.get(a).open === false, 'the sent tab to close');
+});
+
+test('CONNECT AFTER SEND (2026-10-26): the sent tab goes to their profile, presses Connect, then closes', async () => {
+  const { listeners, sandbox, tabs, runs, until } = outreachLoad({ people: PEOPLE });
+  await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'watching', 'watching');
+  const [a, b] = [...tabs.keys()];
+  tabs.get(a).sent = true;
+  await until(() => tabs.get(a).open === false, 'the sent tab to close after connecting');
+  const c = runs.filter((x) => x.fn === 'connect');
+  assert.equal(c.length, 1, 'one connect, only for the one sent');
+  assert.equal(c[0].tabId, a);
+  assert.equal(c[0].args[0].name, 'Dana Lee');
+  assert.equal(tabs.get(a).url, 'https://www.linkedin.com/in/dana', 'on their profile, not the message page');
+  assert.match(sandbox.outreachSummary().entries[0].connect, /^CONNECTED/);
+  assert.equal(tabs.get(b).connected, undefined, 'nobody unsent gets an invitation');
+  tabs.get(b).open = false;
+  await until(() => sandbox.outreachSummary()?.phase === 'done', 'done');
+});
+
+test('a connect that cannot go (their email asked) is reported, and the send still counts', async () => {
+  const { listeners, sandbox, tabs, marks, until } = outreachLoad({ people: PEOPLE.slice(0, 1), connectAnswer: () => 'STOP: LinkedIn wants their email address to connect; not sent' });
+  await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'watching', 'watching');
+  tabs.get([...tabs.keys()][0]).sent = true;
+  await until(() => sandbox.outreachSummary()?.phase === 'done', 'done');
+  const e = sandbox.outreachSummary().entries[0];
+  assert.equal(e.status, 'sent');
+  assert.match(e.connect, /email/);
+  assert.deepEqual(marks, [{ contactId: 'c1', what: 'sent' }]);
+});
+
+test('connect(): a dry run presses nothing, a note is typed only when one is given, and it never touches the message box', () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const src = ctx.JarvisLinkedIn.connect.toString();
+  assert.ok(src.indexOf('if (P.dry) return') > 0 && src.indexOf('if (P.dry) return') < src.indexOf('btn.click()'), 'dry returns before Connect is pressed');
+  // Connect first (2026-10-26): the note path runs only with P.note; without
+  // one, "Send without a note" as before.
+  const noteAt = src.indexOf('if (P.note) return await withNote()');
+  assert.ok(noteAt > src.indexOf('btn.click()'), 'the note path starts after Connect, only with a note');
+  const plain = src.slice(0, src.indexOf('async function withNote')).split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(plain.replace('if (P.note) return await withNote();', ''), /add a note|textarea/i, 'no note typed on the plain path');
+  assert.doesNotMatch(src, /contenteditable|msg-form/i, 'never the message box');
+  assert.match(src, /send without a note/i);
+});
+
+test('CHECK INMAIL (2026-10-26): each message window opened in the background, its line read and stored, nothing typed or sent', async () => {
+  const { listeners, sandbox, tabs, runs, credits, windows, until } = outreachLoad({ people: PEOPLE, creditFor: (id, t) => (t.url.includes('dana') ? 'free message' : 'InMail: Use 1 of 6 InMail credits') });
+  const r = await new Promise((res) => listeners.external({ type: 'outreach-credits' }, { origin: 'http://localhost:4300' }, res));
+  assert.equal(r.ok, true);
+  const done = async () => (await new Promise((res) => listeners.external({ type: 'outreach-credits-status' }, { origin: 'http://localhost:4300' }, res)))?.check?.phase === 'done';
+  for (let i = 0; i < 400 && !(await done()); i++) await new Promise((x) => setTimeout(x, 10));
+  assert.deepEqual(credits.map((c) => [c.contactId, c.credit]), [['c1', 'free message'], ['c2', 'InMail: Use 1 of 6 InMail credits']]);
+  assert.equal(windows.at(-1).focused, false, 'a background window: his screen is left alone');
+  assert.ok(runs.filter((x) => x.fn === 'fill').every((x) => x.args[0].peek === true && x.args[0].message === ''), 'peek only: nothing typed');
+  assert.equal(runs.filter((x) => /^(send|attach|connect)$/.test(x.fn)).length, 0, 'no send, no attachment, no connect');
+  assert.ok([...tabs.values()].filter((t) => /linkedin\.com\/in\//.test(t.url)).every((t) => !t.open), 'every tab closed');
+});
+
+test('fill(peek) returns before the message box is touched', () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const src = ctx.JarvisLinkedIn.fill.toString();
+  const peek = src.indexOf('if (P.peek) return');
+  assert.ok(peek > 0 && peek < src.indexOf('set.call(subj') && peek < src.indexOf("dispatchEvent(new W.ClipboardEvent"), 'peek leaves before the subject or text is set');
+});
+
+test('a LinkedIn sign-in or security check stops the session; nothing past it is opened', async () => {
+  const { listeners, sandbox, runs, until } = outreachLoad({ people: PEOPLE, gateUrl: 'https://www.linkedin.com/checkpoint/challenge/x' });
+  await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'done', 'the stop');
+  const s = sandbox.outreachSummary();
+  assert.match(s.note, /sign in or pass a security check/);
+  assert.equal(runs.length, 0, 'no page code runs on a checkpoint');
+  assert.deepEqual(s.entries.map((e) => e.status), ['failed', 'failed']);
+});
+
+test('only the dashboard can start a send session', async () => {
+  const { listeners } = outreachLoad({ people: PEOPLE });
+  const r = await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'https://evil.example' }, res));
+  assert.equal(r.ok, false);
+});
+
+test('only send() can press Send, and only past its dry-run return', () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const LI = ctx.JarvisLinkedIn;
+  for (const fn of ['fill', 'attach', 'sentCheck', 'creditLine']) {
+    assert.doesNotMatch(LI[fn].toString(), /send-btn|msg-form__send|['"]Send['"]|type="submit"|requestSubmit|\.submit\(/i, fn);
+  }
+  const src = LI.send.toString();
+  assert.ok(src.indexOf('if (P.dry) return') > 0 && src.indexOf('if (P.dry) return') < src.indexOf('btn.click()'), 'a dry run returns before the press');
+});
+
+test('a conversation that already holds a message is never written into (Jordan, 2026-10-27)', () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const LI = ctx.JarvisLinkedIn;
+  const root = (texts) => ({ querySelectorAll: () => texts.map((t) => ({ innerText: t })) });
+  const note = "Hi Sam, I saw you recruit mechanical and manufacturing engineers for Tesla's powertrain teams.";
+  assert.equal(LI.priorMessages([root([])]), 0, 'a new conversation');
+  assert.equal(LI.priorMessages([root(['Hey Jordan, saw your post about Drive Systems'])]), 1, 'he wrote to them by hand');
+  assert.equal(LI.priorMessages([root([note])], note), 0, 'only his own accepted connection note');
+  assert.equal(LI.priorMessages([root([note, 'Thanks Alex, happy to connect!'])], note), 1, 'they wrote back after accepting');
+  const fill = LI.fill.toString();
+  assert.ok(fill.indexOf('const prior =') > 0 && fill.indexOf('const prior =') < fill.indexOf("'paste'"), 'checked before anything is typed');
+});
+
+// A FAKE COMPOSE PAGE, and each page function run from ITS SOURCE ALONE in a
+// context holding nothing but the page (F-951). That is how chrome.scripting
+// and the DevTools route run them; a test that only reads the source let fill()
+// call a helper the page never had, and every message failed on it.
+function composePage({ header, box = '', thread = [], sidebar = [] }) {
+  const doc = { hidden: false };
+  const parse = (sel) => sel.split(',').map((s) => s.trim()).map((s) => {
+    const m = s.match(/^([a-z]+)?(#[\w-]+)?((?:\.[\w-]+)*)(?:\[([\w-]+)(\*=|\^=|=)"([^"]*)"\])?$/i);
+    if (!m) throw new Error(`fake DOM: unsupported selector ${s}`);
+    return { tag: m[1], id: m[2]?.slice(1), cls: (m[3] || '').split('.').filter(Boolean), attr: m[4], op: m[5], val: m[6] };
+  });
+  const matches = (e, sel) => parse(sel).some((q) => {
+    if (q.tag && e.tagName !== q.tag.toUpperCase()) return false;
+    if (q.id && e.attrs.id !== q.id) return false;
+    if (q.cls.some((c) => !e.cls.includes(c))) return false;
+    if (q.attr) {
+      const v = q.attr === 'class' ? e.cls.join(' ') : e.attrs[q.attr];
+      if (v == null) return false;
+      if (q.op === '=' && v !== q.val) return false;
+      if (q.op === '^=' && !String(v).startsWith(q.val)) return false;
+      if (q.op === '*=' && !String(v).includes(q.val)) return false;
+    }
+    return true;
+  });
+  const els = (n) => n.kids.filter((k) => k.tagName).flatMap((k) => [k, ...els(k)]);
+  const texts = (n) => n.kids.flatMap((k) => (k.tagName ? texts(k) : [k]));
+  class El {
+    constructor(tag, { cls = [], ...attrs } = {}, kids = []) {
+      Object.assign(this, { tagName: tag.toUpperCase(), cls, attrs, kids: [], ownerDocument: doc, offsetParent: {}, disabled: false, value: '' });
+      for (const k of kids) this.add(k);
+    }
+    add(k) { const n = typeof k === 'string' ? { nodeValue: k } : k; n.parentElement = this; this.kids.push(n); return this; }
+    get innerText() { return texts(this).map((t) => t.nodeValue).join(' '); }
+    get textContent() { return this.innerText; }
+    get classList() { return { contains: (c) => this.cls.includes(c) }; }
+    get type() { return this.attrs.type || ''; }
+    getAttribute(a) { return this.attrs[a] ?? null; }
+    querySelectorAll(s) { return els(this).filter((e) => matches(e, s)); }
+    querySelector(s) { return this.querySelectorAll(s)[0] || null; }
+    closest(s) { for (let e = this; e && e.tagName; e = e.parentElement) if (matches(e, s)) return e; return null; }
+    focus() {}
+    click() { this.clicked = true; }
+    dispatchEvent(ev) { if (ev.type === 'paste') { this.kids = []; this.add(ev.clipboardData.getData('text/plain')); } return true; }
+  }
+  const subject = new El('input', { name: 'subject' });
+  const body = new El('div', { contenteditable: 'true' }, box ? [box] : []);
+  const btn = new El('button', { cls: ['msg-form__send-btn'], type: 'submit' }, ['Send']);
+  const html = new El('html', {}, [new El('body', {}, [new El('main', {}, [
+    // LinkedIn's conversation list, beside the compose pane: other people's names.
+    ...(sidebar.length ? [new El('div', { cls: ['msg-conversations-container'] }, sidebar.map((n) => new El('div', { cls: ['msg-conversation-listitem'] }, [n])))] : []),
+    new El('h2', {}, [header]),
+    new El('ul', {}, thread.map((t) => new El('div', { cls: ['msg-s-event-listitem__body'] }, [t]))),
+    new El('form', { cls: ['msg-form'] }, [subject, body, btn]),
+  ])])]);
+  Object.assign(doc, {
+    body: html.kids[0],
+    querySelectorAll: (s) => html.querySelectorAll(s),
+    querySelector: (s) => html.querySelector(s),
+    createTreeWalker: (rootEl, _show, filter) => {
+      const list = texts(rootEl).filter((t) => filter.acceptNode(t) === 1);
+      let i = -1;
+      return { nextNode() { i++; this.currentNode = list[i]; return i < list.length ? list[i] : null; }, currentNode: null };
+    },
+    defaultView: {
+      HTMLInputElement: { prototype: Object.defineProperty({}, 'value', { set(v) { this.value = v; } }) },
+      Event: class { constructor(type) { this.type = type; } },
+      ClipboardEvent: class { constructor(type, o) { this.type = type; this.clipboardData = o.clipboardData; } },
+      DataTransfer: class { constructor() { this.d = {}; } setData(k, v) { this.d[k] = v; } getData(k) { return this.d[k]; } },
+    },
+  });
+  const ctx = vm.createContext({ document: doc, location: { pathname: '/messaging/compose/' }, setTimeout, performance, MessageChannel });
+  const run = (fn, P) => vm.runInContext(`(${fn.toString()})`, ctx)(P);
+  return { run, subject, body, btn };
+}
+
+test('fill() and send() work from their own source alone, in a page holding nothing else (F-951)', async () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const LI = ctx.JarvisLinkedIn;
+  const P = { name: 'Dana Reyes', first: 'Dana', subject: 'Applied: Mechanical Engineer', message: 'Hi Dana,\n\nI recently applied for the Mechanical Engineer role on your team and wanted to reach out directly.' };
+  const page = composePage({ header: 'Dana Reyes' });
+  const out = await page.run(LI.fill, P);
+  assert.match(out, /^FILLED/, `fill ran in the bare page: ${out}`);
+  assert.equal(page.subject.value, P.subject);
+  assert.match(page.body.innerText, /I recently applied/);
+  const marks = LI.draftMarks(P.message);
+  assert.match(await page.run(LI.send, { name: P.name, first: P.first, subject: P.subject, marks, dry: true }), /^SENDABLE/);
+  assert.equal(page.btn.clicked, undefined, 'a dry run presses nothing');
+});
+
+test('the addressing check never counts the message box itself (the pasted "Hi Dana" named anyone)', async () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const LI = ctx.JarvisLinkedIn;
+  const msg = 'Hi Dana,\n\nI recently applied for the Mechanical Engineer role on your team and wanted to reach out directly.';
+  const wrong = composePage({ header: 'Sam Okafor', box: msg });
+  wrong.subject.value = 'Applied';
+  const out = await wrong.run(LI.send, { name: 'Dana Reyes', first: 'Dana', subject: 'Applied', marks: LI.draftMarks(msg) });
+  assert.match(out, /not addressed to Dana Reyes/, out);
+  assert.equal(wrong.btn.clicked, undefined, 'Send never pressed for someone else');
+  assert.match(await composePage({ header: 'Sam Okafor', box: msg }).run(LI.fill, { name: 'Dana Reyes', first: 'Dana', subject: 'x', message: msg }), /not addressed/);
+});
+
+test('the addressing check wants the whole name, as whole words, outside conversation lists (review of F-951)', async () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const LI = ctx.JarvisLinkedIn;
+  const msg = 'Hi Dana,\n\nI recently applied for the Mechanical Engineer role on your team and wanted to reach out directly.';
+  const P = (name) => ({ name, first: name.split(' ')[0], subject: 's', message: msg });
+  const sendP = (name) => ({ name, first: name.split(' ')[0], subject: 's', marks: LI.draftMarks(msg) });
+  const both = async (opts, name) => {
+    const fill = await composePage(opts).run(LI.fill, P(name));
+    const page = composePage({ ...opts, box: msg });
+    page.subject.value = 's';
+    const send = await page.run(LI.send, sendP(name));
+    return { fill, send, pressed: page.btn.clicked };
+  };
+  // Another person with the same first name: refused, Send never pressed.
+  let r = await both({ header: 'Dana Lee' }, 'Dana Reyes');
+  assert.match(r.fill, /not addressed/, r.fill);
+  assert.match(r.send, /not addressed/, r.send);
+  assert.equal(r.pressed, undefined);
+  // A short first name inside a longer one ("Al" in "Alex") is not a match.
+  r = await both({ header: 'Alex Chen' }, 'Al Chen');
+  assert.match(r.fill, /not addressed/, r.fill);
+  assert.match(r.send, /not addressed/, r.send);
+  assert.match((await both({ header: 'Al Chen' }, 'Al Chen')).fill, /^FILLED/);
+  // Their name in the conversation list beside a form addressed to someone else.
+  r = await both({ header: 'Sam Okafor', sidebar: ['Dana Reyes', 'Priya Shah'] }, 'Dana Reyes');
+  assert.match(r.fill, /not addressed/, r.fill);
+  assert.match(r.send, /not addressed/, r.send);
+  assert.equal(r.pressed, undefined);
+  // The real recipient still passes when LinkedIn shows more of the name than
+  // was saved: a middle initial, a nickname in brackets, an accent, a suffix.
+  for (const [header, name] of [['Dana M. Reyes', 'Dana Reyes'], ['Wen (Wendy) Zhao', 'Wen Zhao'], ['José Serrano', 'Jose Serrano'], ['Dana Reyes, P.E.', 'Dana Reyes'], ['Riley Morgan', 'Riley T Morgan']]) {
+    r = await both({ header, sidebar: ['Sam Okafor'] }, name);
+    assert.match(r.fill, /^FILLED/, `${name} under "${header}": ${r.fill}`);
+    assert.match(r.send, /^PRESSED/, `${name} under "${header}": ${r.send}`);
+  }
+});
+
+test('his own accepted connection note is not "a conversation"; their reply is (F-951)', async () => {
+  const ctx = {};
+  vm.runInNewContext(readFileSync(path.join(HERE, 'linkedin-page.js'), 'utf-8'), ctx);
+  const LI = ctx.JarvisLinkedIn;
+  const note = 'Hi Dana, I saw your post about the robotics team. I applied, so I would love to connect.';
+  const P = { name: 'Dana Reyes', first: 'Dana', subject: 's', message: 'Thanks for connecting! I recently applied for the Mechanical Engineer role on your team.' };
+  assert.match(await composePage({ header: 'Dana Reyes', thread: [note] }).run(LI.fill, { ...P, connectNote: note }), /^FILLED/);
+  assert.match(await composePage({ header: 'Dana Reyes', thread: [note] }).run(LI.fill, P), /already have a conversation/, 'without the note it counts');
+  assert.match(await composePage({ header: 'Dana Reyes', thread: [note, 'Thanks Alex!'] }).run(LI.fill, { ...P, connectNote: note }), /already have a conversation/);
+});
+
+test('Send all (no schedule) only dry-checks Send, never presses it', async () => {
+  const { listeners, sandbox, runs, until } = outreachLoad({ people: PEOPLE });
+  await new Promise((res) => listeners.external({ type: 'outreach-send' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'watching', 'watching');
+  assert.equal(runs.filter((x) => x.fn === 'send').length, 2, 'every tab is checked');
+  assert.equal(pressed(runs).length, 0);
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+test('a schedule the server does not call due presses nothing', async () => {
+  const { listeners, sandbox, runs, results, until } = outreachLoad({ people: PEOPLE, due: false });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'watching', 'watching');
+  assert.equal(pressed(runs).length, 0);
+  assert.equal(results.length, 0);
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+test('a due schedule sends each tab that checks out, leaves the rest filled, and reports', async () => {
+  let first = null;
+  const { listeners, sandbox, runs, marks, results, notes, until } = outreachLoad({
+    people: PEOPLE, due: true, sendable: (id) => { first ??= id; return id === first; },
+  });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the report');
+  assert.equal(pressed(runs).length, 1, 'only the one whose checks passed');
+  assert.deepEqual(marks, [{ contactId: 'c1', what: 'sent' }]);
+  assert.deepEqual(results[0].sent, ['Dana Lee']);
+  assert.equal(results[0].left[0].name, 'Sam Roe');
+  assert.match(results[0].left[0].note, /not sent automatically: the resume does not show as attached/);
+  assert.equal(notes.length, 1);
+  const s = sandbox.outreachSummary();
+  assert.equal(s.phase, 'watching', 'Sam is still filled and waits for him');
+  assert.deepEqual(s.entries.map((e) => e.status), ['sent', 'ready']);
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+const NOTED = [
+  { id: 'c1', name: 'Dana Lee', first: 'Dana', profile: 'https://www.linkedin.com/in/dana', note: 'Hi Dana, I saw your post about the team. I applied, so I would love to connect.' },
+  { id: 'c2', name: 'Sam Roe', first: 'Sam', profile: 'https://www.linkedin.com/in/sam', note: 'Hi Sam, I saw the roles you posted. I applied, so I would love to connect.' },
+];
+
+test('a due CONNECT schedule sends each invitation with its note, types no message, marks invited, reports', async () => {
+  const { listeners, sandbox, runs, marks, results, until } = outreachLoad({ people: NOTED, due: true, kind: 'connect' });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the report');
+  const connects = runs.filter((x) => x.fn === 'connect');
+  assert.deepEqual(connects.map((x) => x.args[0].note), NOTED.map((p) => p.note), 'each with his own note');
+  assert.equal(runs.filter((x) => ['fill', 'attach', 'send'].includes(x.fn)).length, 0, 'no message is filled or sent');
+  assert.deepEqual(marks, [{ contactId: 'c1', what: 'invited' }, { contactId: 'c2', what: 'invited' }]);
+  assert.deepEqual(results[0].sent, ['Dana Lee', 'Sam Roe']);
+  assert.equal(sandbox.outreachSummary().kind, 'connect');
+});
+
+test('a CONNECT run tries a page that never loaded once more at the end (2026-10-27, 14 of 16 lost)', async () => {
+  let n = 0;
+  const { listeners, marks, results, until } = outreachLoad({ people: NOTED, due: true, kind: 'connect', connectAnswer: () => (n++ === 0 ? 'STOP: the profile never loaded' : 'CONNECTED: invitation with note sent, shows Pending') });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the report');
+  assert.equal(n, 3, 'two people, one of them twice');
+  assert.deepEqual(marks.map((m) => m.contactId).sort(), ['c1', 'c2']);
+  assert.deepEqual([...results[0].sent].sort(), ['Dana Lee', 'Sam Roe']);
+});
+
+test('a CONNECT list the server did not call due presses nothing', async () => {
+  const { listeners, sandbox, runs, marks, until } = outreachLoad({ people: NOTED, due: false, kind: 'connect' });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => sandbox.outreachSummary()?.phase === 'done', 'the end');
+  assert.equal(runs.filter((x) => x.fn === 'connect').length, 0);
+  assert.equal(marks.length, 0);
+});
+
+test('a CONNECT pass stops at a refused invitation box without marking it invited', async () => {
+  const { listeners, marks, results, until } = outreachLoad({ people: NOTED, due: true, kind: 'connect', connectAnswer: (tab) => 'STOP: the invitation box did not offer "Add a note"; nothing sent' });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the report');
+  assert.equal(marks.length, 0);
+  assert.match(results[0].left[0].note, /Add a note/);
+});
+
+test('linkedin-page connect(): the note path and its stops are in the page code', () => {
+  const src = readFileSync(new URL('./linkedin-page.js', import.meta.url), 'utf8');
+  assert.match(src, /if \(P\.note\) return await withNote\(\)/);
+  assert.match(src, /add a \(free \)\?note/);
+  assert.match(src, /the note did not go in as written; nothing sent/);
+  assert.match(src, /note\.length > 300/);
+});
+
+test('a due schedule takes over a session only watching old tabs, and closes its unsent tabs (F-938)', async () => {
+  let first = null;
+  const { listeners, sandbox, tabs, results, until } = outreachLoad({
+    people: PEOPLE, due: true, sendable: (id) => { first ??= id; return id === first; },
+  });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the first report');
+  assert.equal(sandbox.outreachSummary().phase, 'watching');
+  const samTab = [...tabs.entries()].find(([, t]) => t.url.endsWith('/sam') && t.open)?.[0];
+  assert.ok(samTab != null, 'Sam is left filled in his tab');
+  const r = await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's2' }, { origin: 'http://localhost:4300' }, res));
+  assert.ok(!r.already, 'not turned away as already running');
+  assert.equal(tabs.get(samTab).open, false, 'the leftover filled tab is closed, so it cannot be sent twice');
+  await until(() => results.length === 2, 'the second report');
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+test('the SAME schedule opened again keeps the tabs left for him and only reports again (F-951)', async () => {
+  let first = null;
+  const { listeners, sandbox, tabs, results, runs, until } = outreachLoad({
+    people: PEOPLE, due: true, sendable: (id) => { first ??= id; return id === first; },
+  });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the first report');
+  const samTab = [...tabs.entries()].find(([, t]) => t.url.endsWith('/sam') && t.open)?.[0];
+  const pressedBefore = pressed(runs).length;
+  const r = await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  assert.ok(r.already, 'its own finished session: nothing started again');
+  assert.equal(tabs.get(samTab).open, true, 'the tab left for him stays open');
+  assert.equal(sandbox.outreachSummary().phase, 'watching');
+  await until(() => results.length === 2, 'the result sent again');
+  assert.equal(pressed(runs).length, pressedBefore, 'nothing pressed a second time');
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+test('a due schedule never sends a message that is already in the thread', async () => {
+  let first = null;
+  const { listeners, sandbox, runs, results, until } = outreachLoad({
+    people: PEOPLE, due: true, already: (id) => { first ??= id; return id === first; },
+  });
+  await new Promise((res) => listeners.external({ type: 'outreach-send', schedule: 's1' }, { origin: 'http://localhost:4300' }, res));
+  await until(() => results.length === 1, 'the report');
+  assert.equal(pressed(runs).length, 1, 'Sam only');
+  assert.deepEqual(sandbox.outreachSummary().entries.map((e) => e.status), ['careful', 'sent']);
+  await new Promise((res) => listeners.external({ type: 'outreach-stop' }, { origin: 'http://localhost:4300' }, res));
+});
+
+test('F-994: a run that shows nothing for two minutes gives way to the next press; a working one does not', async () => {
+  const { sandbox, listeners } = load({ routes: { '/api/apply-token': okToken, '/api/filled': okJson({ recorded: true }) } });
+  // The gate itself.
+  const now = 10_000_000;
+  assert.equal(sandbox.runGate(null, now), 'start');
+  assert.equal(sandbox.runGate({ since: now - 30_000, lastStep: 0 }, now), 'wait', 'thirty seconds in: still its turn');
+  assert.equal(sandbox.runGate({ since: now - 150_000, lastStep: 0 }, now), 'takeover', 'two and a half minutes and not one step from the page');
+  assert.equal(sandbox.runGate({ since: now - 200_000, lastStep: now - 10_000 }, now), 'wait', 'a run whose page reported ten seconds ago is working');
+  assert.equal(sandbox.runGate({ since: now - 7 * 60_000, lastStep: now - 1000 }, now), 'takeover', 'six minutes is the hard limit, as before');
+  // On a tab: a stalled injection, then a press.
+  let runs = 0;
+  let releaseFirst = null;
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    if (!o.files?.includes('content.js')) return [];
+    runs += 1;
+    if (runs === 1) await new Promise((r) => { releaseFirst = r; });
+    return [{ result: { filled: 1 } }];
+  };
+  await sandbox.arm(7);
+  const first = sandbox.runOnTab(7);
+  await new Promise((r) => setTimeout(r, 20));
+  // The page reports: the run is alive, a press waits.
+  await askFrom(listeners, 7, { type: 'page-live', text: 'filling: First name' });
+  assert.ok(sandbox.runState(7).lastStep > 0, 'the page\'s report marks the run alive');
+  assert.equal(await sandbox.runOnTab(7), null, 'a working run is not disturbed');
+  // Three minutes of silence: the next press takes over.
+  const st = sandbox.runState(7);
+  st.since -= 3 * 60_000; st.lastStep -= 3 * 60_000;
+  const second = sandbox.runOnTab(7);
+  await second;
+  assert.equal(runs, 2, 'the press after a stall injects again');
+  // The stalled run ends late: it must not clear, or re-trigger, anything.
+  releaseFirst();
+  await first;
+  assert.equal(sandbox.runState(7), null, 'the tab is free once the run that replaced it is done');
+});
+
+test('F-1010: a run whose page was replaced gives way at once, and a follow parked behind a silent run is woken (Micron, Eightfold)', async () => {
+  const { sandbox, fire } = load({ routes: { '/api/apply-token': okToken, '/api/filled': okJson({ recorded: true }) } });
+  const now = 10_000_000;
+  assert.equal(sandbox.runGate({ since: now - 5_000, lastStep: now - 1000, pageGoneAt: now - 1000 }, now), 'takeover', 'a new document after the run began: its script is gone');
+  assert.equal(sandbox.runGate({ since: now - 5_000, lastStep: now - 1000, pageGoneAt: now - 9000 }, now), 'wait', 'a document from before the run is the run\'s own page');
+  // On a tab: the first run's injection never comes back; a follow is parked.
+  let runs = 0;
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    if (!o.files?.includes('content.js')) return [];
+    runs += 1;
+    if (runs === 1) await new Promise(() => {});   // the page went away under it
+    return [{ result: { filled: 1 } }];
+  };
+  await sandbox.arm(7);
+  sandbox.runOnTab(7);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(await sandbox.runOnTab(7, { auto: true }), null, 'parked behind the live run');
+  assert.ok(sandbox.chrome.alarms.created.some((a) => a.name === 'jarvis-wake:7' && a.opts.when > Date.now() + 2 * 60_000), 'one alarm, past the stall time');
+  // The page that replaced the run's commits: the next run takes over at once.
+  await fire.committed({ tabId: 7, frameId: 0, url: 'https://careers.micron.com/careers/apply?pid=1' });
+  assert.ok(sandbox.runState(7).pageGoneAt >= sandbox.runState(7).since);
+  await sandbox.runOnTab(7, { auto: true });
+  assert.equal(runs, 2, 'the run on the new page went in without waiting two minutes');
+  // The alarm: a tab with no run left is followed again; a tab not armed never is.
+  assert.equal(await sandbox.wakeParked(7), true);
+  assert.equal(await sandbox.wakeParked(8), false, 'a tab that is not armed is never followed');
+});
+
+test('F-990: the worker answers whether a tab is still armed, so a run stops once he disarms it', async () => {
+  const { sandbox, listeners } = load({ routes: { '/api/apply-token': okToken } });
+  await sandbox.arm(7, { id: 'job-7' });
+  const r1 = await askFrom(listeners, 7, { type: 'still-armed' });
+  assert.equal(r1.armed, true);
+  await sandbox.disarm(7);
+  const r2 = await askFrom(listeners, 7, { type: 'still-armed' });
+  assert.equal(r2.armed, false, 'disarmed: the run stops at its next step');
+});
+
+test('F-1002: a confirmation page in a tab Jarvis filled, armed or not, gets a look that fills nothing', async () => {
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken, '/api/filled': okJson({ recorded: true }) } });
+  // Never filled here: no look.
+  assert.equal(sandbox.lookForConfirmation(9, 'https://job-boards.greenhouse.io/rebuild/jobs/1/confirmation'), false);
+  // Filled here an hour ago, disarmed since: a confirmation URL gets a look; any other page does not.
+  sandbox.filledAt.set(9, Date.now() - 60 * 60_000);
+  assert.equal(sandbox.lookForConfirmation(9, 'https://job-boards.greenhouse.io/rebuild/jobs/1'), false, 'not a confirmation page');
+  assert.equal(sandbox.lookForConfirmation(9, 'https://job-boards.greenhouse.io/rebuild/jobs/1/confirmation'), true);
+  // Too long ago: no look.
+  sandbox.filledAt.set(9, Date.now() - 3 * 60 * 60_000);
+  assert.equal(sandbox.lookForConfirmation(9, 'https://job-boards.greenhouse.io/rebuild/jobs/1/confirmation'), false);
+  // An armed tab follows by itself: no second look.
+  await sandbox.arm(10);
+  sandbox.filledAt.set(10, Date.now());
+  assert.equal(sandbox.lookForConfirmation(10, 'https://job-boards.greenhouse.io/x/jobs/2/confirmation'), false);
+});
+
+test('F-994 review: a slow run that only says it is alive is left alone, and each run hands the page its token', async () => {
+  const { sandbox, listeners } = load({ routes: { '/api/apply-token': okToken, '/api/filled': okJson({ recorded: true }) } });
+  let runs = 0; let release = null; const ctxs = [];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    if (o.func && o.args) ctxs.push(o.args[0]);
+    if (!o.files?.includes('content.js')) return [];
+    runs += 1;
+    if (runs === 1) await new Promise((r) => { release = r; });
+    return [{ result: { filled: 1 } }];
+  };
+  await sandbox.arm(7);
+  const first = sandbox.runOnTab(7);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.match(String(ctxs.find((c) => c && 'runToken' in c)?.runToken || ''), /^7-\d+-/, 'the page gets the run\'s token');
+  // Three minutes in, a resume build: nothing typed, but the run keeps saying it is alive.
+  const st = sandbox.runState(7);
+  st.since -= 3 * 60_000;
+  await askFrom(listeners, 7, { type: 'run-alive' });
+  assert.equal(await sandbox.runOnTab(7), null, 'a slow but living run is not taken over');
+  assert.equal(runs, 1);
+  release(); await first;
+});
+
+test('F-1013 #1: "APPLY NOW" REUSES A TAB ONLY WHEN IT SHOWS THAT POSTING, never one whose address merely starts the same', async () => {
+  const { sandbox, listeners, created } = load({ routes: { '/api/apply-token': okToken } });
+  const has = sandbox.tabShowsPosting;
+  assert.equal(has('https://x.test/jobs/12345', 'https://x.test/jobs/1234'), false, 'another number');
+  assert.equal(has('https://x.test/job/mechanical-engineer-ii', 'https://x.test/job/mechanical-engineer'), false, 'another slug');
+  assert.equal(has('https://x.test/jobs/1234/apply', 'https://x.test/jobs/1234'), true, 'its own apply page');
+  assert.equal(has('https://x.test/jobs/1234?gh_src=abc', 'https://x.test/jobs/1234'), true, 'with tracking parameters');
+  assert.equal(has('https://x.test/jobs/1234/', 'https://x.test/jobs/1234'), true);
+  assert.equal(has('https://boards.greenhouse.io/acme/jobs/111?gh_jid=111', 'https://boards.greenhouse.io/acme/jobs/111?gh_jid=222'), false, 'two requisitions of one kind');
+
+  // The dashboard's open: a sibling tab is NOT armed; a new tab is opened instead.
+  sandbox.chrome.tabs.query = async () => [{ id: 5, url: 'https://x.test/jobs/12345' }];
+  sandbox.chrome.scripting.executeScript = async () => [{ result: { filled: 0 } }];
+  const opened = await new Promise((resolve) => { listeners.external({ type: 'open', url: 'https://x.test/jobs/1234', id: 'job-1234' }, { origin: 'http://localhost:4300' }, resolve); });
+  assert.equal(opened.ok, true);
+  assert.notEqual(opened.reused, true, 'the other posting\'s tab is left alone');
+  assert.equal(created.at(-1)?.url, 'https://x.test/jobs/1234');
+  assert.equal(await sandbox.armedState(5), null, 'and never armed with this job');
+});
+
+test('F-1013 #5: AN ARMED TAB HE TAKES TO ANOTHER SITE HIMSELF STANDS DOWN; links and sign-in on the way do not', async () => {
+  const { sandbox, fire } = load({ routes: { '/api/apply-token': okToken } });
+  const POST = 'https://www.tesla.com/careers/search/job/apply/271234';
+  await sandbox.arm(8, { id: 'job-8' });
+  await fire.committed({ tabId: 8, frameId: 0, url: POST, transitionType: 'link' });
+  await fire.committed({ tabId: 8, frameId: 0, url: 'https://accounts.google.com/signin/v2', transitionType: 'link' });
+  await fire.committed({ tabId: 8, frameId: 0, url: POST, transitionType: 'link' });
+  assert.ok(await sandbox.armedState(8), 'an application moving between hosts by links stays armed');
+  await fire.committed({ tabId: 8, frameId: 0, url: POST, transitionType: 'reload' });
+  await fire.committed({ tabId: 8, frameId: 0, url: POST, transitionType: 'typed' });
+  assert.ok(await sandbox.armedState(8), 'a reload, or the same site typed again, too');
+  await fire.committed({ tabId: 8, frameId: 0, url: 'https://news.example.com/', transitionType: 'typed' });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(await sandbox.armedState(8), null, 'another site typed into the tab: no longer his application');
+
+  await sandbox.arm(9, { id: 'job-9' });
+  await fire.committed({ tabId: 9, frameId: 0, url: POST, transitionType: 'link' });
+  await fire.committed({ tabId: 9, frameId: 0, url: 'https://mail.example.com/', transitionType: 'auto_bookmark' });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(await sandbox.armedState(9), null, 'a bookmark, too');
+});
+
+// S2 (2026-11-07): a frame that keeps this load's scripts is not sent them again.
+const probeReply = (frames) => frames.map(([frameId, url, resident]) => ({ frameId, result: { jarvisProbe: 1, resident, url } }));
+
+test('S2: which frames get the files, which only a resume, which nothing', () => {
+  const { sandbox } = load();
+  const plan = sandbox.framePlan(probeReply([
+    [0, 'https://acme.wd1.myworkdayjobs.com/en-US/careers/job/x/apply', true],
+    [4, 'https://boards.greenhouse.io/embed/job_app?for=acme', false],
+    [6, 'https://www.google.com/recaptcha/api2/anchor?k=1', false],
+    [7, 'https://widget.intercom.io/widget/abc', false],
+    [8, 'https://consent.cookiebot.com/xyz', true],
+  ]), 'L1');
+  assert.deepEqual(JSON.parse(JSON.stringify(plan)), { resume: [0, 8], files: [4, 7], skipped: [6] }, 'chat and cookie frames still get the scripts; a captcha never');
+  assert.equal(sandbox.framePlan('capped', 'L1'), null, 'a capped probe: everything, as before');
+  assert.equal(sandbox.framePlan([{ result: { filled: 1 } }], 'L1'), null, 'a reply that is not a probe');
+  assert.equal(sandbox.framePlan([{ frameId: 0, result: { jarvisProbe: 1, resident: true, url: 'https://x.test/' } }], null), null, 'no load id: nothing to match a resident against');
+  assert.equal(sandbox.framePlan(probeReply([[0, 'https://www.google.com/recaptcha/api2/anchor', false]]), 'L1').files[0], 0, 'the top frame is never skipped');
+});
+
+// The calls inject() makes, told apart by target: the probe goes to every frame,
+// a resume and the files go to named frames.
+const isProbe = (o) => !!o.func && !!o.target.allFrames;
+const isResume = (o) => !!o.func && !!o.target.frameIds;
+const isFiles = (o) => !!o.files?.includes('content.js');
+const framesOf = (o) => [...(o.target.frameIds || [])];
+
+test('S2: a press re-sends no files to a frame that holds them, and the new frame still gets all four', async () => {
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken } });
+  const calls = [];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    calls.push(o);
+    if (isProbe(o)) return probeReply([[0, 'https://jobs.ashbyhq.com/acme/1/application', true], [3, 'https://jobs.ashbyhq.com/embed', false], [5, 'https://www.youtube.com/embed/v', false]]);
+    if (o.world === 'MAIN') return [];
+    if (isResume(o)) return [{ frameId: 0, result: { filled: 2, via: 'resume' } }];
+    return [{ frameId: 3, result: { filled: 1, via: 'files' } }];
+  };
+  const out = await sandbox.inject(7, { loadId: 'L1', runToken: 'tok-1' });
+  const files = calls.filter(isFiles);
+  assert.equal(files.length, 1);
+  assert.deepEqual(framesOf(files[0]), [3], 'only the frame without them');
+  const resumes = calls.filter(isResume);
+  assert.equal(resumes.length, 1);
+  assert.deepEqual(framesOf(resumes[0]), [0]);
+  assert.equal(resumes[0].args[0].runToken, 'tok-1', 'the resume carries this run\'s own context');
+  assert.ok(!calls.some((c) => framesOf(c).includes(5) && (isFiles(c) || isResume(c))), 'the video frame gets nothing');
+  assert.deepEqual(out.map((r) => r.via).sort(), ['files', 'resume']);
+});
+
+test('S2: a probe without frame ids still injects everywhere', async () => {
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken } });
+  const calls = [];
+  sandbox.chrome.scripting.executeScript = async (o) => { calls.push(o); return [{ result: { filled: 1 } }]; };
+  await sandbox.inject(7, { loadId: 'L1' });
+  assert.equal(calls.find(isFiles).target.allFrames, true, 'not a full answer: every frame, as before');
+});
+
+test('S2 review: a resume group with a frame gone gets the files, frame by frame, instead of nothing', async () => {
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken } });
+  const calls = [];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    calls.push(o);
+    if (isProbe(o)) return probeReply([[0, 'https://a.test/apply', true], [4, 'https://a.test/embed', true], [2, 'https://a.test/frame', false]]);
+    if (o.world === 'MAIN') return [];
+    if (isResume(o)) throw new Error('Frame with ID 4 was removed.');   // Chrome rejects the whole call
+    if (framesOf(o).includes(4)) throw new Error('Frame with ID 4 was removed.');
+    return framesOf(o).map((frameId) => ({ frameId, result: { filled: 1, frameId } }));
+  };
+  const out = await sandbox.inject(7, { loadId: 'L1' });
+  const sent = calls.filter(isFiles).map(framesOf);
+  assert.ok(sent.some((f) => f.length === 1 && f[0] === 0), 'frame 0, still there, got the files on its own');
+  assert.ok(sent.some((f) => f.length === 1 && f[0] === 4), 'the gone frame was tried alone');
+  assert.deepEqual(out.map((r) => r.frameId).sort(), [0, 2], 'every frame still there answered');
+});
+
+test('S2 review: a frame that navigated (no resident copy now) answers no-resume and gets the files', async () => {
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken } });
+  const calls = [];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    calls.push(o);
+    if (isProbe(o)) return probeReply([[0, 'https://a.test/apply', true], [6, 'https://a.test/step', true]]);
+    if (o.world === 'MAIN') return [];
+    // What RESUME returns in each frame: frame 6 moved to a new document after the probe.
+    if (isResume(o)) return [{ frameId: 0, result: { filled: 2, frameId: 0 } }, { frameId: 6, result: 'no-resume' }];
+    return framesOf(o).map((frameId) => ({ frameId, result: { filled: 5, frameId } }));
+  };
+  const out = await sandbox.inject(7, { loadId: 'L1' });
+  assert.deepEqual(calls.filter(isFiles).map(framesOf), [[6]]);
+  assert.deepEqual(out.map((r) => r.frameId).sort(), [0, 6]);
+  assert.ok(!out.some((r) => r.result === 'no-resume'), 'a no-resume is never reported as the frame\'s answer');
+  // RESUME itself, as Chrome runs it in a frame: no resident → 'no-resume'; a resident → its answer, given this run's context.
+  assert.equal(vm.runInContext('RESUME({ runToken: "t" })', sandbox), 'no-resume');
+  let gotCtx = null;
+  sandbox.__jarvisResumeRun = (c) => { gotCtx = c; return { filled: 1 }; };
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('RESUME({ runToken: "t2" })', sandbox))), { filled: 1 });
+  assert.equal(gotCtx.runToken, 't2');
+  delete sandbox.__jarvisResumeRun;
+});
+
+test('S2 review: an iframe added between the probe and the inject still gets the files', async () => {
+  const { sandbox } = load({ routes: { '/api/apply-token': okToken } });
+  const calls = [];
+  sandbox.chrome.webNavigation.getAllFrames = async () => [
+    { frameId: 0, url: 'https://a.test/apply' }, { frameId: 3, url: 'https://a.test/x' },
+    { frameId: 9, url: 'https://boards.greenhouse.io/embed/job_app?for=a' },   // new
+    { frameId: 11, url: 'https://www.google.com/recaptcha/api2/anchor' },      // new, but a captcha
+    { frameId: 12, url: 'about:blank' },                                       // new, nothing to fill
+  ];
+  sandbox.chrome.scripting.executeScript = async (o) => {
+    calls.push(o);
+    if (isProbe(o)) return probeReply([[0, 'https://a.test/apply', true], [3, 'https://a.test/x', false]]);
+    if (o.world === 'MAIN') return [];
+    return framesOf(o).map((frameId) => ({ frameId, result: { filled: 1, frameId } }));
+  };
+  const out = await sandbox.inject(7, { loadId: 'L1' });
+  assert.deepEqual(calls.filter(isFiles).map(framesOf).sort(), [[3], [9]]);
+  assert.deepEqual(out.map((r) => r.frameId).sort((a, b) => a - b), [0, 3, 9]);
+});
+
+test('F-1031: the panel\'s PDF link carries a ticket for that one file, asked once and reused until it nears its end', async () => {
+  let tickets = 0;
+  const { listeners, calls } = load({ routes: {
+    '/api/apply-token': okToken,
+    '/api/file-ticket': () => { tickets += 1; return { ok: true, status: 200, json: async () => ({ ticket: `T${tickets}`, ttlMs: 30 * 60_000 }) }; },
+  } });
+  const a = await ask(listeners, { type: 'file-url', id: 'job-1', inline: true });
+  assert.equal(a.ok, true);
+  const u = new URL(a.url);
+  assert.equal(u.pathname, '/api/apply-resume');
+  assert.deepEqual([u.searchParams.get('id'), u.searchParams.get('inline'), u.searchParams.get('ticket')], ['job-1', '1', 'T1']);
+  const post = calls.find((c) => c.url.endsWith('/api/file-ticket'));
+  assert.equal(post.method, 'POST');
+  assert.equal(post.headers['x-jarvis-token'], TOKEN, 'asked with the extension\'s token');
+  assert.deepEqual(JSON.parse(post.body), { id: 'job-1', what: 'resume' }, 'for this job\'s resume only');
+  const again = await ask(listeners, { type: 'file-url', id: 'job-1', inline: true });
+  assert.equal(new URL(again.url).searchParams.get('ticket'), 'T1', 'the same file reuses its ticket');
+  const b = await ask(listeners, { type: 'file-url', id: 'job-1', what: 'letter', inline: true });
+  assert.equal(new URL(b.url).pathname, '/api/cover-letter-pdf');
+  assert.equal(new URL(b.url).searchParams.get('ticket'), 'T2', 'the letter has its own');
+  assert.equal(tickets, 2);
+});
+
+test('F-1031: a dashboard that gives no ticket still gets the plain link', async () => {
+  const { listeners } = load({ routes: { '/api/apply-token': okToken } });
+  const a = await ask(listeners, { type: 'file-url', id: 'job-2', inline: true });
+  assert.equal(a.ok, true);
+  assert.equal(new URL(a.url).searchParams.get('ticket'), null);
+});
+
+test('S6: a run\'s timings reach the dashboard as phase names and ms only, with the worker\'s own setup', async () => {
+  let filled = null;
+  const { sandbox, listeners } = load({ routes: {
+    '/api/apply-token': okToken,
+    '/api/filled': (opts) => { filled = JSON.parse(opts.body); return { ok: true, status: 200, json: async () => ({ recorded: true }) }; },
+  } });
+  await sandbox.arm(3, { id: 'job-3', company: 'Jabil' });
+  await askFrom(listeners, 3, { type: 'filled', result: { filled: 5, pageUrl: 'https://jabil.wd1.myworkdayjobs.com/x/apply',
+    timings: { total: 7912, discover: 640.4, plan: 1210, dropdowns: 3204, waits: 2100, slowest: 'dropdowns', company: 'Jabil', answer: 'Yes', pageUrl: 'https://x' } } });
+  assert.ok(filled?.timings, 'the timings travel with the report');
+  assert.equal(filled.timings.discover, 640, 'whole ms');
+  assert.equal(filled.timings.slowest, 'dropdowns');
+  assert.ok(!('company' in filled.timings) && !('answer' in filled.timings) && !('pageUrl' in filled.timings), JSON.stringify(filled.timings));
+  // The whitelist itself.
+  assert.deepEqual(JSON.parse(JSON.stringify(sandbox.runTimingsFor({ total: 1000, plan: 900, slowest: 'plan', label: 'Sponsorship?' }, 250))), { total: 1000, inject: 250, plan: 900, slowest: 'plan' });
+  assert.equal(sandbox.runTimingsFor(null, 5), null);
+  assert.equal(sandbox.runTimingsFor({ slowest: 'nope' }, undefined), null);
+  // S5: the waits by line travel too, numbers only; the version as digits and dots.
+  const w = JSON.parse(JSON.stringify(sandbox.runTimingsFor({ total: 1000, waits: 800, waitSites: [[2941, 700, 300, 2, 0], [12, 'Acme', 1, 1, 0], [3, 1]], v: '1.150.14' }, 0)));
+  assert.deepEqual(w.waitSites, [[2941, 700, 300, 2, 0]]);
+  assert.equal(w.v, '1.150.14');
+  assert.equal(sandbox.runTimingsFor({ total: 5, v: 'https://x' }, 0).v, undefined);
+});
+
+// THE FILL STOPS ON A POSTING THE VISA GATE BARS (his "1. ye", 2026-11-12).
+// Every way into a fill — the toolbar, the dashboard, the next page of an
+// armed tab — goes through runOnTab, and only the panel's Fill anyway lets
+// that one posting through.
+function barredWorld({ stopFor = { 'job-us': ['Requires U.S. citizenship — "Must be a U.S. citizen."'] }, panel = null } = {}) {
+  const urls = new Map();
+  const jobAt = new Map();   // url -> job id
+  const fills = [];
+  const world = load({
+    routes: {
+      '/api/apply-token': okToken,
+      '/api/filled': okJson({ recorded: true }),
+      '/api/fill-anyway': okJson({ recorded: true }),
+      '/api/panel': panel || ((opts, calls) => {
+        const u = new URL(calls.at(-1).url);
+        const id = jobAt.get(u.searchParams.get('pageUrl'));
+        if (!id) return { ok: false, status: 404, json: async () => ({ error: 'this page is not a posting in your store' }) };
+        return { ok: true, status: 200, json: async () => ({ job: { id, title: 'Engineer', company: 'Co' }, fit: {}, application: null, stop: { reasons: stopFor[id] || [], read: true } }) };
+      }),
+    },
+  });
+  world.sandbox.chrome.tabs.get = async (id) => ({ id, url: urls.get(id) || '', title: '', status: 'complete', windowId: 1 });
+  world.sandbox.chrome.scripting.executeScript = async (o) => {
+    if (o.files?.includes('content.js')) fills.push(o.target.tabId);
+    return [{ result: o.files ? { filled: 1 } : '' }];
+  };
+  return { ...world, urls, jobAt, fills };
+}
+
+test('FILL STOP: the toolbar press on a citizens-only posting writes nothing, and says why on the icon', async () => {
+  const { sandbox, listeners, urls, jobAt, fills, badges, titles } = barredWorld();
+  urls.set(40, 'https://jobs.example.com/us-only'); jobAt.set('https://jobs.example.com/us-only', 'job-us');
+  await sandbox.press({ id: 40, url: urls.get(40) });
+  assert.equal(fills.length, 0, 'content.js was never put into the page');
+  assert.equal(badges.at(-1), '!');
+  assert.match(titles.at(-1), /Not filled: this posting is blocked — Requires U\.S\. citizenship/);
+  const state = await new Promise((resolve) => { listeners.message({ type: 'panel-state', tabId: 40 }, {}, resolve); });
+  assert.equal(state.stopped?.id, 'job-us', 'the panel is told this tab stopped, and on which posting');
+  assert.match(state.stopped.reasons[0], /Must be a U\.S\. citizen/);
+});
+
+test('FILL STOP: the panel\'s Fill anyway fills it, and keeps filling its next pages; a different posting in the tab stops again', async () => {
+  const { sandbox, listeners, fire, urls, jobAt, fills, calls } = barredWorld({ stopFor: { 'job-us': ['Requires U.S. citizenship'], 'job-us2': ['Will not sponsor'] } });
+  const A = 'https://jobs.example.com/us-only';
+  urls.set(41, A); jobAt.set(A, 'job-us');
+  await sandbox.press({ id: 41, url: A });
+  assert.equal(fills.length, 0);
+  const pressed = await new Promise((resolve) => { listeners.message({ type: 'press', tabId: 41, blockedAnyway: { id: 'job-us', reasons: ['Requires U.S. citizenship'] } }, {}, resolve); });
+  assert.equal(pressed.ok, true);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(fills.length, 1, 'his Fill anyway fills the page');
+  assert.ok(calls.some((c) => c.url.includes('/api/fill-anyway')), 'and the choice is recorded');
+  const st = await sandbox.armedState(41);
+  assert.equal(st.anyway, 'job-us');
+  // The application's next page is the same posting: it fills without asking again.
+  const A2 = 'https://jobs.example.com/us-only/apply';
+  urls.set(41, A2); jobAt.set(A2, 'job-us');
+  await fire.updated(41, { status: 'complete' }, A2);
+  await settleFollow();
+  assert.equal(fills.length, 2, 'the next page of the same posting fills');
+  // A different barred posting pasted into the tab is a new question.
+  const B = 'https://jobs.example.com/no-sponsor';
+  urls.set(41, B); jobAt.set(B, 'job-us2');
+  await fire.updated(41, { status: 'complete' }, B);
+  await settleFollow();
+  assert.equal(fills.length, 2, 'another barred posting is not filled on the first one\'s Fill anyway');
+});
+
+test('FILL STOP: the dashboard cannot say "fill anyway" — its press and open go through the stop', async () => {
+  const { sandbox, listeners, fire, urls, jobAt, fills } = barredWorld();
+  const url = 'https://jobs.example.com/us-only';
+  jobAt.set(url, 'job-us');
+  const ext = (msg) => new Promise((resolve) => { listeners.external(msg, { origin: 'http://localhost:4300' }, resolve); });
+  const opened = await ext({ type: 'open', url, id: 'job-us', company: 'Co', title: 'Engineer', blockedAnyway: { id: 'job-us' }, anyway: 'job-us' });
+  assert.equal(opened.ok, true);
+  urls.set(21, url);
+  await fire.updated(21, { status: 'complete' }, url);
+  await settleFollow();
+  assert.equal(fills.length, 0, 'the posting the dashboard opened is not filled');
+  assert.ok(!(await sandbox.armedState(21))?.anyway, 'and nothing the dashboard sent let it through');
+  urls.set(42, url);
+  await ext({ type: 'arm', tabId: 42, id: 'job-us' });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(fills.length, 0, 'nor the tab it armed');
+});
+
+test('FILL STOP: silence is not a bar — an ordinary posting, a page the store does not know, and a dashboard that is down all fill', async () => {
+  const ok = barredWorld();
+  ok.urls.set(43, 'https://jobs.example.com/fine'); ok.jobAt.set('https://jobs.example.com/fine', 'job-fine');
+  await ok.sandbox.press({ id: 43, url: ok.urls.get(43) });
+  assert.equal(ok.fills.length, 1, 'no reasons: filled');
+  ok.urls.set(44, 'https://jobs.example.com/unknown');
+  await ok.sandbox.press({ id: 44, url: ok.urls.get(44) });
+  assert.equal(ok.fills.length, 2, 'a page the store does not know (404): filled');
+  const down = barredWorld({ panel: () => { throw new Error('connection refused'); } });
+  down.urls.set(45, 'https://jobs.example.com/us-only');
+  await down.sandbox.press({ id: 45, url: down.urls.get(45) });
+  assert.equal(down.fills.length, 1, 'a dashboard that does not answer: filled as before');
+});
+
+test('FILL STOP: the check-only pass is not a fill and is never stopped', async () => {
+  const { sandbox, urls, jobAt, fills, calls } = barredWorld();
+  urls.set(46, 'https://jobs.example.com/us-only'); jobAt.set('https://jobs.example.com/us-only', 'job-us');
+  await sandbox.runOnTab(46, { checkOnly: true });
+  assert.equal(fills.length, 1);
+  assert.ok(!calls.some((c) => c.url.includes('/api/panel')), 'it does not even ask');
+});
+
+test('FILL STOP: in a browser with no side panel (Opera GX) the icon still docks the panel on a barred posting — only the fill is held', async () => {
+  const { sandbox, listeners, urls, jobAt, fills, injected } = barredWorld();
+  const url = 'https://jobs.example.com/us-only';
+  urls.set(47, url); jobAt.set(url, 'job-us');
+  const docked = [];
+  const run = sandbox.chrome.scripting.executeScript;
+  sandbox.chrome.scripting.executeScript = async (o) => { if (String(o.args?.[0] || '').includes('panel.html')) docked.push(o.target.tabId); return run(o); };
+  await listeners.clicked({ id: 47, url, windowId: 3 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(docked, [47], `the panel, with its Fill anyway, is docked into the page: ${JSON.stringify(injected)}`);
+  assert.equal(fills.length, 0, 'and the form is not filled');
+});
+
+test('FILL STOP: Apply opening the form in a new tab carries his Fill anyway for that posting, and only that posting', async () => {
+  const { sandbox, listeners, fire, urls, jobAt, fills } = barredWorld({ stopFor: { 'job-us': ['Requires U.S. citizenship'], 'job-us2': ['Will not sponsor'] } });
+  const A = 'https://jobs.example.com/us-only';
+  urls.set(48, A); jobAt.set(A, 'job-us');
+  await new Promise((resolve) => { listeners.message({ type: 'press', tabId: 48, blockedAnyway: { id: 'job-us', reasons: ['Requires U.S. citizenship'] } }, {}, resolve); });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(fills.length, 1);
+  (await sandbox.armedState(48)).followingAt = Date.now();
+  // Apply opens the form in tab 49.
+  const FORM = 'https://forms.example.com/apply/us-only';
+  urls.set(49, FORM); jobAt.set(FORM, 'job-us');
+  await fire.target({ tabId: 49, sourceTabId: 48 });
+  assert.equal((await sandbox.armedState(49))?.anyway, 'job-us', 'the child tab holds his choice');
+  await fire.updated(49, { status: 'complete' }, FORM);
+  await settleFollow();
+  assert.equal(fills.length, 2, 'the form in the new tab fills');
+  // A different barred posting in that tab is still a new question.
+  const B = 'https://jobs.example.com/no-sponsor';
+  urls.set(49, B); jobAt.set(B, 'job-us2');
+  await fire.updated(49, { status: 'complete' }, B);
+  await settleFollow();
+  assert.equal(fills.length, 2);
+});
+
+for (const [kind, A, B] of [
+  ['Workday requisitions', 'https://acme.wd1.myworkdayjobs.com/en-US/Acme/job/TX/Mechanical-Engineer_R100001', 'https://acme.wd1.myworkdayjobs.com/en-US/Acme/job/TX/Mechanical-Engineer_R100002'],
+  ['URLs with no requisition id', 'https://jobs.example.com/a', 'https://jobs.example.com/b'],
+]) {
+  test(`FILL STOP: Fill anyway on A, then B, then back to A in the same tab — A asks again (${kind})`, async () => {
+    const { listeners, fire, urls, jobAt, fills, sandbox } = barredWorld({ stopFor: { 'job-a': ['Requires U.S. citizenship'], 'job-b': ['Will not sponsor'] } });
+    urls.set(50, A); jobAt.set(A, 'job-a'); jobAt.set(B, 'job-b');
+    await new Promise((resolve) => { listeners.message({ type: 'press', tabId: 50, blockedAnyway: { id: 'job-a', reasons: ['Requires U.S. citizenship'] } }, {}, resolve); });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(fills.length, 1, 'his Fill anyway fills A');
+    urls.set(50, B);
+    await fire.updated(50, { status: 'complete' }, B);
+    await settleFollow();
+    assert.equal(fills.length, 1, 'B is stopped');
+    assert.ok(!(await sandbox.armedState(50)).anyway, 'and A\'s Fill anyway is gone');
+    urls.set(50, A);
+    await fire.updated(50, { status: 'complete' }, A);
+    await settleFollow();
+    assert.equal(fills.length, 1, 'back on A, it asks again');
+  });
+}
+
+test('FILL STOP: a page the store does not know in the middle of the application keeps his Fill anyway', async () => {
+  const { listeners, fire, urls, jobAt, fills } = barredWorld({ stopFor: { 'job-a': ['Requires U.S. citizenship'] } });
+  const A = 'https://jobs.example.com/a';
+  const SIGNIN = 'https://jobs.example.com/login';
+  urls.set(51, A); jobAt.set(A, 'job-a');
+  await new Promise((resolve) => { listeners.message({ type: 'press', tabId: 51, blockedAnyway: { id: 'job-a', reasons: ['x'] } }, {}, resolve); });
+  await new Promise((r) => setTimeout(r, 50));
+  urls.set(51, SIGNIN);
+  await fire.updated(51, { status: 'complete' }, SIGNIN);
+  await settleFollow();
+  assert.equal(fills.length, 2, 'the unknown page fills as before');
+  urls.set(51, A);
+  await fire.updated(51, { status: 'complete' }, A);
+  await settleFollow();
+  assert.equal(fills.length, 3, 'and A still fills on his choice');
+});
+
+test('FILL STOP: a different requisition committed in the tab forgets his Fill anyway at once, before any fill', async () => {
+  const { listeners, fire, urls, jobAt, sandbox } = barredWorld({ stopFor: { 'job-a': ['Requires U.S. citizenship'] } });
+  const A = 'https://acme.wd1.myworkdayjobs.com/en-US/Acme/job/TX/Mechanical-Engineer_R100001';
+  const B = 'https://acme.wd1.myworkdayjobs.com/en-US/Acme/job/TX/Mechanical-Engineer_R100002';
+  urls.set(52, A); jobAt.set(A, 'job-a');
+  await new Promise((resolve) => { listeners.message({ type: 'press', tabId: 52, blockedAnyway: { id: 'job-a', reasons: ['x'] } }, {}, resolve); });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await sandbox.armedState(52)).anyway, 'job-a');
+  await fire.committed({ tabId: 52, frameId: 0, url: B });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal((await sandbox.armedState(52)).anyway, null, 'the reset that drops the old posting drops his choice with it');
 });

@@ -105,18 +105,17 @@ test('a contact is recorded, with the address marked as a guess', async () => {
   assert.equal(body.contact.email_conf, 'guess', 'nothing confirmed the format, and it says so');
 });
 
-// Two people per role since 2026-10-05 (OUTREACH.md: "the per-role cap is now
-// two people"); the third is refused at the route.
-test('THE ROUTE REFUSES A THIRD PERSON FOR THE SAME ROLE', async () => {
+// No per-role cap since 2026-10-26 ("remove all the damn caps"): a third
+// person for the same role is saved like the first.
+test('THE ROUTE TAKES A THIRD PERSON FOR THE SAME ROLE (no cap)', async () => {
   const second = await post('/api/outreach/contact', {
     id: jobId, name: 'Sam Rivers', title: 'Staff Engineer', persona: 'team',
   });
   assert.equal(second.status, 200, 'a second person for the role is allowed');
-  const { status, body } = await post('/api/outreach/contact', {
+  const third = await post('/api/outreach/contact', {
     id: jobId, name: 'Lee Park', title: 'Engineering Manager', persona: 'manager',
   });
-  assert.equal(status, 409, 'refused at the route, not left to the page to remember');
-  assert.match(body.error, /Dana Lee/, 'and it says who is already in flight');
+  assert.equal(third.status, 200, 'and a third');
 });
 
 test('he marks it sent, and the follow-up is not due yet', async () => {
@@ -142,6 +141,19 @@ test('DO NOT CONTACT IS PERMANENT, AND THE ROUTE ENFORCES IT', async () => {
   const again = await post('/api/outreach/contact', { id: jobId, name: 'Kit Moreno', persona: 'alumni' });
   assert.equal(again.status, 409);
   assert.match(again.body.error, /not to be contacted/);
+});
+
+test('A RETIRED LEAD LEAVES THE OUTREACH TAB and comes back unretired (F-977)', async () => {
+  process.env.JARVIS_DATA_DIR = dir;   // the same temp store the server reads
+  const { retireContact, unretireContact } = await import('./contacts.mjs');
+  const names = async () => ((await get('/api/outreach/queue')).body.jobs.find((j) => j.id === jobId)?.contacts || []).map((c) => c.name);
+  assert.ok((await names()).includes('Lee Park'));
+  assert.ok(retireContact('acmetools:leepark', { why: 'stale: test' }));
+  assert.ok(!(await names()).includes('Lee Park'), 'off the tab and every send list built from it');
+  const write = await post('/api/outreach/contact/write', { contactId: 'acmetools:leepark' });
+  assert.equal(write.status, 409, 'no message is written for a retired lead');
+  unretireContact('acmetools:leepark');
+  assert.ok((await names()).includes('Lee Park'), 'unretired, back on the tab');
 });
 
 test('drafting returns a refusal rather than a message when writing is off', async () => {

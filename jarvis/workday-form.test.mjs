@@ -18,7 +18,7 @@
 // Runs headless against a fixture; no network, no ATS, no profile data.
 
 import { chromium } from 'playwright';
-import { fieldManifest, settledFieldIds } from './apply/workday.mjs';
+import { fieldManifest, settledFieldIds, skillList } from './apply/workday.mjs';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -134,5 +134,12 @@ eq('does not return the half-painted step', (await settledFieldIds(page)).sort()
   ['formField-x', 'formField-y']);
 
 await browser.close();
+
+// F-267: the skills box takes many answers; the line is split, never searched whole.
+eq('a comma-joined skills line becomes separate skills',
+  skillList('SolidWorks, GD&T; Python,  , solidworks\nFusion 360'), ['SolidWorks', 'GD&T', 'Python', 'Fusion 360']);
+eq('…and a list stays a list', skillList(['CAD', 'FEA', 'CAD']), ['CAD', 'FEA']);
+eq('…and nothing is nothing', skillList(null), []);
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

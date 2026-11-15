@@ -62,6 +62,7 @@ const FAKE = path.join(DIR, 'claude.mjs');
 writeFileSync(FAKE, `
 const i = process.argv.indexOf('--model');
 const model = i > 0 ? process.argv[i + 1] : '(default)';
+if (model === 'hit') { process.stdout.write("You've hit your 5-hour limit · resets 2am (America/Los_Angeles)"); process.exit(1); }
 if (model === 'spent' || model === '(default)') {
   process.stdout.write(${JSON.stringify(LIMIT)});
   process.exit(1);
@@ -86,7 +87,7 @@ try {
   const out = await run(${JSON.stringify(SHIM)}, ['-p'], { input: '', timeout: 20000 });
   process.stdout.write('OK:' + out.stdout.trim());
 } catch (e) {
-  process.stdout.write('FAIL:' + describeFailure(e, 'claude', 'answer', 20000));
+  process.stdout.write('FAIL:' + describeFailure(e, 'claude', 'answer', 20000) + '|MSG:' + e.message);
 }
 `);
 
@@ -106,6 +107,18 @@ test('WHEN EVERY MODEL IS SPENT IT FAILS — it never returns the refusal as the
   assert.match(stdout, /^FAIL:/);
   assert.match(stdout, /out of credit/);
   assert.doesNotMatch(stdout, /^OK:/);
+});
+
+test('"YOU\'VE HIT YOUR 5-HOUR LIMIT" IS A SPENT MODEL TOO (F-1040)', { skip: process.platform !== 'win32' && 'the .cmd shim is the Windows shape' }, async () => {
+  // The CLI's wording since 2026-11; the old pattern knew only "reached your … limit",
+  // so the 11-11 weekly limit failed 60 reads a run as a bare "exit 1".
+  assert.ok(LIMIT_MESSAGE.test("You've hit your 5-hour limit · resets 2am"));
+  assert.ok(LIMIT_MESSAGE.test("You've hit your weekly limit · resets Nov 12, 10pm"));
+  const moved = await askWith('hit,sonnet');
+  assert.match(moved.stdout, /^OK:answered by sonnet$/, 'a spent first model moves to the next');
+  const { stdout } = await askWith('hit');
+  assert.match(stdout, /\|MSG:every model is out of credit \(You've hit your 5-hour limit · resets 2am/,
+    'the last model spent says so, with the CLI\'s own sentence, so the daily search stops');
 });
 
 test('the spawn carries stdout onto the error', async () => {

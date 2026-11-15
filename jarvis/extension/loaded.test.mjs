@@ -27,6 +27,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { chromium } from 'playwright';
+import { HARNESS_PLAN_URL } from '../harness-pages.mjs';   // F-1029: the live server keeps no log of it
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -193,11 +194,35 @@ test('AN IDENTITY PROVIDER IS NEVER INJECTED, in a real Chrome', async () => {
     status: 200, contentType: 'text/html',
     body: '<h1>Sign in</h1><label for="identifierId">Email or phone</label><input id="identifierId"><input id="first_name"><input id="email"><input id="phone">',
   }));
-  await page.goto('https://accounts.google.com/v3/signin/identifier');
+  // The application sends him there (a link or a redirect), not the address
+  // bar: page.goto commits as "typed", which is him leaving by hand, and since
+  // F-1013 #5 that stands the tab down (the test below).
+  await Promise.all([
+    page.waitForURL('https://accounts.google.com/**'),
+    page.evaluate(() => { location.href = 'https://accounts.google.com/v3/signin/identifier'; }),
+  ]);
   await page.waitForTimeout(2500);
   assert.equal(await page.evaluate(() => document.getElementById('identifierId').value), '');
   assert.equal(await page.evaluate(() => document.getElementById('email').value), '');
   assert.ok(await worker.evaluate((t) => self.armedState(t), id), 'still armed');
+  await page.close();
+});
+
+test('AN ARMED TAB HE TAKES TO ANOTHER SITE BY THE ADDRESS BAR STANDS DOWN (F-1013 #5), in a real Chrome', async () => {
+  // Typing another site into an armed tab got that site's "Sign in with
+  // Google" pressed and its consent boxes clicked. A typed move to a new site
+  // disarms it; nothing is read or typed there.
+  const page = await fixturePage('/__jarvis_fixture_5');
+  const id = await tabIdOf(page);
+  await worker.evaluate((t) => self.arm(t, { started: true }), id);
+  await page.route('https://accounts.google.com/**', (r) => r.fulfill({
+    status: 200, contentType: 'text/html',
+    body: '<h1>Sign in</h1><label for="identifierId">Email or phone</label><input id="identifierId"><input id="email">',
+  }));
+  await page.goto('https://accounts.google.com/v3/signin/identifier');   // commits as "typed"
+  await page.waitForTimeout(2500);
+  assert.equal(await page.evaluate(() => document.getElementById('email').value), '');
+  assert.ok(!(await worker.evaluate((t) => self.armedState(t), id)), 'stood down');
   await page.close();
 });
 
@@ -239,19 +264,20 @@ test('THE TOKEN HANDSHAKE SUCCEEDS — the bug that broke everything', async () 
 test('the worker gets through to a real endpoint, not just the handshake', async () => {
   // Host permissions, the private-network header and the token gate on the
   // other routes all have to line up too.
-  const got = await worker.evaluate(async () => {
+  const got = await worker.evaluate(async (pageUrl) => {
     const t = await (await fetch('http://localhost:4300/api/apply-token')).json();
     const r = await fetch('http://localhost:4300/api/plan', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-jarvis-token': t.token },
       body: JSON.stringify({
-        pageUrl: 'https://boards.greenhouse.io/x/jobs/1',
+        pageUrl,
+        harness: true,
         extensionVersion: chrome.runtime.getManifest().version,
         fields: [{ label: 'First Name', type: 'text', options: [] }],
       }),
     });
     return { status: r.status, plan: await r.json() };
-  });
+  }, HARNESS_PLAN_URL);
   assert.equal(got.status, 200);
   assert.equal(got.plan.actions[0].action, 'fill', 'and the plan must actually decide the field');
   assert.equal(got.plan.staleExtension, null, 'a freshly loaded extension is not stale');

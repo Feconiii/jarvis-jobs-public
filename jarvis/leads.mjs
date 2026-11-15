@@ -100,6 +100,16 @@ export const RESEARCH_TIMEOUT_MS = 12 * 60 * 1000;
 /** Two at once. A third press waits its turn rather than starting a third CLI. */
 export const MAX_CONCURRENT = 2;
 export const MAX_PEOPLE = 5;
+/** Below this many, the run widens once before it reports (F-711). */
+export const MIN_PEOPLE = 2;
+
+/** The second ask: the same brief, told who was found and to widen. */
+export function widerPrompt(prompt, people = []) {
+  const have = people.map((p) => p.name).filter(Boolean);
+  return `${prompt}
+
+A FIRST PASS FOUND ${have.length ? `ONLY ${have.length}: ${have.join(', ')}` : 'NO ONE'}. Search wider before answering: the team's and the org's names, the job family at this company, its recruiters for this kind of role, people who post about this product line, and alumni ties. Do not list anyone already found. Snippets with a name, a current title at this company and a date count, at confidence "low". Same JSON shape.`;
+}
 
 const PERSONAS = new Set(['manager', 'team', 'recruiter', 'alumni']);
 const CONFIDENCE = new Set(['high', 'medium', 'low']);
@@ -169,6 +179,7 @@ Posting text (may be truncated): ${jd || 'not available; open the posting link'}
 
 HOW TO RESEARCH
 Read the posting (it may name a team or reporting line), the company's team/about pages, press releases, conference talks, company blog authors, patents, and public search-engine results for LinkedIn or X profiles and posts. Use search results for LinkedIn; do not try to log in or scrape it. Confirm each person is at the company now, with evidence from 2025 or 2026, and plausibly connected to this role. Return at most 3 people (plus anyone he already saved). Fewer strong people beat a padded list.
+SEARCH BEFORE GIVING UP: LinkedIn profile pages cannot be fetched (they answer HTTP 999), so do not stop when one fails. Before answering with fewer than 2 people, run at least 8 different searches: the team's name with hiring words, the job title with the company, the job family ("<company> manufacturing engineering manager"), the recruiter for this org, ${W.alum}. A search-result snippet that names the person, their title at this company and a date is evidence: use it at confidence "low" when the page itself cannot be read.
 
 CONTACT INFORMATION RULES (strict)
 - Public professional information only: name, current title, a public profile URL (LinkedIn, X, personal or company page).
@@ -606,11 +617,33 @@ export function startLeadRun(job, { description = '', hardBlock = false, known =
           write(jobId, { status: 'failed', startedAt, finishedAt: new Date().toISOString(), error: 'the research came back without a readable answer — press it again' }, dbPath);
           return;
         }
+        // ONE WIDER PASS WHEN THE FIRST ONE GAVE UP EARLY (F-711). Six Amazon
+        // runs returned 1, 1, 1, 0, 1 and 2 people because every profile fetch
+        // answered 999 and the run stopped instead of widening; a hand search
+        // in the same session found three more real leads. A run with fewer
+        // than 2 people asks once more, told who it already has.
+        if ((result.people || []).length < MIN_PEOPLE) {
+          try {
+            const wider = parseLeads(await ask(widerPrompt(prompt, result.people || []), { bin, timeoutMs: RESEARCH_TIMEOUT_MS }));
+            if (wider?.people?.length) {
+              const seen = new Set((result.people || []).map((p) => String(p.name || '').toLowerCase().trim()));
+              result.people = [...(result.people || []), ...wider.people.filter((p) => p.name && !seen.has(String(p.name).toLowerCase().trim()))];
+              result.notes = [result.notes, wider.notes && `Wider search: ${wider.notes}`].filter(Boolean).join(' ');
+              if (!result.hook && wider.hook) { result.hook = wider.hook; result.hook_source = wider.hook_source; }
+            }
+          } catch { /* the first answer stands */ }
+        }
         // Every LinkedIn post the research cites is read at the source: the
         // page's author, words and date replace the snippet's, and the writer
         // of a reshared post joins the leads (F-711/F-708). A failure here
         // keeps the research as it came back.
         if (postFetch) {
+          // Each person's public profile page first (F-783): web search finds
+          // almost no posts, their page usually lists them.
+          try {
+            const { profileCheck } = await import('./profile-posts.mjs');
+            result.people = await profileCheck(result.people, job.company || '', { fetchImpl: postFetch });
+          } catch { /* the research stands */ }
           try {
             const { verifyLeadPosts } = await import('./post-leads.mjs');
             const v = await verifyLeadPosts(result.people, { fetchImpl: postFetch });

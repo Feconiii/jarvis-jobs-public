@@ -48,9 +48,13 @@ export const EXCLUDE = [
   'jarvis/daily-picks.prompt.md', 'jarvis/daily-picks.ps1', 'jarvis/register-daily-picks.ps1',
   // replaced below with the shared instructions
   'CLAUDE.md', 'AGENTS.md',
+  // sections moved out of CLAUDE.md word for word (2026-11-12): they name him, his school and his people
+  'jarvis/COMMANDS.md', 'jarvis/COVERAGE.md',
 ];
 export const EXCLUDE_PREFIX = [
   'jarvis/RESUME-AUDIT-', '.claude/', 'portfolio/', 'graphify-out/', 'share/',
+  // his working sessions' notes: the jobs he filed, applied to and pulled
+  'jarvis/notes/',
   // coursework files at the root
   'ConnectingRod', 'Piston.', 'FEAProject', 'FEA_Project',
 ];
@@ -87,6 +91,9 @@ export const SHARE_FILES = {
   'share/README.md': ['README.md'],
   'share/SETUP.md': ['SETUP.md'],
   'share/jarvis-setup.SKILL.md': ['.claude/skills/jarvis-setup/SKILL.md'],
+  // The LinkedIn MCP in .mcp.json is signed in and has no read-only mode; this
+  // attaches the same read-only, paced guard his own machine-local settings do.
+  'share/claude-settings.json': ['.claude/settings.json'],
 };
 
 export const SCRUB_FILE = 'data/jarvis/public-scrub.json';
@@ -220,6 +227,12 @@ async function main() {
   }
 
   const list = secrets();
+  // Run from a tree without his gitignored files (a worktree, a fresh clone)
+  // the list is empty and the check below would pass on nothing.
+  if (!list.length) {
+    console.error(`Refusing to commit: no contact details to check against were found in ${path.join(ROOT, 'config/profile.yml')} or data/jarvis/apply-profile.yml. Run the export from the checkout that holds them.`);
+    process.exit(1);
+  }
   const bad = [];
   for (const f of texts) {
     const text = readFileSync(path.join(dir, f), 'utf8');

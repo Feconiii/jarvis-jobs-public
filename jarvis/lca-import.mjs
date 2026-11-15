@@ -20,8 +20,8 @@
  */
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { openDb } from './db.mjs';
-import { dbPath as storeDbPath, db as storeDb } from './store.mjs';
+import { db as storeDb, withStoreLock, writeSponsorsFromLinks } from './store.mjs';
+import { filerLinks } from './sponsor-prior.mjs';
 import { aggregateLca, summarise, matchEmployers, verdictFor } from './lca.mjs';
 import { guardArgs } from './cli.mjs';
 import { discovery } from './targeting.mjs';
@@ -35,15 +35,17 @@ const USAGE = `
 
     --dry-run             read and report, write nothing
     --report              show what is already loaded, read nothing
+    --relink              link today's companies to the file already loaded (no file needed)
     --min-certified <n>   only keep employers with at least n certified filings (default 1)
     --help, -h
 `;
-guardArgs({ usage: USAGE, flags: ['--dry-run', '--report', '--min-certified'], valued: ['--min-certified'] });
+guardArgs({ usage: USAGE, flags: ['--dry-run', '--report', '--relink', '--min-certified'], valued: ['--min-certified'] });
 
 const ARGV = process.argv.slice(2);
 const arg = (n, d) => { const i = ARGV.indexOf(`--${n}`); return i === -1 ? d : ARGV[i + 1]; };
 const DRY = ARGV.includes('--dry-run');
 const REPORT = ARGV.includes('--report');
+const RELINK = ARGV.includes('--relink');
 const MIN_CERT = Number(arg('min-certified', 1)) || 1;
 
 const DDL = `
@@ -96,8 +98,13 @@ const LCA_COLUMNS = (() => {
   return [...decl.matchAll(/(?:^|,)\s*([a-z_0-9]+)\s+(?:TEXT|INTEGER)/gm)].map((m) => m[1]);
 })();
 
-function open() {
-  const db = openDb(storeDbPath());
+// THE STORE'S OWN CONNECTION, INSIDE ITS LOCK (review, 2026-11-04). These
+// tables live in jobs.db; creating or rebuilding them from a second handle,
+// outside the lock, is the F-968 pattern.
+async function open() {
+  return withStoreLock(() => openTables(storeDb()));
+}
+function openTables(db) {
   // `CREATE TABLE IF NOT EXISTS` DOES NOTHING TO A TABLE THAT ALREADY EXISTS —
   // db.mjs says so at the top of its own schema and it caught this file too.
   // The first import created `mean_wage`; switching to a median renamed it, and
@@ -122,7 +129,7 @@ function open() {
 
 // ── --report ────────────────────────────────────────────────────────
 if (REPORT) {
-  const db = open();
+  const db = await open();
   const n = db.prepare('SELECT count(*) n FROM lca_employers').get().n;
   if (!n) {
     console.log('\n  Nothing loaded yet.\n  Download LCA_Disclosure_Data_FY2026_Q3.xlsx from');
@@ -145,6 +152,39 @@ if (REPORT) {
   console.log('');
   process.exit(0);
 }
+
+// ── --relink: today's companies against the file already loaded (F-984) ──
+//
+// The links were made once, at the import, when the store held 1,143
+// companies; it holds over 6,000 now and `sponsors_h1b` still covered 58. The
+// loaded employers' keys are all `matchEmployers` needs, so the links and the
+// column are redone without the file. The daily pass runs this weekly.
+if (RELINK) {
+  const db = await open();
+  const loaded = db.prepare('SELECT key, name, certified FROM lca_employers').all();
+  if (!loaded.length) { console.log('  nothing loaded to link against'); process.exit(0); }
+  const companies = storeDb().prepare("SELECT DISTINCT company FROM jobs WHERE company != ''").all().map((r) => r.company);
+  const matches = filerLinks(companies, loaded);
+  const now = new Date().toISOString();
+  const linked = [...matches.values()].filter((m) => m.key).length;
+  if (DRY) { console.log(`  ${companies.length} companies, ${linked} would link (dry run)`); process.exit(0); }
+  const changed = await withStoreLock(() => {
+    // The store's own connection: the lock's transaction is on it (a second
+    // handle on jobs.db would wait on that lock and fail).
+    const link = storeDb().prepare(`INSERT INTO company_lca (company,key,how,at) VALUES (?,?,?,?)
+      ON CONFLICT(company) DO UPDATE SET key=excluded.key, how=excluded.how, at=excluded.at`);
+    for (const [company, m] of matches) link.run(company, m.key || '', m.how || 'none', now);
+    return writeSponsors();
+  });
+  const n = storeDb().prepare('SELECT count(DISTINCT company) n FROM jobs WHERE sponsors_h1b = 1').get().n;
+  console.log(`  relinked ${companies.length} companies: ${linked} to a filer; sponsors_h1b now ${n} companies (${changed.toLocaleString()} postings touched)`);
+  process.exit(0);
+}
+
+/** The column the ranker reads, from the links (both the import and --relink write it). */
+// The store's own writer (F-968), inside the lock this file already holds. A
+// declaration, not a const: --relink above calls it before this line runs.
+function writeSponsors() { return writeSponsorsFromLinks(); }
 
 // ── the import ──────────────────────────────────────────────────────
 const file = ARGV.find((a) => /\.xlsx$/i.test(a));
@@ -209,7 +249,7 @@ if (DRY) {
   process.exit(0);
 }
 
-const db = open();
+const db = await open();
 const now = new Date().toISOString();
 
 const put = db.prepare(`INSERT INTO lca_employers
@@ -229,8 +269,7 @@ const put = db.prepare(`INSERT INTO lca_employers
   -- every employer backwards.
   WHERE excluded.last_decision >= lca_employers.last_decision`);
 
-db.exec('BEGIN');
-try {
+const changed = await withStoreLock(() => {
   for (const s of kept) {
     put.run(s.key, s.name, s.certified, s.denied, s.positions, s.lastDecision,
       s.levels[0], s.levels[1], s.levels[2], s.levels[3], s.modalLevel, s.medianWage,
@@ -239,28 +278,23 @@ try {
   }
   const link = db.prepare(`INSERT INTO company_lca (company,key,how,at) VALUES (?,?,?,?)
     ON CONFLICT(company) DO UPDATE SET key=excluded.key, how=excluded.how, at=excluded.at`);
-  for (const [company, m] of matches) link.run(company, m.key, m.how, now);
-  db.exec('COMMIT');
-} catch (err) { db.exec('ROLLBACK'); throw err; }
+  const loadedNow = db.prepare('SELECT key, name, certified FROM lca_employers').all();
+  for (const [company, m] of filerLinks(companies, loadedNow)) link.run(company, m.key, m.how, now);
+  return writeSponsors();
+});
 
 // ── the column the ranker already reads ─────────────────────────────
 //
 // `sponsors_h1b` was 24 hand-typed booleans. It is now the Department's
 // answer: certified filings, and not so long ago that they have plainly
 // stopped. The ranker's +20 is unchanged; only the truth of the input is.
-const cutoff = `${new Date().getUTCFullYear() - 2}-01-01`;
 // COALESCE, because a link can point at an employer that was not KEPT.
 // `matchEmployers` links on the name alone, and an employer whose every filing
 // was denied or withdrawn has `certified = 0` and is filtered out by
 // --min-certified — so the join finds nothing, the subquery returns NULL, and
 // the column is NOT NULL. That is the correct answer spelled as a crash: a
 // company whose only filings failed does not sponsor.
-const upd = storeDb().prepare(`UPDATE jobs SET sponsors_h1b = COALESCE((
-    SELECT CASE WHEN e.certified > 0 AND e.last_decision >= ? THEN 1 ELSE 0 END
-      FROM company_lca c JOIN lca_employers e ON e.key = c.key
-     WHERE c.company = jobs.company), 0)
-  WHERE company IN (SELECT company FROM company_lca WHERE key != '')`);
-const changed = upd.run(cutoff).changes;
+
 
 const before = 24;
 const nowSponsors = storeDb().prepare('SELECT count(DISTINCT company) n FROM jobs WHERE sponsors_h1b = 1').get().n;

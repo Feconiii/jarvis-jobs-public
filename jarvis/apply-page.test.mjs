@@ -261,6 +261,22 @@ test('a run\'s totals land on the job the tab carries', async () => {
 // submit but jarvis doesnt know … it doesnt require me to mark, coz i almost
 // never press submit in the terminal." The extension had detected the
 // confirmation page all along and kept it to itself (F-446).
+test('F-1013 #2: AN "ALREADY APPLIED" NOTICE ON ANOTHER POSTING\'S PAGE NEVER MARKS THE TAB\'S JOB APPLIED', async () => {
+  // The extension reports that notice as `submitted` too. From the posting's
+  // own page it is the employer's word; from some other page it is not.
+  const { body } = await post('/api/filled', {
+    id: firstId, pageUrl: 'https://jobs.lever.co/other/9f9f9f9f-0000-1111-2222-333344445555',
+    seenOn: 'https://jobs.lever.co/other/9f9f9f9f-0000-1111-2222-333344445555',
+    filled: 0, checked: 0, unanswered: [], alreadyApplied: true,
+    submitted: 'You have already applied for this position',
+  });
+  assert.equal(body.recorded, true);
+  assert.equal(body.submitted, undefined, 'nothing is claimed');
+  const { body: job } = await get(`/api/job?id=${firstId}`);
+  assert.notEqual(job.job.status, 'applied', 'the tab\'s job is not marked applied on another page\'s word');
+  assert.ok(!job.job.apply?.submittedAt);
+});
+
 test('THE CONFIRMATION PAGE MARKS THE JOB APPLIED, WITHOUT HIM TYPING ANYTHING', async () => {
   let { body: before } = await get(`/api/job?id=${firstId}`);
   assert.notEqual(before.job.status, 'applied', 'precondition: not applied yet');
@@ -432,4 +448,89 @@ test('A PAGE IS STILL ITS POSTING WHEN THE URL IS SPELLED DIFFERENTLY', async ()
     assert.equal(plan.status, 200);
     assert.match(plan.body.resumeNote, /Acme Robotics/, `${pageUrl} is the Acme posting`);
   }
+});
+
+test('F-1013 #4: A TITLE-ONLY MATCH TO HIS PICKS NEVER CROSSES EMPLOYERS; a page that names no employer still matches', async () => {
+  // One "Thermal Systems Engineer" pick in his Inbox, at Alpha Robotics.
+  const pick = await post('/api/apply-page', {
+    pageUrl: 'https://jobs.lever.co/alpharobotics/aaaaaaaa-1111-2222-3333-444455556666',
+    posting: { title: 'Thermal Systems Engineer', company: 'Alpha Robotics', description: JD, url: 'https://jobs.lever.co/alpharobotics/aaaaaaaa-1111-2222-3333-444455556666', source: 'jsonld' },
+  });
+  assert.equal(pick.status, 200);
+  await post('/api/action', { ids: [pick.body.id], status: 'inbox' });
+
+  // A Beta Corp form, same title, a board the store has never seen: not Alpha's job.
+  const beta = await post('/api/plan', {
+    pageUrl: 'https://beta-corp.applytojob.example/apply/9001', heading: 'Thermal Systems Engineer',
+    fields: [{ label: 'First Name', type: 'text', options: [] }],
+  });
+  assert.notEqual(beta.body.id, pick.body.id, 'Beta\'s form is never filed as Alpha\'s pick');
+
+  // ADP's one path for every employer names nobody: the pick is still found by its title.
+  const adp = await post('/api/plan', {
+    pageUrl: 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=c0ffee&jobId=77',
+    heading: 'Applying for Thermal Systems Engineer',
+    fields: [{ label: 'First Name', type: 'text', options: [] }],
+  });
+  assert.equal(adp.body.id, pick.body.id, 'the Therm-X case still works');
+});
+
+test('F-1013 #10: WITHOUT A TAB ID, A REPORT FROM POSTING B\'S FORM IS B\'S — never another application on the same board', async () => {
+  const urlB = 'https://jobs.lever.co/acme2/bbbbbbbb-1111-2222-3333-444455556666';
+  const urlA = 'https://jobs.lever.co/acme2/aaaaaaaa-1111-2222-3333-444455556666';
+  const B = await post('/api/apply-page', { pageUrl: urlB, posting: { ...POSTING, company: 'Acme Two', title: 'Controls Engineer', url: urlB } });
+  const A = await post('/api/apply-page', { pageUrl: urlA, posting: { ...POSTING, company: 'Acme Two', title: 'Test Engineer II', url: urlA } });
+  assert.notEqual(A.body.id, B.body.id);
+  // A was prepared last, on the same board: the old rule picked it for B's form.
+  const plan = await post('/api/plan', { pageUrl: `${urlB}/apply`, fields: [{ label: 'First Name', type: 'text', options: [] }] });
+  assert.equal(plan.body.id, B.body.id, 'the plan is for the posting the page is');
+  const sent = await post('/api/filled', { pageUrl: `${urlB}/apply`, seenOn: `${urlB}/apply`, filled: 0, unanswered: [], submitted: 'Thank you for applying to Acme Two!' });
+  assert.equal(sent.body.job, B.body.id, 'the report is filed under B');
+  assert.equal((await get(`/api/job?id=${B.body.id}`)).body.job.status, 'applied');
+  assert.notEqual((await get(`/api/job?id=${A.body.id}`)).body.job.status, 'applied', 'A was never sent');
+});
+
+test('F-1032 review: a company page naming a board posting by gh_jid attaches to it on a cold session — no second row', async () => {
+  const board = {
+    title: 'Senior Widget Engineer', company: 'Zeta Widgets', description: JD,
+    url: 'https://boards.greenhouse.io/zetawidgets/jobs/7012345', location: 'Austin, TX, US', source: 'jsonld',
+  };
+  const first = await post('/api/apply-page', { pageUrl: board.url, posting: board });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.recorded, true);
+  // The company's own page: another title, another host, the same Greenhouse id — only the travelling id joins them.
+  const site = { ...board, title: 'Widget Engineering Lead', url: 'https://www.zetawidgets.com/careers/job?gh_jid=7012345' };
+  const second = await post('/api/apply-page', { pageUrl: site.url, posting: site });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.id, first.body.id, 'the board posting, found by its id under another host');
+  assert.equal(second.body.recorded, false, 'nothing recorded twice');
+});
+
+test('R1: a recorded posting keeps its own JSON-LD pay (annualised), and a past closing date is a caution, never a retirement', async () => {
+  const posting = {
+    title: 'Automation Technician Engineer', company: 'Quill Robotics', description: JD, location: '',
+    url: 'https://jobs.lever.co/quillrobotics/7c7c7c7c-1111-2222-3333-444455556666', source: 'jsonld',
+    salary: { min: 40, max: 48, currency: 'USD', unit: 'HOUR' }, remote: true, applicantLocations: ['United States'],
+    validThrough: '2026-01-15T00:00:00Z',
+  };
+  const { status, body } = await post('/api/apply-page', { pageUrl: posting.url, posting });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.recorded, true);
+  assert.match(body.caution || '', /closed on 2026-01-15 .*nothing was retired/);
+  const { body: job } = await get(`/api/job?id=${body.id}`);
+  assert.equal(job.job.salary?.min, 83200, '40 an hour is 83,200 a year');
+  assert.equal(job.job.salary?.max, 99840);
+  assert.equal(job.job.location, 'Remote (United States)', 'no location in the markup: remote, and where applicants may live');
+  assert.ok(!job.job.goneAt, 'nothing retired on the markup\'s say-so');
+});
+
+test('R1 review: a LinkedIn "sameAs" never names the employer; the page\'s own name stands', async () => {
+  const posting = {
+    title: 'Firmware Test Engineer', company: 'Orbital Widgets', description: JD,
+    url: 'https://jobs.lever.co/orbitalwidgets/9d9d9d9d-1111-2222-3333-444455556666', source: 'jsonld',
+    employerSite: 'https://www.linkedin.com/company/orbital-widgets',
+  };
+  const { status, body } = await post('/api/apply-page', { pageUrl: posting.url, posting });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.company, 'Orbital Widgets');
 });

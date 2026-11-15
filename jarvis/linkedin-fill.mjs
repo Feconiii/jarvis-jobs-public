@@ -24,6 +24,8 @@
  *   node jarvis/linkedin-fill.mjs --subject "…"   override the subject line
  */
 import path from 'node:path';
+import vm from 'node:vm';
+import { readFileSync } from 'node:fs';
 import { guardArgs } from './cli.mjs';
 import { fileURLToPath } from 'node:url';
 import { allContacts } from './contacts.mjs';
@@ -33,96 +35,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const API = 'http://localhost:4300';
 export const BRIDGE_LABEL = 'Jarvis resume bridge';
 
-// Every document (the page and its same-origin iframes) and every
-// #interop-outlet shadow root under them: where the compose form can be.
-const ROOTS = `
-  const roots = () => {
-    const docs = [document];
-    for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument) docs.push(f.contentDocument); } catch {} }
-    const out = [];
-    for (const d of docs) { const s = d.querySelector('#interop-outlet')?.shadowRoot; if (s) out.push(s); out.push(d); }
-    return out;
-  };
-  const subjOf = () => roots().map((r) => r.querySelector('input[name="subject"], input[placeholder^="Subject"]')).find(Boolean);
-  const win = (el) => el.ownerDocument.defaultView;
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));`;
-
-/** Body of the async function (P) => …, P = { name, first, subject, message, bridge }. */
-export const FILL_BODY = `${ROOTS}
-  if (!subjOf()) {
-    // Three compose layouts: the pop-up on the profile, /messaging/thread/new
-    // (InMail) and /messaging/compose (Opera, 2026-10-04).
-    if (/\\/messaging\\/(thread\\/new|compose)/.test(location.pathname)) {
-      for (let i = 0; i < 25 && !subjOf(); i++) await sleep(300);
-    } else {
-      // Waits for the profile to finish loading (up to ~10 s) instead of a fixed pause.
-      const find = () => [...document.querySelectorAll('main a, main button')].find((e) => e.innerText.trim() === 'Message' && e.offsetParent);
-      let link = find();
-      for (let i = 0; i < 33 && !link; i++) { await sleep(300); link = find(); }
-      if (!link) return 'STOP: no Message button on this profile (not messageable, or the page never loaded)';
-      // The link is the full-page compose; LinkedIn turns the click into a
-      // pop-up (interop=msgOverlay), and a pop-up's text was gone when he
-      // opened the tab (Riley, Shreyash, 2026-10-05) while full pages kept
-      // theirs. So go to the page itself; step 1 runs again there.
-      const href = link.getAttribute('href') || '';
-      if (/\\/messaging\\/compose/.test(href)) { location.href = href.replace(/([?&])interop=msgOverlay&?/, '$1').replace(/[?&]$/, ''); return 'RETRY: opening the full-page compose; run step 1 again'; }
-      link.click();
-      for (let i = 0; i < 40 && !subjOf(); i++) await sleep(300);
-      if (!subjOf()) return 'RETRY: Message was pressed and LinkedIn is opening the compose page; run step 1 again';
-    }
-  }
-  const subj = subjOf();
-  if (!subj) return 'STOP: the compose form did not open';
-  // The nearest container holding both the subject and the message box, then
-  // the nearest one above it that names the recipient (the full page puts the
-  // name in a header above the form). Never the whole page.
-  const up = (el, ok) => { for (let e = el, i = 0; e && i < 14; e = e.parentElement, i++) { if (/^(BODY|HTML)$/.test(e.tagName)) return null; if (ok(e)) return e; } return null; };
-  const box = up(subj, (e) => e.querySelector('div[contenteditable="true"]'));
-  if (!box) return 'STOP: no message box beside the subject';
-  if (!up(box, (e) => e.innerText.includes(P.name) || e.innerText.includes(P.first))) return 'STOP: the compose form is not addressed to ' + P.name;
-  const body = [...box.querySelectorAll('div[contenteditable="true"]')].pop();
-  if (body.innerText.trim()) return 'STOP: the message box already has text; left it alone';
-  const W = win(subj);
-  const set = Object.getOwnPropertyDescriptor(W.HTMLInputElement.prototype, 'value').set;
-  subj.focus(); set.call(subj, P.subject);
-  for (const t of ['input', 'change']) subj.dispatchEvent(new W.Event(t, { bubbles: true, composed: true }));
-  body.focus();
-  const dt = new W.DataTransfer(); dt.setData('text/plain', P.message);
-  body.dispatchEvent(new W.ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true, composed: true }));
-  await sleep(700);
-  document.querySelectorAll('input[aria-label="' + P.bridge + '"]').forEach((e) => e.remove());
-  const bridge = document.createElement('input');
-  bridge.type = 'file'; bridge.setAttribute('aria-label', P.bridge);
-  bridge.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.01;z-index:2147483647';
-  document.body.appendChild(bridge);
-  const words = body.innerText.trim().split(/\\s+/).length;
-  return 'FILLED: subject set, ' + words + ' words in the box; upload the resume to "' + P.bridge + '"';`;
-
-/** Body of the async function (P) => …, P = { bridge }. */
-export const ATTACH_BODY = `${ROOTS}
-  const bridge = document.querySelector('input[aria-label="' + P.bridge + '"]');
-  if (!bridge) return 'STOP: the temporary field is missing';
-  if (!bridge.files.length) return 'STOP: nothing was uploaded to the temporary field';
-  const subj = subjOf();
-  if (!subj) return 'STOP: the compose form is gone';
-  const target = [...subj.getRootNode().querySelectorAll('input[type="file"]')].find((i) => i !== bridge && /\\.pdf/.test(i.accept));
-  if (!target) return 'STOP: LinkedIn has no document field here';
-  const W = win(target);
-  // Replace, never stack: an earlier attachment in THIS form is removed first.
-  for (const x of subj.getRootNode().querySelectorAll('.msg-attachment-preview__remove-attachment')) { x.click(); await sleep(300); }
-  // The recipient sees the file's name: "Alex Rivera Resume - <Company> - <Role>.pdf"
-  // (his call, 2026-10-04), never the build's name with its resume family in it.
-  const dt = new W.DataTransfer(); for (const f of bridge.files) dt.items.add(new W.File([f], P.as || f.name, { type: f.type || 'application/pdf' }));
-  const name = dt.files[0].name;
-  target.files = dt.files;
-  target.dispatchEvent(new W.Event('change', { bubbles: true, composed: true }));
-  bridge.remove();
-  for (let i = 0; i < 20; i++) {
-    await sleep(300);
-    const box = target.closest('.msg-overlay-conversation-bubble, main') || target.ownerDocument.body;
-    if (/Attached/.test(box.innerText) && box.innerText.includes(name.slice(0, 20))) return 'ATTACHED: ' + name + '. Ready for him to press Send';
-  }
-  return 'CHECK: the file was handed over but "Attached" never showed; look at the window';`;
+// The page code itself lives in the extension (extension/linkedin-page.js),
+// which runs it directly in Chrome; this route sends each function's source.
+const PAGE_SRC = readFileSync(path.join(ROOT, 'jarvis', 'extension', 'linkedin-page.js'), 'utf8');
+export const PAGE = (() => { const ctx = {}; vm.runInNewContext(PAGE_SRC, ctx); return ctx.JarvisLinkedIn; })();
+/** Source of the async function (P) => …, P = { name, first, subject, message, bridge }. */
+export const FILL_BODY = PAGE.fill.toString();
+/** Source of the async function (P) => …, P = { as, bridge }. */
+export const ATTACH_BODY = PAGE.attach.toString();
 
 /**
  * The two steps, each complete in itself: nothing is stored in the browser,
@@ -131,13 +51,13 @@ export const ATTACH_BODY = `${ROOTS}
  * `new Function` that needed, 2026-10-04. ~5 KB a step is cheap; a step that
  * fails on one page is not.)
  */
-export function fillScript({ name, subject, message }) {
-  return `await (async (P) => {${compact(FILL_BODY)}
-})(${JSON.stringify({ name, first: String(name).split(/\s+/)[0], subject, message, bridge: BRIDGE_LABEL })})`;
+export function fillScript({ name, subject, message, connectNote = '' }) {
+  // His accepted connection note shows in the thread; fill() leaves it out of
+  // the "already a conversation" count only when it is told what it said.
+  return `await (${compact(FILL_BODY)})(${JSON.stringify({ name, first: String(name).split(/\s+/)[0], subject, message, connectNote, bridge: BRIDGE_LABEL })})`;
 }
 export function attachScript(as = '') {
-  return `await (async (P) => {${compact(ATTACH_BODY)}
-})(${JSON.stringify({ bridge: BRIDGE_LABEL, as })})`;
+  return `await (${compact(ATTACH_BODY)})(${JSON.stringify({ bridge: BRIDGE_LABEL, as })})`;
 }
 
 /**
@@ -229,7 +149,7 @@ export async function peopleFor(rows, subjectArg = '', log = console.log) {
   for (const c of rows) {
     const res = await resumeFor(c.job_id);
     if (!res?.path) { log(`NO RESUME for ${c.name}: ask him which one; left out`); continue; }
-    people.push({ id: c.id, name: c.name, profile: c.linkedin_url, message: c.draft, resume: res.path, as: attachName(res.job), subject: subjectFor(subjectArg, c.name, defaultSubject(res.job)) });
+    people.push({ id: c.id, name: c.name, profile: c.linkedin_url, message: c.draft, resume: res.path, as: attachName(res.job), subject: subjectFor(subjectArg, c.name, c.subject || defaultSubject(res.job)) });
   }
   return people;
 }

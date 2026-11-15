@@ -143,6 +143,22 @@ console.log('\n🧪 the audit: false exclusions that were already in his store')
     degreeBar('B.S. Degree in Engineering Discipline (Nuclear, Mechanical, Electrical, Chemical, or similar)'), 'bachelors-ok');
   ok('"desired" is a preference', degreeBar('Bachelor’s required. Master’s desired.'), 'bachelors-ok');
 
+  // F-756: an MBA can be preferred too.
+  ok('"MBA preferred" is a preference', degreeBar('Degree in Finance or related field required, MBA preferred'), 'bachelors-ok');
+  ok('"preferred: MBA"', degreeBar('Education: degree in Business required; preferred: MBA'), 'bachelors-ok');
+  ok('…a required MBA is still advanced-only', degreeBar('Education: MBA degree from an accredited program'), 'advanced-only');
+  // F-757: other spellings of a bachelor's.
+  ok('"Four-year or Graduate Degree"',
+    degreeBar('Four-year or Graduate Degree in Manufacturing Engineering, Mechanical Engineering, or any other related discipline'), 'bachelors-ok');
+  ok('"Baccalaureate degree"',
+    degreeBar("Required: Baccalaureate degree in Engineering or a Master's degree in Mechanical Engineering"), 'bachelors-ok');
+  ok('…"post-baccalaureate experience" is not a bachelor route',
+    degreeBar('Master’s degree in Chemical Engineering, a related field, or a foreign equivalent plus 2 years of post-baccalaureate experience'), 'advanced-only');
+  // F-758: a title open to undergraduates and MBAs is not advanced-only.
+  ok('title "Undergraduate & MBA" (Western Digital)',
+    degreeBar("Currently pursuing a Bachelor's degree or MBA in Finance or Accounting", 'Summer 2027 Intern - Financial Analyst - Undergraduate & MBA'), 'bachelors-ok');
+  ok('…MBA alone in the title still is', degreeBar('Currently pursuing a degree in Finance', 'Summer 2027 Intern - Financial Analyst - MBA'), 'advanced-only');
+
   // A softer word beside his own work must not win.
   ok('customer support + equipment engineer is his', titleIsElsewhere('Customer Support Engineer - Equipment Engineer'), false);
   ok('customer support + field service is his', titleIsElsewhere('Customer Support Engineer (Field Service)'), false);
@@ -153,6 +169,115 @@ console.log('\n🧪 the audit: false exclusions that were already in his store')
   // A title-only refusal quotes the title, not an empty string.
   ok('title refusals carry evidence',
     eligibility({ title: 'ASIC Engineer Intern' }, 'Bachelor’s degree in Engineering').evidence, 'ASIC Engineer Intern');
+}
+
+console.log('\n🧪 F-771: refusals from his deck that were wrong');
+{
+  // Each sentence is verbatim from a posting the screen refused.
+  const notAdvanced = (name, text, expected = 'unknown') => ok(name, degreeBar(text), expected);
+  notAdvanced('a bracketed "advanced degree … a plus" (Tesla, Line Design)',
+    '• Degree in Industrial Engineering or a related field (advanced degree or relevant certifications are a plus), or equivalent industry experience and evidence of exceptional ability');
+  notAdvanced('…the same in Mechanical (Tesla, Optimus Hand)',
+    '• Degree in Mechanical Engineering or a related field (advanced degree or relevant certifications are a plus), or equivalent industry experience and evidence of exceptional ability');
+  notAdvanced('"is a strong plus" (Matic)',
+    '- Technical degree in mechanical engineering, materials science, or equivalent, with 2-5 years of experience in a reliability engineering position. An advanced degree in reliability, materials science, or a related field is a strong plus');
+  notAdvanced('an experience route beside the Master’s (Panthalassa)',
+    '• Master’s degree in mechanical engineering or related field, or additional industry experience');
+  notAdvanced('"Engineering or master’s degree" (TE Connectivity)',
+    'Engineering or master’s degree in industrial engineering or equivalent (Mechanical /Automation)');
+  notAdvanced('a preference far from its degree (TSMC)',
+    'Master’s degree in Industrial Engineering or a related fields are preferred.');
+  notAdvanced('"(preferred)" at the end (Trimble)',
+    '• Education: Master’s or PhD in Mechanical, Electrical, Aerospace, GNC, or a related engineering field (preferred).');
+  notAdvanced('"P.E. certificate preferred" is not cut at "P.E." (PACCAR)',
+    'Masters degree in business or engineering and P.E. certificate preferred');
+  notAdvanced('"Master/Ph.D. degree preferred" (Onto)', 'Master/Ph.D. degree preferred, will consider experience versus degree');
+  notAdvanced('a substitution (NYCHA)',
+    'A masters degree in civil engineering from an accredited college or university, accredited by regional, national, professional or specialized agencies recognized as accrediting bodies by the U.S. Secretary of Education and by the Council for Higher Education Accreditation (CHEA) may be substituted for one year of the civil engineering experience required in “1" above.');
+  notAdvanced('years first, the degree the other route (1X)',
+    '- 5+ years of relevant industry experience, or an advanced degree plus equivalent hands-on experience');
+  notAdvanced('"BSEE minimum" is a bachelor’s (NVIDIA)', '• BSEE minimum (or equivalent experience), MSEE or PhD', 'bachelors-ok');
+  notAdvanced('under a "Nice-to-have" heading (Atomic Semi)',
+    "- Degree in Mechanical Engineering, Electrical Engineering, Mechatronics, Automation, or Physics\n\nNice-to-have\n\n- Master's degree and 3+ years of relevant experience");
+  // Mission Critical Group: the line the spot check marked "correct" sits
+  // under "Preferred"; the requirement is a high-school diploma.
+  ok('a Master’s under "Preferred" is no bar (Mission Critical Group)',
+    eligibility({ title: 'Mechanical Engineer' }, "Preferred\n\n• Master's degree in Mechanical Engineering.\n• Professional Engineer (PE) license.\n\nEducation\n\n• High school diploma or GED, required").verdict !== 'not-eligible', true);
+
+  // …and what still refuses.
+  ok('bare "Master\'s degree in Mechanical Engineering." still refuses', degreeBar("• Master's degree in Mechanical Engineering."), 'advanced-only');
+  ok('"Minimum Education Required: Master’s" (SiTime)', degreeBar('• Minimum Education Required: Master’s degree or foreign equivalent.'), 'advanced-only');
+  ok('a bare "Master’s degree or higher" (Slip Robotics)',
+    degreeBar('• Master’s degree or higher in Robotics, Controls, Mechanical Engineering, or a related field'), 'advanced-only');
+  ok('…the same line under "Nice to Have" does not',
+    degreeBar('Nice to Have\n\n• Master’s degree or higher in Robotics, Controls, Mechanical Engineering, or a related field'), 'unknown');
+  ok('a bracketed PhD preference leaves the Master’s required (Solstice)',
+    degreeBar('• Master’s degree (Ph.D. preferred) in Material Science, Chemical Engineering, Polymer Science, or Chemistry'), 'advanced-only');
+  ok('"…related field, Ph.D. preferred" leaves the Master’s required (Lumilens)',
+    degreeBar("- Master's degree in optical engineering or a related field, Ph.D. preferred."), 'advanced-only');
+  ok('a PhD the candidates "must hold" (Purdue)',
+    degreeBar('Successful candidates must hold a Ph.D. degree in Biomedical Engineering, Electrical and Computer Engineering, Mechanical Engineering, Industrial Engineering, Computer Science or a related discipline by the employment start date.'), 'advanced-only');
+  ok('PhD preferred, Master’s the floor (Applied Materials)',
+    degreeBar("Ph.D. in Physics, Electrical Engineering, Materials Science, or a related technical field preferred. (Master's degree with relevant industry experience may also be considered.)"), 'advanced-only');
+  ok('"plus 2 years" is arithmetic, not a preference',
+    degreeBar('Master’s degree in Chemical Engineering, a related field, or a foreign equivalent plus 2 years of experience'), 'advanced-only');
+
+  // Subjects.
+  ok('"relevant technical field, or equivalent practical experience" (General Robotics)',
+    subjectFit("- Bachelor's degree in Robotics, Computer Science, Computer Engineering, Electrical Engineering, relevant technical field, or equivalent practical experience."), 'maybe-related');
+  ok('"…or Equivalent" (Wolfspeed)', subjectFit('• BS in Electrical Engineering, Chemical Engineering, Materials Science, or Equivalent'), 'maybe-related');
+  ok('"or another technical discipline" (Mitsubishi Chemical)',
+    subjectFit("• Bachelor's or Master's degree in Chemical Engineering, Chemistry, Materials Science, or another technical discipline."), 'maybe-related');
+  ok('a preferred subject (CMC)', subjectFit("• Bachelor's degree in Electrical Engineering preferred"), 'other-preferred');
+  ok('a preferred subject (Agropur)', subjectFit('• Associate or Technical School Degree in Electrical Engineering or Automation preferred.'), 'other-preferred');
+  ok('"required, preferably Electrical"', subjectFit('Bachelor’s degree is required, preferably Electrical engineering.'), 'other-preferred');
+  ok('experience first, the degree the other route (Nimble Robotics)',
+    subjectFit('• 0-5 years of experience in a production environment supporting and improving complex robotics systems, or a minimum of 2 years of experience combined with a Bachelor of Science degree in Computer Science, Software Engineering, or Robotics.'), 'maybe-related');
+  ok('a bachelor’s route with no subject (Lam Research)',
+    subjectFit("* Typically requires a Bachelor's degree and a minimum of 2 years of related experience, or a Master’s degree in Materials Science, Chemical Engineering, Chemistry, Physics."), 'maybe-related');
+  ok('"ME" in a slash list (Periodic Labs)', subjectFit('- BS in EE/CS/ME/Controls or equivalent.'), 'his-field');
+  ok('"Mechatronics" is his (Heron Power)',
+    subjectFit('- Bachelor’s degree in Electrical Engineering, Computer Engineering, Mechatronics, or equivalent practical experience.'), 'his-field');
+  ok('"a major milestone" is no degree (Nova Biomedical)',
+    subjectFit('Advanced Instruments and Nova Biomedical are now united under one brand, Nova Biomedical, marking a major milestone in our journey to deliver greater value to our customers.'), 'unknown');
+  ok('"No CS degree required." asks for nothing (SageOx)',
+    subjectFit('- Technically fluent, with craft. At home in a codebase and in the terminal. You notice the empty state, the focus ring, and the error message. No CS degree required.'), 'unknown');
+  ok('"Working towards a BS degree in Physics or any Engineer area" (Seagate)',
+    subjectFit('Working towards a BS degree in Physics or any Engineer area.'), 'his-field');
+
+  // …and what still excludes.
+  ok('"relevant military training" opens nothing (Executive Alliance)',
+    subjectFit('• Must have BSEE, electrical engineering degree or relevant military training and experience.'), 'excluded');
+  ok('EE "with some Computer Science knowledge" (Hubbell)',
+    subjectFit('Bachelor’s Degree in Electrical Engineering with some Computer Science knowledge'), 'excluded');
+  ok('"B.S. Electrical Engineering" (Vicor)', subjectFit('• B.S. Electrical Engineering'), 'excluded');
+  ok('"B.S. or higher in EE, Photonics, Physics…" (Nokia)',
+    subjectFit('• B.S. or higher in Electrical Engineering, Photonics, Physics, or Materials Science with at least 2 years of semiconductor fab experience.'), 'excluded');
+  ok('"Bachelor’s or Master’s" is one route, not two (Micron)',
+    subjectFit('Bachelor’s or Master’s degree in Chemical Engineering, Electrical Engineering, Material Science, or Physics.'), 'excluded');
+  ok('required subject, preferred advanced degree (Applied Materials)',
+    subjectFit('Bachelor’s degree in Physics or Electrical Engineering required; advanced degree (Master’s or PhD) strongly preferred.'), 'excluded');
+  ok('a line that says "required" is required under any heading (AMD)',
+    subjectFit("PREFERRED EXPERIENCE:\n\n• Excellent technical documentation skills\n\nACADEMIC CREDENTIALS\n\n• Bachelor’s or master's degree in Electrical Engineering required"), 'excluded');
+  ok('lowercase "me" is a word', subjectFit('Send me your resume if you have a Bachelor’s degree in Electrical Engineering'), 'excluded');
+  ok('"BSEE required" names a subject', subjectFit('• BSEE required'), 'excluded');
+
+  // The refusal quotes the line that decided it, not the job title.
+  ok('evidence is the degree line (Vicor)',
+    eligibility({ title: 'Associate Test Engineer' }, 'Requirements\n• B.S. Electrical Engineering').evidence, 'B.S. Electrical Engineering');
+
+  // Titles.
+  ok('Manufacturing Engineer (Supply Chain) is his (Apptronik)', titleIsElsewhere('Manufacturing Engineer (Supply Chain) - Electromechanical'), false);
+  ok('Process Engineer … Reverse Logistics is his (Garmin)', titleIsElsewhere('Process Engineer 2 - Global Service/Reverse Logistics'), false);
+  ok('Decision Engineer, Manufacturing & Supply Chain (Fluidstack)', titleIsElsewhere('Decision Engineer, Manufacturing & Supply Chain'), false);
+  ok('bare supply chain is still not his', titleIsElsewhere('Supply Chain Planning Analyst'), true);
+  // Amazon spells it "Software Dev Engineer"; the rule only knew "Software
+  // Development Engineer", and "supply chain" was what refused these.
+  ok('a software dev engineer is not his', titleIsElsewhere('Software Dev Engineer II, AWS Infra Supply Chain Automation'), true);
+  const v = (title, desc) => eligibility({ title }, desc).verdict;
+  ok('a soft title word gives way to his degree line', v('Customer Support Engineer', 'Bachelor’s degree in Mechanical Engineering required'), 'check');
+  ok('…not on a title that is no engineering job', v('Customer Success Manager', "Bachelor's degree in Engineering or Business"), 'not-eligible');
+  ok('…nor when the degree line is silent', v('Supply Chain Engineer', 'Five years of sourcing experience.'), 'not-eligible');
 }
 
 console.log('\n🧪 the audit: geography');

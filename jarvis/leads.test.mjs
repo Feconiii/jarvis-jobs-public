@@ -93,7 +93,8 @@ test('a run goes running → done, and a second press does not start a second ru
   let calls = 0;
   let release;
   const gate = new Promise((r) => { release = r; });
-  const ask = async () => { calls += 1; await gate; return JSON.stringify({ people: [{ name: 'Dana Lee', confidence: 'high', persona: 'manager' }], warnings: [] }); };
+  // Counts first passes only: a one-person answer also earns one wider pass (F-711).
+  const ask = async (p) => { if (!/A FIRST PASS FOUND/.test(p)) calls += 1; await gate; return JSON.stringify({ people: [{ name: 'Dana Lee', confidence: 'high', persona: 'manager' }], warnings: [] }); };
 
   const first = L.startLeadRun(JOB, { ask });
   assert.equal(first.status, 'running');
@@ -154,6 +155,32 @@ test('taking a job off the Outreach tab keeps its research, and pressing Outreac
   assert.equal(calls, 0, 'nothing is searched twice');
   assert.equal(L.leadSummary()[JOB.id].count, 1);
   assert.equal(L.removedFromOutreach().has(JOB.id), false);
+});
+
+test('A RUN THAT FINDS FEWER THAN TWO PEOPLE WIDENS ONCE (F-711)', async () => {
+  const job = { ...JOB, id: 'job-acme-widen' };
+  const prompts = [];
+  const ask = async (p) => {
+    prompts.push(p);
+    return prompts.length === 1
+      ? JSON.stringify({ people: [{ name: 'Sam Ortiz', confidence: 'medium' }], notes: 'profiles answered 999' })
+      : JSON.stringify({ people: [{ name: 'Sam Ortiz' }, { name: 'Ana Ruiz', confidence: 'low' }], notes: 'found by team name' });
+  };
+  L.startLeadRun(job, { ask });
+  await L.idle();
+  assert.equal(prompts.length, 2, 'one wider pass');
+  assert.match(prompts[1], /A FIRST PASS FOUND ONLY 1: Sam Ortiz/);
+  const r = L.getLeadRun(job.id);
+  assert.deepEqual(r.result.people.map((p) => p.name), ['Sam Ortiz', 'Ana Ruiz'], 'merged, nobody twice');
+  assert.match(r.result.notes, /Wider search: found by team name/);
+
+  // Two people the first time: no second ask.
+  const job2 = { ...JOB, id: 'job-acme-enough' };
+  let n = 0;
+  L.startLeadRun(job2, { ask: async () => { n += 1; return JSON.stringify({ people: [{ name: 'A B' }, { name: 'C D' }] }); } });
+  await L.idle();
+  assert.equal(n, 1);
+  assert.match(L.buildLeadsPrompt(JOB), /run at least 8 different searches/);
 });
 
 test('research switched off is refused with the reason', () => {

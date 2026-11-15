@@ -74,13 +74,39 @@ function jobUrl(host, j) {
 }
 
 /**
+ * THE POSTING'S OWN PAGE ON THE PHENOM SITE (2026-11-12). Phenom over
+ * SuccessFactors, Taleo or UltiPro hands back an apply link that no reader
+ * can open (career4.successfactors.com/career?…career_job_req_id=287881), so
+ * those rows kept the list teaser for good: 391 struck out, Bechtel, STERIS,
+ * Honda, LANXESS, Swagelok, Vontier and AFL among them. Their page on the
+ * Phenom site carries the whole record (Bechtel 18,994 characters, measured).
+ * The locale in the path is, in order: the one the id names (…EXTERNALENUS →
+ * us/en, …EXTERNALENGLOBAL → global/en), the one the apply link asks for
+ * (lang=de_DE → de/de), the one the site's own careers_url is filed under
+ * (https://jobs.x.com/gb/en → gb/en), and only then us/en. A wrong guess is
+ * not a strike: the enricher tries the locale the site redirects to and does
+ * not count a page it could not find (F-1048 review). Exported for tests.
+ */
+export function phenomPage(host, j, siteLocale = '') {
+  const seq = String(j?.jobSeqNo || '').trim();
+  if (!host || !/^[A-Za-z0-9-]+$/.test(seq)) return '';
+  const loc = /EXTERNAL([A-Z]{2})([A-Z]{2,6})$/.exec(seq);
+  const asked = /[?&](?:lang|locale)=([a-z]{2})[_-]([a-z]{2})(?![a-z])/i.exec(String(j?.applyUrl || ''));
+  const path = loc ? `${loc[2].toLowerCase()}/${loc[1].toLowerCase()}`
+    : asked ? `${asked[2].toLowerCase()}/${asked[1].toLowerCase()}`
+    : /^[a-z]{2,6}\/[a-z]{2}$/.test(siteLocale) ? siteLocale : 'us/en';
+  const slug = String(j.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return `https://${host}/${path}/job/${seq}/${slug}`;
+}
+
+/**
  * Parse one `refineSearch` response. Exported for unit tests.
  *
  * @param {any} json
  * @param {string} host
  * @param {string} companyName
  */
-export function parsePhenomResponse(json, host, companyName) {
+export function parsePhenomResponse(json, host, companyName, { siteLocale = '' } = {}) {
   const jobs = json?.refineSearch?.data?.jobs;
   if (!Array.isArray(jobs)) return [];
   return jobs.map((j) => {
@@ -98,8 +124,20 @@ export function parsePhenomResponse(json, host, companyName) {
     if (j.category) out.team = String(j.category).trim();
     if (Number.isFinite(posted)) out.postedAt = posted;
     if (j.descriptionTeaser) out.description = String(j.descriptionTeaser);
+    // Where the enricher reads the body when the stored link has no reader:
+    // never for a Workday link (read as it is) or a link that is already a
+    // page on this site. The stored url stays what it was, so no id moves.
+    if (!/myworkday(?:jobs|site)\.com\//.test(out.url) && !out.url.startsWith(`https://${host}/`)) {
+      const page = phenomPage(host, j, siteLocale);
+      if (page) out.detailApi = page;
+    }
     return out;
   }).filter((j) => j.title && j.url);
+}
+
+/** The locale a careers_url is filed under (https://jobs.x.com/gb/en/ → gb/en), or ''. Exported for tests. */
+export function siteLocaleOf(careersUrl) {
+  try { return /^\/([a-z]{2,6}\/[a-z]{2})(?:\/|$)/.exec(new URL(String(careersUrl || '')).pathname)?.[1] || ''; } catch { return ''; }
 }
 
 /** Total hits reported by the search, or null when absent. Exported for tests. */
@@ -120,6 +158,7 @@ export default {
     if (!host) throw new Error(`phenom: ${entry.name} needs a careers_url (https://jobs.<company>.com)`);
 
     const cap = Number(entry.max_pages) > 0 ? Math.min(Number(entry.max_pages), MAX_PAGES) : MAX_PAGES;
+    const siteLocale = siteLocaleOf(entry.careers_url);
     const url = `https://${host}/widgets`;
     const all = [];
     let expected = null;
@@ -131,7 +170,7 @@ export default {
         body: JSON.stringify(searchBody(page * PAGE_SIZE, PAGE_SIZE)),
       });
       if (expected === null) expected = totalHits(json);
-      const batch = parsePhenomResponse(json, host, entry.name);
+      const batch = parsePhenomResponse(json, host, entry.name, { siteLocale });
       if (!batch.length) break;
       all.push(...batch);
       if (batch.length < PAGE_SIZE) break;

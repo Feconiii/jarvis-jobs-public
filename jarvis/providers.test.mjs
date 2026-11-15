@@ -10,7 +10,7 @@
 //
 // Run: node jarvis/providers.test.mjs
 
-import phenom, { parsePhenomResponse, totalHits } from '../providers/phenom.mjs';
+import phenom, { parsePhenomResponse, totalHits, phenomPage, siteLocaleOf } from '../providers/phenom.mjs';
 import sf, { parseSuccessFactorsFeed, splitTitleLocation, htmlToPlain } from '../providers/successfactors.mjs';
 import icims, { parseIcimsSitemap, titleFromSlug } from '../providers/icims.mjs';
 import { parseSmartRecruitersResponse } from '../providers/smartrecruiters.mjs';
@@ -22,6 +22,12 @@ import pageup, { parsePageUpFeed } from '../providers/pageup.mjs';
 import workable, { departmentsFromSearchGuide, countriesFromSearchGuide, departmentSearches } from '../providers/workable.mjs';
 import { readFileSync as readAts } from 'fs';
 import vm from 'node:vm';
+import { tmpdir } from 'os';
+import { join as joinPath } from 'path';
+
+// The Workable provider reads the real discovery hold file (F-634); a block on
+// his network that day must not fail these offline tests, nor may they write it.
+process.env.JARVIS_DISCOVER_HOLDS = joinPath(tmpdir(), `providers-test-holds-${process.pid}.json`);
 
 let pass = 0, fail = 0;
 function ok(name, cond, detail = '') {
@@ -70,6 +76,30 @@ console.log('\n🧪 Phenom: the shape jobs.thermofisher.com actually returns');
   eq('a posting with neither title nor url is dropped',
     parsePhenomResponse({ refineSearch: { data: { jobs: [{ city: 'Austin' }] } } }, 'h', 'C'), []);
   eq('provider id', phenom.id, 'phenom');
+
+  // 2026-11-12: Phenom over SuccessFactors / Taleo hands back a link no reader opens;
+  // the posting's page on the Phenom site goes along as detailApi, the url unchanged.
+  const sf = parsePhenomResponse({ refineSearch: { data: { jobs: [
+    { title: 'Mechanical Engineer (Civil)', jobSeqNo: 'BECHUS287881EXTERNALENUS', applyUrl: 'https://career4.successfactors.com/career?company=bechtelP&career_job_req_id=287881' },
+    { title: 'Process Engineer', jobSeqNo: 'QGRQGAGLOBALP1EXTERNALENGLOBAL', applyUrl: 'https://acme.taleo.net/careersection/2/jobdetail.ftl?job=1' },
+    { title: 'Process Engineer', jobSeqNo: 'AHMA12394', applyUrl: 'https://recruiting.ultipro.com/AME/JobBoard/x/OpportunityDetail?opportunityId=1' },
+  ] } } }, 'jobs.bechtel.com', 'Bechtel');
+  eq('the stored url stays the apply link', sf[0].url, 'https://career4.successfactors.com/career?company=bechtelP&career_job_req_id=287881');
+  eq('…and its page is kept to read', sf[0].detailApi, 'https://jobs.bechtel.com/us/en/job/BECHUS287881EXTERNALENUS/mechanical-engineer-civil');
+  eq('the locale the id names is the path', sf[1].detailApi, 'https://jobs.bechtel.com/global/en/job/QGRQGAGLOBALP1EXTERNALENGLOBAL/process-engineer');
+  eq('an id with no locale is filed under us/en', sf[2].detailApi, 'https://jobs.bechtel.com/us/en/job/AHMA12394/process-engineer');
+  eq('a Workday link gets no page (it is read as Workday)', j.detailApi, undefined);
+  eq('a link already on the site gets no page', noApply[0].detailApi, undefined);
+  eq('an id with odd characters gets no page', phenomPage('jobs.x.com', { jobSeqNo: 'a/b', title: 't' }), '');
+  // F-1048 review: an id with no locale takes the apply link's, then the site's own, before us/en.
+  eq('the locale the apply link asks for', phenomPage('jobs.lanxess.com', { jobSeqNo: 'LANX4471', title: 'Process Engineer',
+    applyUrl: 'https://career5.successfactors.eu/career?company=lanxess&career_job_req_id=4471&lang=de_DE' }), 'https://jobs.lanxess.com/de/de/job/LANX4471/process-engineer');
+  eq('…the id\'s own locale still wins over it', phenomPage('jobs.x.com', { jobSeqNo: 'X1EXTERNALENUS', title: 't', applyUrl: 'https://a.test/?lang=de_DE' }), 'https://jobs.x.com/us/en/job/X1EXTERNALENUS/t');
+  const gb = parsePhenomResponse({ refineSearch: { data: { jobs: [
+    { title: 'Design Engineer', jobSeqNo: 'SWAG991', applyUrl: 'https://swagelok.taleo.net/careersection/2/jobdetail.ftl?job=991' },
+  ] } } }, 'jobs.swagelok.co.uk', 'Swagelok', { siteLocale: siteLocaleOf('https://jobs.swagelok.co.uk/gb/en/') });
+  eq('the locale the careers_url is filed under', gb[0].detailApi, 'https://jobs.swagelok.co.uk/gb/en/job/SWAG991/design-engineer');
+  eq('a careers_url with no locale path names none', siteLocaleOf('https://jobs.bechtel.com'), '');
 }
 
 console.log('\n🧪 SuccessFactors: location lives inside the title');
@@ -129,6 +159,17 @@ console.log('\n🧪 SuccessFactors: location lives inside the title');
   asked.length = 0;
   const pinned = await sf.fetch({ name: 'X', careers_url: 'https://careers.x.com', feed: 'https://careers.x.com/sitemap.xml' }, ctx);
   eq('…but an explicit feed: is taken as given', [pinned.length, asked.length], [0, 1]);
+
+  // CNH (F-760): the Italian copy of a US requisition is the translated
+  // template with every requirement section empty. The posting is kept; the
+  // template is not stored as its description.
+  const cnh = parseSuccessFactorsFeed(`<rss><channel><item>
+      <title>Design Engineer (Oak Brook, IL, US)</title>
+      <description><![CDATA[&lt;p&gt;Chi siamo&lt;/p&gt;&lt;p&gt;Innovazione. Sostenibilità. Produttività.&lt;/p&gt;&lt;p&gt;Scopo del ruolo&lt;/p&gt;&lt;p&gt;Maggiori Responsabilità&lt;/p&gt;&lt;p&gt;Esperienza Richiesta&lt;/p&gt;&lt;p&gt;Qualifiche preferenziali&lt;/p&gt;&lt;p&gt;Trasparenza salariale&lt;/p&gt;&lt;p&gt;Lo stipendio annuale per questo ruolo è di USD $19,57 - $35,02, più eventuali bonus applicabili.&lt;/p&gt;]]></description>
+      <link>https://join.cnh.com/job/Oak-Brook-Design-Engineer-IL-60521/1367648455/</link>
+    </item></channel></rss>`, 'CNH');
+  eq('the translated-template copy is still a posting', cnh.length, 1);
+  eq('…with no description, rather than an empty template', cnh[0].description, undefined);
 }
 
 console.log('\n🧪 iCIMS: the sitemap is the only ungated source');
@@ -408,6 +449,83 @@ ${rows.map(([t, id]) => `| ${t} | X | South Burlington, United States | Full-tim
     jobs.map(j => j.title), ['Firmware Engineer', 'Facilities Automation Engineer', 'Sales Engineer', 'Financial Analyst', 'Test Technician']);
   eq('one request for the guide, one per department, one per country', asked.length, 5);
   eq('the countries come off the guide', countriesFromSearchGuide(GUIDE), ['United States']);
+}
+
+console.log('\n🧪 workable: the scanner honours the IP-block hold discovery writes (F-634)');
+{
+  const { mkdtempSync, rmSync, readFileSync: rd } = await import('fs');
+  const os = await import('os');
+  const p = await import('path');
+  const dir = mkdtempSync(p.join(os.tmpdir(), 'wk-hold-'));
+  const holds = p.join(dir, 'discover-holds.json');
+  const prev = process.env.JARVIS_DISCOVER_HOLDS;
+  process.env.JARVIS_DISCOVER_HOLDS = holds;
+  try {
+    const entry = { name: 'OnLogic', careers_url: 'https://apply.workable.com/onlogic-inc' };
+    let sent = 0;
+    const blocked = { fetchText: async () => { sent++; const e = new Error('HTTP 429'); e.status = 429; e.retryAfter = '70000'; throw e; } };
+    let first;
+    try { await workable.fetch(entry, blocked); } catch (e) { first = e; }
+    eq('a 429 is still an error to the scanner', first?.status, 429);
+    const saved = JSON.parse(rd(holds, 'utf8'));
+    eq('…and its deadline is written down', Math.round((Date.parse(saved.holds['workable.com'].until) - Date.now()) / 3600e3), 19);
+    let second;
+    try { await workable.fetch(entry, blocked); } catch (e) { second = e; }
+    eq('inside the hold nothing is sent', sent, 1);
+    eq('…and the refusal says so', !!second?.held, true);
+  } finally {
+    if (prev == null) delete process.env.JARVIS_DISCOVER_HOLDS; else process.env.JARVIS_DISCOVER_HOLDS = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log('\n🧪 bamboohr: the placeholder demo board is a failed read, never postings (F-637)');
+{
+  const { default: bamboohr } = await import('../providers/bamboohr.mjs');
+  const demo = { result: [
+    { id: '15', jobOpeningName: 'IT Security Engineer', location: { city: 'Mayfair', state: 'London, City of' } },
+    { id: '20', jobOpeningName: 'Software Engineer', location: { city: 'Berlin', state: 'Brandenburg' } },
+  ] };
+  let err = '';
+  try { await bamboohr.fetch({ name: 'Xylem', careers_url: 'https://xylem.bamboohr.com/careers' }, { fetchJson: async () => demo }); }
+  catch (e) { err = e.message; }
+  ok('a tracked board serving it fails the read and says why', /placeholder demo board/.test(err), err);
+  const real = await bamboohr.fetch({ name: 'Acme', careers_url: 'https://acme.bamboohr.com/careers' },
+    { fetchJson: async () => ({ result: [{ id: '42', jobOpeningName: 'Mechanical Engineer', location: { city: 'Wichita', state: 'Kansas' } }] }) });
+  ok('a real board still reads', real.length === 1 && real[0].title === 'Mechanical Engineer');
+}
+
+{
+  console.log('\n🧪 workday: a posting with no location text takes its city from the path (F-777)');
+  const { locationFromPath } = await import('../providers/workday.mjs');
+  const { classifyLocation } = await import('./geo.mjs');
+  ok('Accenture\'s Bengaluru posting reads Bengaluru',
+    locationFromPath('/job/Bengaluru/Process---Manufacturing-Engineer_R00299176') === 'Bengaluru');
+  ok('…and buckets as non-US', classifyLocation(locationFromPath('/job/Bengaluru/X_R1')) === 'non-us');
+  ok('a multi-word city keeps its words',
+    locationFromPath('/job/Lisbon-Santos-37/Next-Generation-Robotics-Engineer_R1') === 'Lisbon Santos 37');
+  ok('a US path still reads as the US',
+    classifyLocation(locationFromPath('/job/Austin-TX/Mechanical-Engineer_R1')) === 'us');
+  ok('no path, no location', locationFromPath('') === '' && locationFromPath('/weird') === '');
+}
+
+{
+  console.log('\n🧪 pinpoint: postings.json carries the whole body — keep it');
+  const { parsePinpointResponse } = await import('../providers/pinpoint.mjs');
+  const [p] = parsePinpointResponse({ data: [{
+    title: 'Propulsion Engineer', url: 'https://impulsespace.pinpointhq.com/postings/1',
+    location: { name: 'El Segundo, CA' },
+    description: '<p>Build engines.</p>',
+    key_responsibilities_header: 'What you will do', key_responsibilities: '<ul><li>Test thrusters</li></ul>',
+    skills_knowledge_expertise_header: 'Requirements', skills_knowledge_expertise: '<ul><li>BS in Mechanical Engineering</li></ul>',
+    benefits: '<p>To conform to ITAR you must be a U.S. citizen or lawful permanent resident.</p>',
+  }] }, 'Impulse Space');
+  ok('the closing section (where the ITAR clause lives) arrives too', /ITAR/.test(p.description));
+  ok('the intro, duties and requirements all arrive',
+    /Build engines/.test(p.description) && /Test thrusters/.test(p.description) && /BS in Mechanical/.test(p.description));
+  ok('each section keeps its header', /<h3>What you will do<\/h3>/.test(p.description) && /<h3>Requirements<\/h3>/.test(p.description));
+  const [bare] = parsePinpointResponse({ data: [{ title: 'X', url: 'https://a.pinpointhq.com/postings/2' }] }, 'A');
+  ok('no body, no description field', !('description' in bare));
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

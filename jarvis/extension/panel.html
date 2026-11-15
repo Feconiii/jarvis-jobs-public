@@ -118,11 +118,28 @@
   #answers-body li { margin: 4px 0; }
   #answers-body details > summary::-webkit-details-marker { display: none; }
   .err { color: var(--bad); }
+  /* YOUR FILES, ALWAYS AT HAND (2026-10-22). Each chip drags onto an upload
+     box on the page, or a click puts it in the empty slot for it. */
+  .files { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  .filechip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+              border-radius: 999px; background: var(--chip); border: 1px solid var(--line2); cursor: grab; }
+  .filechip:active { cursor: grabbing; }
+  .filechip .grip { color: var(--dim2); font-size: 11px; letter-spacing: -1px; }
+  .files .hint { color: var(--dim2); font-size: 11.5px; }
+  #files-note { width: 100%; color: var(--dim); font-size: 12px; }
+  #files-note:empty { display: none; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
   <header><span class="brand">Jarvis</span><span class="ver" id="ver"></span></header>
+
+  <div class="files" id="files" hidden>
+    <button class="filechip" draggable="true" data-what="resume" title="Drag onto an upload box, or click to put it in the empty resume slot"><span class="grip">⋮⋮</span>Resume</button>
+    <button class="filechip" draggable="true" data-what="portfolio" title="Drag onto an upload box, or click to put it in the empty portfolio slot"><span class="grip">⋮⋮</span>Portfolio</button>
+    <span class="hint">drag onto an upload box, or click</span>
+    <div id="files-note"></div>
+  </div>
 
   <div class="empty" id="empty">Open a job posting or its application form.</div>
 

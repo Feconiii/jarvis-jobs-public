@@ -26,8 +26,27 @@ import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 
 import { resolveLabel, tidyLabel, HIGHEST_PROFICIENCY, whichRule } from './apply/_answers.mjs';
-import { chooseOption, polarityOf, CERT_RE, CERT_NOT_RE, PLACEHOLDER_OPTION_RE } from './apply/_form.mjs';
+import { chooseOption, polarityOf, CERT_RE, CERT_NOT_RE, PLACEHOLDER_OPTION_RE, typedFormOf, placeSpellings, WORK_AUTH_WORDS_RE } from './apply/_form.mjs';
 import { contradicts, polarity } from './apply/_facts.mjs';
+import { sameEmployer as sameEmployerKey } from './same-posting.mjs';
+import { classifyLocation } from './geo.mjs';
+
+/**
+ * Is the job in California, for his California salary figure (2026-11-11)?
+ * "California" spelled out or ", CA" at the end, but only where the location
+ * gate does not read the place as abroad: "Toronto, CA", "Vancouver, British
+ * Columbia, CA", "Montreal, QC, CA" and Baja California are not (geo.mjs).
+ * A California zip and a country after the state are read too (code review
+ * #9): "San Jose, CA 95134" and "San Jose, CA, US" missed the figure.
+ * Exported for tests.
+ */
+const CA_STATE_AT_END = /,\s*CA(?:\s+9[0-6]\d{3}(?:-\d{4})?)?(?:\s*,\s*(?:US|USA|U\.S\.A?\.?|United States(?: of America)?))?\s*$/;
+export function inCalifornia(place) {
+  const p = String(place || '').trim();
+  if (!p || classifyLocation(p) === 'non-us') return false;
+  if (/\bbaja\s+california\b|\bmexico\b/i.test(p)) return false;
+  return /\bcalifornia\b/i.test(p) || CA_STATE_AT_END.test(p);
+}
 import { wdValue } from './apply/_workday-keys.mjs';
 import { applyFamilyTitles, applyTitles } from './resume-variants.mjs';
 import { workEntries, educationEntries, rankedSkills } from './apply/_experience.mjs';
@@ -53,7 +72,31 @@ export function loadApplyProfile(file = PROFILE_PATH) {
     const cv = path.join(HERE, '..', 'cv.md');
     if (existsSync(cv) && profile.cvText == null) profile.cvText = readFileSync(cv, 'utf-8');
   } catch { /* the profile alone, as before */ }
+  // HIS PORTFOLIO AS A FILE (2026-10-22). `npm run portfolio:pdf` writes
+  // output/<his name> Portfolio.pdf; when it is there, a form's portfolio
+  // slot gets it by itself (the server hands it out at /api/portfolio-pdf).
+  // …under the name he GOES by first (F-904): the PDF is "Alex Rivera
+  // Portfolio.pdf", and looking only for his legal full name ("Anna Maria Alex
+  // Rivera") never found it, so Droyd's "Please upload your portfolio here" was
+  // left for him while the server handed the same file out fine.
+  try {
+    const file = portfolioPdfName(profile?.identity);
+    if (file && profile.portfolioPdf == null) profile.portfolioPdf = file;
+  } catch { /* no file, no attach */ }
   return profile;
+}
+
+/** His portfolio PDF's file name, under the name he goes by first, or null (F-904). */
+export function portfolioPdfName(identity, exists = (f) => existsSync(f)) {
+  const id = identity || {};
+  const names = [id.preferred_full_name, id.full_name].map((n) => String(n || '').trim()).filter(Boolean);
+  const name = names.find((n) => exists(portfolioPdfPath(n)));
+  return name ? `${name} Portfolio.pdf` : null;
+}
+
+/** Where `npm run portfolio:pdf` puts his portfolio. */
+export function portfolioPdfPath(fullName) {
+  return path.join(HERE, '..', 'output', `${String(fullName).trim()} Portfolio.pdf`);
 }
 
 // The resume-slot test lives in apply/_form.mjs so the Playwright driver and
@@ -66,7 +109,7 @@ export function loadApplyProfile(file = PROFILE_PATH) {
 // `ReferenceError: isResumeField is not defined`. It surfaced inside the
 // browser, because fill.test.mjs reaches planForm through `exposeFunction` —
 // a Node bug wearing a page's clothes.
-import { RESUME_FIELD_RE, NOT_RESUME_RE, PARSE_SLOT_RE, COVER_LETTER_FIELD_RE, isResumeField, isCoverLetterField } from './apply/_form.mjs';
+import { RESUME_FIELD_RE, NOT_RESUME_RE, PARSE_SLOT_RE, COVER_LETTER_FIELD_RE, PORTFOLIO_FILE_RE, isResumeField, isCoverLetterField, isPortfolioFileField } from './apply/_form.mjs';
 
 export { RESUME_FIELD_RE, NOT_RESUME_RE, isResumeField, isCoverLetterField };
 
@@ -106,6 +149,55 @@ export function skillSearchName(skill) {
 }
 /** …and how many a REQUIRED one may try, since a miss there costs the step. */
 export const MAX_MULTI_REQUIRED = 40;
+
+/** Any box for extra documents: marked optional when nothing goes in it. */
+export const EXTRA_DOCS_LABEL_RE = /\b(miscellaneous|additional|optional|other|supplemental|extra)\b[^]{0,30}\b(documents?|attachments?|files?|uploads?)\b/i;
+/**
+ * A box that asks for ADDITIONAL ATTACHMENTS, where his cover letter may go
+ * (his rule, 2026-11-04; review): additional, supplemental, other, extra or
+ * miscellaneous documents/attachments/files — not merely "optional" — and
+ * not one that names something else he would put there (a transcript, a
+ * portfolio, work samples, a photo, a certificate or licence, references),
+ * unless the label OPENS with "additional" or "supplemental".
+ */
+export function isAdditionalAttachmentsBox(label) {
+  const s = String(label || '');
+  if (!/\b(miscellaneous|additional|other|supplemental|extra)\b[^]{0,30}\b(documents?|attachments?|files?|uploads?)\b/i.test(s)) return false;
+  if (/\btranscripts?\b|\bportfolios?\b|\bwork\s+samples?\b|\bwriting\s+samples?\b|\bphotos?\b|\bcertificat|\blicen[cs]e|\breferences?\b|\brecommendations?\b|\breferees?\b/i.test(s)) {
+    return /^\s*(additional|supplemental)\b/i.test(s);
+  }
+  return true;
+}
+
+/**
+ * Should the cover letter be written for this form? ONE PREDICATE for the
+ * trigger and the placement (review, 2026-11-04): exactly when the plan put
+ * the letter in a slot — a field that names a cover letter, or an additional-
+ * attachments box on a form with no letter field. Returns the reason, or ''.
+ */
+/**
+ * May a letter be written on request (/api/cover-letter-pdf?write=1)? Only
+ * when this job's plan placed one, or he asked from the panel. Returns the
+ * reason, or '' (re-review, 2026-11-04).
+ */
+export function letterWriteAllowed({ placed = false, ask = false } = {}) {
+  if (placed) return 'the form has a place for it';
+  if (ask) return 'he asked for it in the panel';
+  return '';
+}
+
+export function letterPlanned(plan) {
+  const at = (plan?.actions || []).find((a) => a.action === 'upload-letter');
+  return at ? `the form has a place for it: ${String(at.label || 'a file slot').slice(0, 60)}` : '';
+}
+
+/** A work-authorization question: answered by rules only, never by a past answer (2026-11-04). */
+export const WORK_AUTH_LABEL_RE = WORK_AUTH_WORDS_RE;
+
+/** A box asking for visa / work-authorization DETAIL, not a Yes/No (his "don't elaborate", 2026-11-04). */
+export const VISA_DETAIL_RE = /\b(which|what)\s+(type\s+of\s+|kind\s+of\s+)?(visa|immigration\s+status|work\s+(permit|authori[sz]ation)\s+(type|status))\b|\bvisa\s+(type|status|category|class|details?)\b|\btype\s+of\s+visa\b|\b(current\s+)?immigration\s+status\b|\bmonths?\s+(of\s+)?(work\s+authori[sz]ation|opt)\b[^?]{0,40}\b(remaining|left)\b|\bremaining\b[^?]{0,40}\b(work\s+authori[sz]ation|opt)\b|\b(explain|describe|detail|elaborate|specify|provide\s+(more\s+)?(details?|information))\b[^?]{0,80}\b(visa|immigration|sponsorship|work\s+authori[sz]ation)\b|\b(visa|immigration|sponsorship|work\s+authori[sz]ation)\b[^?]{0,80}\b(explain|describe|elaborate|provide\s+(more\s+)?details?)\b/i;
+/** …but a question that starts as a Yes/No ("Do you…", "Are you…", "Will you…") is a question he answers. */
+export const VISA_YES_NO_RE = /^\s*(\d+[.)]\s*)?\*?\s*(do|does|are|is|will|would|have|has|can|could)\b/i;
 
 /**
  * Pick a BAND that contains a number — "3.85" against "3.7 - 4.0".
@@ -295,6 +387,16 @@ export function pickerDate(d, end = false) {
   return `${String(m).padStart(2, '0')}/${String(day).padStart(2, '0')}/${y}`;
 }
 
+/**
+ * IS THIS BOX A MM/DD/YYYY DATE? (F-899). Honda's react-datepicker is flagged
+ * by discover.js (`picker: 'mdy'`); SuccessFactors' ui5 date picker is not,
+ * but says so in its placeholder. Lincoln Electric's "From Date" was typed
+ * "May 2026" and refused: "From Date is invalid (expected MM/DD/YYYY)".
+ */
+export function isMdyBox(f) {
+  return f?.picker === 'mdy' || /^\s*mm\s*\/\s*dd\s*\/\s*yyyy\s*$/i.test(String(f?.placeholder || ''));
+}
+
 export function spellMonthYear(parsed) {
   if (!parsed || !parsed.year) return '';
   const m = Number(parsed.month);
@@ -476,7 +578,37 @@ export function decide(field, label, profile) {
   return d;
 }
 
+// HIS CORRECTION BEATS THE RULE, FOR HIS HISTORY WITH AN EMPLOYER (F-1036,
+// First Mate's condition 2026-11-07). On Applied Materials' Workday form the
+// engine answered "No" to "Have you ever worked at Applied Materials…?" on
+// 2026-10-20 and again on 2026-11-07, and he changed it to Yes both times: a
+// rule answer that fit the options always beat his own past answer. Now his
+// correction (the engine said one thing, he chose another) at THIS employer,
+// to the SAME question, wins next time — only for factual history questions
+// (worked here, applied or interviewed before, referred, how he heard), only
+// on a choice, never for work authorization, self-ID, pay, dates, names, IDs
+// or emails, and never for a question with a time window (it goes stale).
+const HISTORY_Q_RE = /\b(worked|employed|employee|employment\s+(with|at|by)|interned|intern|contractor|contingent\s+worker|previous\s+worker|applied|interviewed|referr\w*|hear\s+about|heard\s+about|how\s+did\s+you\s+hear|learn(ed)?\s+about|find\s+out\s+about)\b/i;
+// Named outright, not left to HISTORY_Q_RE missing them: "employment with/by"
+// also appears in sponsorship and self-ID wording (First Mate's review).
+const NOT_BORROWED_RE = /\bsponsor\w*|\bvisa\b|\bauthori[sz]\w*|\bimmigra\w*|\bcitizen\w*|\bveteran|\bmilitary\b|\bdisab\w*|\bgender\b|\bsex\b|\brace\b|\bethnic\w*|\bhispanic|\blatin[oax]\b|\bsexual\s+orientation|\btransgender|\bpronoun|\bcriminal|\bconvict\w*|\bfelon\w*|\bmisdemeanor|\bage\b|\bbirth\w*|\be-?mail\b|\bid\b|\bnumber\b|\bname\b|\bmanager\b|\bsupervisor\b|\bdates?\b|\bsalary\b|\bpay\b|\bcompensation\b|\bwage\b|\b(within|in|during|over)\s+the\s+(past|last|previous|prior)\b/i;
+const CHOICE_TYPES = /^(radio|select|select-one|prompt|checkbox|combobox|listbox|dropdown)$/i;
+function hisCorrection(field, label, profile) {
+  if (typeof profile?.pastAnswer !== 'function' || !profile?.applyingTo) return null;
+  const text = String(label || '');
+  if (!HISTORY_Q_RE.test(text) || NOT_BORROWED_RE.test(text) || WORK_AUTH_LABEL_RE.test(text)) return null;
+  const opts = (Array.isArray(field?.options) ? field.options : []).map((o) => o?.text ?? o?.label ?? o);
+  if (!opts.length && !CHOICE_TYPES.test(String(field?.type || ''))) return null;
+  const past = profile.pastAnswer(text, profile.applyingTo);
+  if (!past?.corrected || past.fuzzy || /employers$/.test(String(past.company)) || !sameEmployerKey(past.company, profile.applyingTo)) return null;
+  if (opts.length && chooseOption(past.answer, opts) < 0) return null;
+  const was = past.engine != null && String(past.engine).trim() ? ` over the engine's "${past.engine}"` : '';
+  return { kind: 'answer', value: past.answer, review: true, rule: 'his-correction', past: `your own correction at ${past.company} (${String(past.at).slice(0, 10)})${was}` };
+}
+
 function decideRaw(field, label, profile) {
+  const fixed = hisCorrection(field, label, profile);
+  if (fixed) return fixed;
   const key = String(field?.key || '');
   if (key.startsWith('formField-')) {
     const v = wdValue(key, profile);
@@ -536,11 +668,24 @@ function decideRaw(field, label, profile) {
   // Lexington Medical's GPA ranges are "3.9 or above | 3.6-3.8 | Below 3.6",
   // his 3.85 falls between them, and on that employer's form he chose
   // "3.6-3.8" himself (2026-09-25). Same employer only, for this case.
+  // WORK AUTHORIZATION IS NEVER BORROWED (his answer, 2026-11-04): the rules
+  // in _answers.mjs alone answer sponsorship, visa and authorization — his
+  // 2026-09-26 "without restrictions? Yes" at Intuitive must never return.
+  if (WORK_AUTH_LABEL_RE.test(label)) return r;
+  // SAME EMPLOYER, AS THE COMMENTS ABOVE SAY (F-1013 #23, review 2026-11-05).
+  // The code took any one employer's answer (only the "N employers" summary
+  // was refused), so "When can you start?" got another company's "3+ months"
+  // where today's date would have chosen a band. And the band and date
+  // matchers are asked FIRST: a rule answer that fits by band or date is the
+  // rule's, not a borrowed one.
+  const atThisEmployer = (past) => !!past && !/employers$/.test(String(past.company)) && !past.fuzzy
+    && sameEmployerKey(past.company, profile?.applyingTo || '');
   if (r.kind === 'answer' && typeof r.value === 'string' && typeof profile?.pastAnswer === 'function') {
     const opts = (Array.isArray(field?.options) ? field.options : []).map((o) => o?.text ?? o);
-    if (opts.length && chooseOption(r.value, opts) < 0) {
+    const ruleFits = opts.length && (chooseOption(r.value, opts) >= 0 || chooseBand(r.value, opts) >= 0 || chooseDelay(r.value, opts) >= 0);
+    if (opts.length && !ruleFits) {
       const past = profile.pastAnswer(label, profile.applyingTo || '');
-      if (past && !/employers$/.test(String(past.company)) && chooseOption(past.answer, opts) >= 0) {
+      if (atThisEmployer(past) && chooseOption(past.answer, opts) >= 0) {
         return { kind: 'answer', value: past.answer, review: true, rule: 'his-past-answer', past: `your own answer at ${past.company} (${String(past.at).slice(0, 10)})` };
       }
     }
@@ -551,7 +696,7 @@ function decideRaw(field, label, profile) {
   if (r.kind === 'answer' && typeof r.value === 'string' && String(field?.type || '').toLowerCase() === 'prompt'
     && !(Array.isArray(field?.options) && field.options.length) && typeof profile?.pastAnswer === 'function') {
     const past = profile.pastAnswer(label, profile.applyingTo || '');
-    if (past && !/employers$/.test(String(past.company)) && String(past.answer).trim().toLowerCase() !== r.value.trim().toLowerCase()) {
+    if (atThisEmployer(past) && String(past.answer).trim().toLowerCase() !== r.value.trim().toLowerCase()) {
       // ALTERNATIVES, not an array value: an array was stringified with its
       // comma and sent as one answer — HP's veteran prompt got "I am not a
       // Veteran.,I IDENTIFY AS A VETERAN, …" and the matcher picked the
@@ -611,9 +756,14 @@ function pickOffered(value, field) {
   // Intel's language dropdowns the literal "Native or Bilingual" and nothing
   // else to try. The page tries them in order against the list it can see.
   if (!options.length) {
+    // A ROW-ONLY ANSWER IS NEVER TYPED (replay, 2026-11-04): Nudge's Ashby
+    // sponsorship question is a text box, and "Yes, but not until the future"
+    // would have been typed where he sent "Yes". The value is the first answer
+    // that can stand alone; the list keeps its order for a menu the page opens.
+    const typed = wanted.map(typedFormOf).find((w) => w != null) ?? wanted[0];
     return wanted.length > 1
-      ? { kind: 'answer', value: wanted[0], alternatives: wanted }
-      : { kind: 'answer', value: wanted[0] };
+      ? { kind: 'answer', value: typed, alternatives: wanted }
+      : { kind: 'answer', value: typed };
   }
   const offered = wanted.find((w) => chooseOption(w, options) >= 0);
   return { kind: 'answer', value: offered || wanted[0] };
@@ -630,6 +780,24 @@ function pickOffered(value, field) {
  *   skip    policy says leave it alone (EEO self-ID, SSN, certifications)
  *   unknown we have no answer — leave blank and tell him
  */
+/**
+ * THE LIST'S OWN "NOT LISTED" ROW, AS A LAST RESORT (P3). A School or Degree
+ * list that has no row for his answer usually has an "Other" or "Not Listed"
+ * row, and that is the true pick there. It is never put among the values: a
+ * first page holding "Other" would then win over a school the search finds.
+ * The page tries it only after every one of his own spellings has missed,
+ * never over an answer already in the box, and names it for him to check.
+ * Only the school's NAME and a plain "Degree": a miss on a ladder of
+ * education levels is a matcher problem, and stays his.
+ */
+export function notListedFor(label, kind) {
+  if (kind === 'multi') return {};
+  const l = String(label || '').replace(/\s*\*\s*$/, '').trim();
+  const school = /^(school|university|college|institution|school\s+or\s+university|(school|university|institution)\s+name)$/i.test(l);
+  const degree = /^degree$/i.test(l);
+  return school || degree ? { notListed: ['Other', 'Not Listed', 'None of the above'] } : {};
+}
+
 export function planField(field, profile) {
   const type = String(field?.type || 'text').toLowerCase();
   // OPTIONS READ BARE (F-623 stress test): a non-breaking space inside
@@ -762,6 +930,20 @@ export function planField(field, profile) {
   // LinkedIn and portfolio have their own boxes; another link is optional.
   if (/^urls\[other\]$/i.test(String(field?.name || '')) && !field?.required) {
     return { ...base, action: 'skip', why: 'another link — your LinkedIn and portfolio have their own boxes' };
+  }
+
+  // HIS ANSWER, 2026-11-04: "don't elaborate". An OPTIONAL box that asks for
+  // visa or work-authorization detail (which visa, its status, months left,
+  // explain your sponsorship needs) stays empty; the Yes/No authorization and
+  // sponsorship questions are answered as always. A required one is still
+  // answered from his visa note, as before.
+  // Only a box the page marks optional (required === false, no asterisk): his
+  // 2026-09-26 corrections were to required ones, and those stay answered.
+  // A missing required attribute reads as false (discover.js), so the page
+  // must SAY optional too — in the label, or an explicit flag (review, 2026-11-04).
+  const saysOptional = field?.optional === true || /\(\s*optional\s*\)|\boptional\b/i.test(String(rawLabel || ''));
+  if (field?.required === false && saysOptional && !/\*/.test(String(rawLabel || '')) && VISA_DETAIL_RE.test(label) && !VISA_YES_NO_RE.test(label)) {
+    return { ...base, action: 'skip', why: 'optional visa detail — he does not elaborate (his answer, 2026-11-04)' };
   }
 
   // "WHAT IS YOUR LOCATION?" OVER A LIST OF COUNTRIES (Capstan Medical's
@@ -953,7 +1135,14 @@ export function planField(field, profile) {
       || (() => { const m = String(label).match(/^\s*if\s+your?\b[^,?]{0,80}?\s((?:what|when|which|how|do|does|are|will|would|can|please)\b[^,]*\?)\s*$/is); return m ? m[1].trim() : null; })();
     // No comma means no separable question — "If you selected yes above" is
     // the whole label. Nothing to resolve, and the skip stands.
-    if (body && !/^\s*if\s+you\b/i.test(body)) {
+    // SOMEONE ELSE'S DETAILS ARE NOT HIS (F-898). "If you have any relatives
+    // currently employed, provide their full name, location and your
+    // relationship to them." lost its condition here, and "provide their full
+    // name" was given HIS legal name (Lincoln Electric, 2026-10-23). A body
+    // asking about a third person — their / his or her / the employee's — is
+    // only ever theirs, and the condition (a relative, a referrer) is his No.
+    const othersDetails = /\b(their|his\s+or\s+her|his\/her|the\s+(individual|person|employee|relative|referr?er|candidate|family\s+member)['’]?s?)\s+(full\s+|legal\s+|first\s+|last\s+)?(name|names|location|relationship|title|position|department|email|phone)\b/i;
+    if (body && !/^\s*if\s+you\b/i.test(body) && !othersDetails.test(body)) {
       const inner = planField({ ...field, label: body }, profile);
       // Only a real answer earns the fall-through. Anything still unknown
       // keeps the clearer explanation below — and so does an ESSAY: writing
@@ -1023,6 +1212,13 @@ export function planField(field, profile) {
       }
     }
     if (decided.kind !== 'answer') {
+      // A MONTH BOX HOLDING A YEAR IS NOT "ALREADY SET" (2026-10-26 audit).
+      // Coherent's R&D Engineer went out with Applied Materials' End Date
+      // Month reading "2027" (2026-10-23): the box was outside any job row
+      // the planner placed, and the plain skip below kept it.
+      if (currentNow && /\bmonth\b/i.test(label) && !/\byear\b/i.test(label) && /^(19|20)\d\d$/.test(currentNow)) {
+        return { ...base, action: 'unknown', review: true, why: `this month box holds the year "${currentNow}" — set the month yourself` };
+      }
       if (currentNow) return { ...base, action: 'skip', why: `already set to "${currentNow}"` };
       // A consent question rendered as a dropdown. His standing instruction is
       // yes to every consent and AI-screening question, and that rule only ever
@@ -1074,6 +1270,11 @@ export function planField(field, profile) {
         || (Array.isArray(decided.alternatives) && decided.alternatives.some((v) => String(v).trim().toLowerCase() === current.toLowerCase() || chooseOption(String(v), [current]) >= 0))
         || (/^(yes|no)$/i.test(current) && polarityOf(String(decided.value)) === current.toLowerCase()));
     if (same) return { ...base, action: 'skip', why: `already set to "${current}"` };
+    // A School or Degree list already showing its "not listed" row (P3: the
+    // page chose it after every spelling of his missed, or he did) is
+    // answered; the name box that opened under it takes the name.
+    if (current && notListedFor(label, field.promptKind || 'single').notListed
+      && /^(other|not\s+listed|none\s+of\s+the\s+above)\b/i.test(current)) return { ...base, action: 'skip', why: `already set to "${current}": the name goes in the box under it` };
 
     // A MULTI prompt takes one item at a time. Workday's "Type to Add Skills"
     // was handed the whole comma-separated skills list as a single search term,
@@ -1101,9 +1302,9 @@ export function planField(field, profile) {
       // …and a MULTI widget answering ONE question (Workday's "How Did You Hear
       // About Us?") gets them too, marked `oneOf` so the page stops at the
       // first that lands instead of adding every one as another chip.
-      return { ...base, action: 'prompt', values: decided.alternatives, value: decided.value, current: field.current || '', promptKind: kind, review: decided.review, ...(kind === 'multi' ? { oneOf: true } : {}) };
+      return { ...base, action: 'prompt', values: decided.alternatives, value: decided.value, current: field.current || '', promptKind: kind, review: decided.review, ...(kind === 'multi' ? { oneOf: true } : {}), ...notListedFor(label, kind) };
     }
-    return { ...base, action: 'prompt', value: decided.value, current: field.current || '', promptKind: kind, review: decided.review };
+    return { ...base, action: 'prompt', value: decided.value, current: field.current || '', promptKind: kind, review: decided.review, ...notListedFor(label, kind) };
   }
 
   if (type === 'file') {
@@ -1141,6 +1342,15 @@ export function planField(field, profile) {
       // 2026-09-25): "If your portfolio is not available online, please attach
       // it here" was listed as left for him beside the link the form already
       // had. A required one still is.
+      // A PORTFOLIO SLOT GETS HIS PORTFOLIO PDF (2026-10-22), required or not,
+      // when one has been built. Droyd's Ashby form asked for one and he had to
+      // go and find the file. Never on top of a file already in the slot.
+      if (profile?.portfolioPdf && isPortfolioFileField(field)) {
+        if (Number(field?.attached) > 0) {
+          return { ...base, action: 'skip', why: `${field.attached} file(s) already in the portfolio slot — not adding another` };
+        }
+        return { ...base, action: 'upload-portfolio', why: 'portfolio PDF' };
+      }
       const site = profile?.identity?.portfolio || profile?.identity?.website;
       if (!field?.required && site && /portfolio|work\s+samples?/i.test(label)) {
         return { ...base, action: 'skip', why: 'optional — your portfolio is online, and its link goes in its own box' };
@@ -1160,7 +1370,17 @@ export function planField(field, profile) {
   // reason it is checked BEFORE resolveLabel: "I certify that…" would otherwise
   // fall through as an unanswerable question and be left blank, which voids the
   // application more quietly than any wrong answer.
-  if (type === 'checkbox' && CERT_RE.test(label) && !CERT_NOT_RE.test(label)) {
+  // …A BOX, NOT A LIST (F-1013 #8, review 2026-11-05). A checkbox GROUP whose
+  // question reads like a consent — "I confirm I have experience with: SolidWorks
+  // / ANSYS / MATLAB" — was ticked whole, claiming every skill on it. A group is
+  // a multiple-choice question and goes to the group rule below, unless every
+  // option is itself a consent ("I agree to the Terms" / "I agree to the
+  // Privacy Policy"), which is still ticked.
+  const boxText = (o) => String(o && typeof o === 'object' ? o.text : o || '').trim();
+  const distinctOpts = new Set(options.map((o) => boxText(o).toLowerCase()).filter(Boolean));
+  const consentList = options.length > 1 && options.every((o) => { const t = boxText(o); return CERT_RE.test(t) && !CERT_NOT_RE.test(t); });
+  const aList = options.length > 1 && distinctOpts.size > 1 && !consentList;
+  if (type === 'checkbox' && !aList && CERT_RE.test(label) && !CERT_NOT_RE.test(label)) {
     return { ...base, action: 'check', why: 'consent / certification' };
   }
   // AN ARBITRATION AGREEMENT HE HAS TICKED HIMSELF, TWICE. CERT_NOT_RE keeps
@@ -1533,7 +1753,7 @@ export function usPhone(v) {
  * a way that matters, and the panel will tell him to reload instead of letting
  * him conclude the tool is still broken.
  */
-export const EXPECTED_EXTENSION = '1.106.0';
+export const EXPECTED_EXTENSION = '1.150.17';   // P4: a fill never moves the page: boxes focused without scrolling, Next pressed where it is, and a list that does not scroll is never scrolled by scrolling the page (2026-11-13); 1.150.16 week-fixes: a session dialog's Continue never submits the application form (2026-11-13); 1.150.15 P3: a School box searched by the word that tells the school apart, its 'Other' row taken last and named for him, Google Places rows taken by hover then blur, 'City, ST' tried, a ticked multi-select row never clicked (2026-11-12); 1.150.14 S5: each run names the waits it spent longest on, by line of content.js, ms and counts only (2026-11-12); 1.150.13 fill stop: a posting the visa gate bars (citizens/green card only, U.S. person with no licence route, will not sponsor) is not filled until he presses Fill anyway on the panel (2026-11-12); 1.150.12 P2: Oracle's list box set through its own React props when the menu found nothing, read back, logged; F-1035: a combobox search that finds nothing puts back what the box held, unless he touched it (2026-11-07); 1.150.11 R3: UKG — its own Submit keeps a page unsent, its confirmation URL needs the page to agree (2026-11-07); 1.150.9 R5 step 1: Oracle's experience entries recorded around the resume parse, nothing changed (2026-11-07); 1.150.8 R4: a stalled step names the boxes the site marked invalid, labels only (2026-11-07); 1.150.7 R1: the posting's JSON-LD chosen by requisition or title, a stale blob refused, its pay, remote, closing date and site read (2026-11-07); 1.150.6 S6: each run reports where its time went, phase names and ms only (2026-11-07); 1.150.5 S2: a frame that keeps this load's scripts is resumed, not sent them again (2026-11-07); 1.150.4 F-1031 review: a ticket opens one file for 30 minutes (2026-11-07); 1.150.3 F-1031: the panel's resume and letter preview carry a ticket past the cross-site gate (2026-11-07); 1.150.2 S3: the dashboard is found in 2.5 s, a slow one is named on the panel, and only quick routes are given up on, at 60 s (2026-11-06); 1.150.1 was R2 (site ids), 1.150.0 F-1024
 
 /** Compare "1.2.0"-style versions. Missing or unparseable counts as older. */
 export function extensionIsStale(got, want = EXPECTED_EXTENSION) {
@@ -1560,8 +1780,11 @@ export function planEntries(sections, profile) {
   for (const s of Array.isArray(sections) ? sections : []) {
     if (!s || s.filled) continue;
     if (s.kind === 'work') {
-      const entries = workEntries(profile);
-      if (entries.length) out.push({ kind: 'work', entries });
+      // Inline rows (F-897): only the jobs no row on the page holds, each into
+      // a row its Add opens; there is no per-entry Save on such a form.
+      const all = workEntries(profile);
+      const entries = Array.isArray(s.addJobs) ? all.filter((_, j) => s.addJobs.includes(j)) : all;
+      if (entries.length) out.push({ kind: 'work', entries, ...(Array.isArray(s.addJobs) ? { inline: true } : {}) });
     } else if (s.kind === 'education') {
       const entries = educationEntries(profile);
       if (entries.length) out.push({ kind: 'education', entries });
@@ -1642,6 +1865,17 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   const place = String(location || '').split(/\s*[|;]\s*/)[0]
     .replace(/,\s*\d{5}(-\d{4})?\s*$/, '').replace(/,\s*(US|USA|United States( of America)?)\s*$/i, '').trim();
   if (place) effective = { ...effective, jobLocation: place };
+  // HIS FIGURE FOR A CALIFORNIA ROLE (2026-11-11, his words: "90 for everywherre
+  // and 100k for cali"). Set here, once, so the salary box, the posted-range
+  // yes/no and the amount/currency split all read the same number.
+  const caPay = effective?.answers?.salary_expectation_california;
+  if (caPay && inCalifornia(place)) {
+    effective = { ...effective, answers: { ...effective.answers, salary_expectation: caPay } };
+  }
+  // …and WHAT THE POSTING ASKS FOR, for "a Bachelor's degree in one of the
+  // fields mentioned above" (F-828): the fields are in the posting, not the
+  // question. Read only by the rule that needs it.
+  if (jd) effective = { ...effective, postingText: String(jd).slice(0, 20000) };
   let titleChanges = [];
   // The titles the BUILT resume presents win over the family's defaults: the
   // per-posting plan may have chosen "Robotics Engineer Intern" where the
@@ -1731,8 +1965,14 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   // work here" tick — all four were typed by him, row by row, while every
   // answer sat in `work_experience`. Bare From/To take MM/YYYY, which is what
   // he typed and what that date box accepts.
+  // UKG (Yaskawa, 2026-10-22, F-799) spells a job row "Job Title", "Company /
+  // Organization", "Location", "Month", "Year (YYYY)", "To month", "To year",
+  // "Description"; none of the company, location or date boxes was read, so
+  // every row was left for him (or filled with a borrowed answer, F-800).
+  // The bare "Month" / "Year" / "Location" only count inside a row a company
+  // box has opened.
   const EMPLOYMENT_FIELDS = [
-    ['company', /^(company|employer)(\s*name)?$/i],
+    ['company', /^(company|employer)(\s*name)?$|^company\s*\/\s*organi[sz]ation$/i],
     // SuccessFactors (Celestica, 2026-09-27) calls the title "Position" and
     // puts the city and country of each employer in their own boxes (F-623).
     ['title', /^((job|position)\s*)?title$|^position(\s*(held|name))?$/i],
@@ -1743,18 +1983,24 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     // "Start date year" (a box). Unrecognised, both went to the availability
     // rule and the year box got "June 2027 (graduating May 2027)" (Lyft,
     // 2026-09-24).
-    ['startMonth', /^start(ing)?\s*date\s*month$/i],
-    ['startYear', /^start(ing)?\s*date\s*year$/i],
-    ['endMonth', /^end(ing)?\s*date\s*month$/i],
-    ['endYear', /^end(ing)?\s*date\s*year$/i],
+    ['startMonth', /^start(ing)?\s*date\s*month$|^(from\s*)?month$/i],
+    ['startYear', /^start(ing)?\s*date\s*year$|^(from\s*)?year(\s*\(\s*yyyy\s*\))?$/i],
+    ['endMonth', /^end(ing)?\s*date\s*month$|^to\s*month$/i],
+    ['endYear', /^end(ing)?\s*date\s*year$|^to\s*year(\s*\(\s*yyyy\s*\))?$/i],
     ['start', /^(from|start(ing)?)(\s*date)?$/i],
     ['end', /^(to|end(ing)?)(\s*date)?$/i],
-    ['location', /^(work|office|job)\s*location\s*\(?\s*(city)?\s*\)?$/i],
+    ['location', /^(work|office|job)\s*location\s*\(?\s*(city)?\s*\)?$|^location$/i],
     ['reason', /^reason\s*for\s*leaving$/i],
+    // The KIND of job in a row (Lincoln Electric's SuccessFactors, F-893) —
+    // never the employment type he wants, which says desired/sought (F-802).
+    ['employmentType', /^(employment|job|position|work)\s*type$|^type\s+of\s+(employment|job|position)$/i],
     ['description', /^((job|role|position)\s+)?description$|^(responsibilities|duties|job\s+duties)$/i],
     // A tick box whose name picked up the box above it ("End date year* —
     // Current role", Greenhouse) is still the current-role box.
     ['current', /^i\s+(currently|still)\s+work\s+here$|^(this\s+is\s+my\s+)?current\s+(job|position|role|employer)$|^end(ing)?\s*date[^—]{0,12}—\s*current\s+(job|position|role)$/i],
+    // Paylocity's box is "Currently Working Here", read with the label above
+    // it: "Reason for Leaving — Currently Working Here" (F-871).
+    ['current', /(^|—\s*)(i\s+(am\s+)?)?currently\s+work(s|ing)?\s+here$/i],
   ];
   const employmentPart = (f) => {
     const bare = tidyLabel(String(f?.label || ''));
@@ -1767,6 +2013,10 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     if (/^(current\s+|present\s+)?employer(\s*(type|status))?$/i.test(bare)
       && opts.some((o) => /^current$/i.test(o)) && opts.some((o) => /^(prior|previous|former|past)$/i.test(o))) return 'employerType';
     if (/^(type\s+of\s+business|industry|business\s+type)$/i.test(bare)) return 'business';
+    // A "Title" offering Mr. / Ms. / Dr. is the salutation (UKG's contact
+    // block, F-799): read as a job title it opened a row of its own and every
+    // job below moved down one.
+    if (opts.some((o) => /^(mr|mrs|ms|miss|mx|dr|doctor|prof|rev|capt)\.?$/i.test(o))) return null;
     for (const [part, re] of EMPLOYMENT_FIELDS) if (re.test(bare)) return part;
     return null;
   };
@@ -1779,9 +2029,18 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     if (/applied\s+materials|semiconductor|steel|stud|manufactur|robot/i.test(co)) return ['Manufacturing', 'Industrial Manufacturing'];
     return [];
   };
+  // What KIND of job each one was, in the words employment-type lists use
+  // (F-893). His internships say so in their titles; the roles he holds now are
+  // student jobs alongside his degree. Nothing is guessed past that.
+  const employmentTypeOf = (job) => {
+    if (/\bintern(ship)?\b/i.test(String(job?.title || ''))) return ['Internship', 'Intern', 'Co-op / Internship', 'Temporary', 'Seasonal'];
+    if (job?.current) return ['Part-time', 'Part Time', 'Student', 'Student Employment', 'Other'];
+    return [];
+  };
   const jobs = workEntries(effective);
   const employmentRow = new Map();      // field index -> job index
   const spareJobFields = [];            // boxes of a job row with no job left for it
+  let jobsOffPage = null;               // jobs no row on the page names or takes (F-897)
   {
     const parts = list.map((f) => employmentPart(f));
     // The company field is what proves this is an employment block at all.
@@ -1800,19 +2059,44 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
       const EDU = /^(institution|school(\s*name)?|university|college|degree|major|field\s*of\s*study|discipline|school\s*location|i\s+currently\s+attend)$/i;
       const rows = [];
       let cur = null;
+      // ANOTHER SECTION ENDS THE ROW TOO (F-951). With only an education box
+      // closing it, a Certifications or References block below the jobs —
+      // "Certification Name", then a bare "Month" / "Year" / "Location" —
+      // joined the last job row and got that job's city and dates.
+      const OTHER_SECTION = /^(certification|certificate|licen[cs]e|reference|referee|language|skill|award|honou?r|publication|patent|volunteer|military|membership|association|accomplishment|training|course)s?\b/i;
+      // A bare box a row already has is not that row's: a second "Month"
+      // after the end's was turned to the end's is something else.
+      const BARE = /^(location|(from\s*)?(month|year)(\s*\(\s*(yyyy|mm)\s*\))?)$/i;
       list.forEach((f, i) => {
-        const part = parts[i];
-        if (EDU.test(tidyLabel(String(f?.label || '')))) { cur = null; return; }
+        let part = parts[i];
+        const lab = tidyLabel(String(f?.label || ''));
+        if (EDU.test(lab)) { cur = null; return; }
+        if (!part && OTHER_SECTION.test(lab)) { cur = null; return; }
         if (!part) return;
+        // A BARE "Year" / "Month" AFTER THE END DATE IS THE END'S (F-877).
+        // Apple's rows run Start Date (month list), Year, End Date (month
+        // list), Year; both Years read as the start year, so the job he still
+        // holds was given 2024 as its end year.
+        if ((part === 'startYear' || part === 'startMonth') && /^(year|month)(\s*\(\s*(yyyy|mm)\s*\))?$/i.test(tidyLabel(String(f?.label || '')))
+          && cur?.fields.some((x) => x.part === 'end' || x.part === 'endMonth')) {
+          part = part === 'startYear' ? 'endYear' : 'endMonth';
+          parts[i] = part;
+        }
         // SuccessFactors puts "Employer Type" ABOVE "Company Name" (Celestica,
         // 2026-09-27), so it opens a row too (F-623).
         if (part === 'company' || part === 'title' || part === 'employerType') {
           if (!cur || cur.fields.some((x) => x.part === part)) { cur = { fields: [] }; rows.push(cur); }
         }
+        if (cur && BARE.test(lab) && cur.fields.some((x) => x.part === part)) { parts[i] = null; return; }
         if (cur) cur.fields.push({ i, part });
       });
       const key = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-      const holds = (row, part) => key(list[row.fields.find((x) => x.part === part)?.i]?.current);
+      // What a row's box holds: a list's choice, or — since F-873 — the text a
+      // plain box already has. Phenom fills its job rows from the resume in its
+      // own order (Honda, 2026-10-23); read as empty, row 1 got Applied
+      // Materials' dates under Phenom's "Lakeside University – Makerspace…".
+      const heldIn = (f) => f?.current ?? f?.held;
+      const holds = (row, part) => key(heldIn(list[row.fields.find((x) => x.part === part)?.i]));
       const used = new Set();
       const named = rows.map((row) => {
         const co = holds(row, 'company');
@@ -1830,11 +2114,12 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
           if (job >= 0) used.add(job);
           // …and one with no job left for it stays empty: Apple's fifth row got
           // his availability month as a Start Date (2026-10-16).
-          else for (const { i } of row.fields) if (!String(list[i]?.current ?? '').trim()) spareJobFields.push(i);
+          else for (const { i } of row.fields) if (!String(heldIn(list[i]) ?? '').trim()) spareJobFields.push(i);
         }
         if (job == null || job < 0) return;
         for (const { i, part } of row.fields) employmentRow.set(i, { row: job, part });
       });
+      if (rows.length) jobsOffPage = jobs.map((_, j) => j).filter((j) => !used.has(j));
     }
   }
   // …AND THE EDUCATION ROW'S OWN DATES. After an Institution/School box, a
@@ -1852,7 +2137,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
         const bare = tidyLabel(String(f?.label || ''));
         // Honda's is "School/College/University" (2026-10-02).
         if (/^(institution|school(\s*name)?|university|college|school\s*\/\s*college(\s*\/\s*university)?)$/i.test(bare)) { inEdu = true; return; }
-        if (/^(company|employer)(\s*name)?$|^((job|position)\s*)?title$/i.test(bare)) { inEdu = false; return; }
+        if (/^(company|employer)(\s*name)?$|^company\s*\/\s*organi[sz]ation$|^((job|position)\s*)?title$/i.test(bare)) { inEdu = false; return; }
         if (!inEdu || String(f?.current ?? '').trim()) return;
         // Greenhouse's indexed ids (start-month--1) are matched to their own
         // education row by graduationHalf/educationStart; never here.
@@ -1861,16 +2146,20 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
         // them so, and the start went to the availability rule ("June 2027").
         // …and Honda's "Education From Date" / "Education End Date", calendar
         // pickers that take MM/DD/YYYY (2026-10-02).
-        const picker = f?.picker === 'mdy';
+        const picker = isMdyBox(f);
         if (/^(education\s+)?(from|start(ing)?)(\s*date)?$/i.test(bare) && edu.firstYear && edu.firstMonth) eduDate.set(i, picker ? pickerDate({ month: edu.firstMonth, year: edu.firstYear }) : `${monthNo(edu.firstMonth)}/${edu.firstYear}`);
         else if (/^(education\s+)?(to|end(ing)?)(\s*date)?$|^graduation\s*date$/i.test(bare) && edu.lastYear && edu.lastMonth) eduDate.set(i, picker ? pickerDate({ month: edu.lastMonth, year: edu.lastYear }, true) : `${monthNo(edu.lastMonth)}/${edu.lastYear}`);
         else if ((/^i\s+(currently\s+attend|am\s+currently\s+(enrolled|attending))/i.test(bare) || /\bstill\s+(a\s+)?student\??\s*$/i.test(bare)) && Number(edu.lastYear) >= new Date().getFullYear()) eduDate.set(i, 'check');
         // Greenhouse's split education dates: a month menu and a year box each
         // (Lyft, 2026-09-24 — they got his availability, "June 2027").
-        else if (/^start(ing)?\s*date\s*month$/i.test(bare) && Number(edu.firstMonth) >= 1) eduDate.set(i, MONTH_FULL[Number(edu.firstMonth) - 1]);
-        else if (/^start(ing)?\s*date\s*year$/i.test(bare) && edu.firstYear) eduDate.set(i, String(edu.firstYear));
-        else if (/^end(ing)?\s*date\s*month$/i.test(bare) && Number(edu.lastMonth) >= 1) eduDate.set(i, MONTH_FULL[Number(edu.lastMonth) - 1]);
-        else if (/^end(ing)?\s*date\s*year$/i.test(bare) && edu.lastYear) eduDate.set(i, String(edu.lastYear));
+        // …and UKG's "From month" / "From year" / "To month" / "To year"
+        // (Yaskawa, 2026-10-22, F-799): unread, UKG's own resume parse left
+        // "08/2023" in the year box and the server refused it ("Path
+        // 'Educations[0].FromYear'"). A year box gets the year alone.
+        else if (/^(start(ing)?\s*date|from)\s*month$/i.test(bare) && Number(edu.firstMonth) >= 1) eduDate.set(i, MONTH_FULL[Number(edu.firstMonth) - 1]);
+        else if (/^(start(ing)?\s*date|from)\s*year(\s*\(\s*yyyy\s*\))?$/i.test(bare) && edu.firstYear) eduDate.set(i, String(edu.firstYear));
+        else if (/^(end(ing)?\s*date|to)\s*month$/i.test(bare) && Number(edu.lastMonth) >= 1) eduDate.set(i, MONTH_FULL[Number(edu.lastMonth) - 1]);
+        else if (/^(end(ing)?\s*date|to)\s*year(\s*\(\s*yyyy\s*\))?$/i.test(bare) && edu.lastYear) eduDate.set(i, String(edu.lastYear));
       });
     }
   }
@@ -1881,25 +2170,64 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   // The page's own boxes are the evidence: a Title or Company box in the list
   // is an entry. Only the generic (non-Workday) sections; Workday counts its
   // panels itself.
-  const hasWorkEntry = list.some((f) => /^(company|employer)(\s*name)?$|^((job|position)\s*)?title$/i.test(tidyLabel(String(f?.label || ''))) && String(f?.type || '').toLowerCase() !== 'file');
+  // …but a "Title" whose list is Mr. / Ms. / Dr. is the salutation, not a job
+  // row: UKG's contact block has one, so its work section read as filled and
+  // no job was ever entered (Yaskawa, 2026-10-22, F-799).
+  const COURTESY = /^(mr|mrs|ms|miss|mx|dr|doctor|prof|rev|capt)\.?$/i;
+  const salutation = (f) => (Array.isArray(f?.options) ? f.options : []).some((o) => COURTESY.test(String(o?.text ?? o).trim()));
+  const hasWorkEntry = list.some((f) => /^(company|employer)(\s*name)?$|^company\s*\/\s*organi[sz]ation$|^((job|position)\s*)?title$/i.test(tidyLabel(String(f?.label || ''))) && String(f?.type || '').toLowerCase() !== 'file' && !salutation(f));
   const hasEduEntry = list.some((f) => /^(institution|school(\s*name)?|university)$/i.test(tidyLabel(String(f?.label || ''))));
-  sections = (Array.isArray(sections) ? sections : []).map((s) => (s?.generic && !s.filled
+  // Not for Oracle's sections (F-889), which report their saved tiles
+  // (`saved`): there a School box is the OPEN entry, which content.js fills
+  // and saves, and every entry a tile already shows is skipped there.
+  sections = (Array.isArray(sections) ? sections : []).map((s) => (s?.generic && !s.filled && s.saved == null
     && ((s.kind === 'work' && hasWorkEntry) || (s.kind === 'education' && hasEduEntry))
-    ? { ...s, filled: true, why: 'the page already shows an entry' } : s));
+    ? { ...s, filled: true, why: 'the page already shows an entry' } : s))
+    // …BUT A SECTION OF INLINE ROWS WITH JOBS STILL MISSING IS NOT DONE (F-897).
+    // SuccessFactors' Previous Employment shows one row of boxes and an Add
+    // (Lincoln Electric, Veeco, Schindler, 2026-10-23): the row read as "the
+    // page already shows an entry", it got Applied Materials, and Acme Steel and
+    // Makerspace never went in. The jobs no row names or takes are sent as entries;
+    // content.js presses the section's Add for each and fills the new row.
+    .map((s) => (s?.kind === 'work' && s.generic && s.hasAdd && s.saved == null && s.filled && jobsOffPage?.length
+      ? { ...s, filled: false, addJobs: jobsOffPage } : s));
+  const DATE_PART_RE = /^(start|end)(Month|Year)$/;
+  const MONTH_WORD_RE = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?$|^(0?[1-9]|1[0-2])$/i;
+  const wrongDatePart = (i) => {
+    const hit = employmentRow.get(i);
+    if (!hit || !DATE_PART_RE.test(hit.part)) return false;
+    const held = String(list[i]?.current ?? '').trim();
+    if (!held) return false;
+    return /Month$/.test(hit.part) ? !MONTH_WORD_RE.test(held) : !/^(19|20)\d\d$/.test(held);
+  };
+  // A job row's date box that already holds a proper value is left as it is —
+  // never handed on to the availability rule, which answered Coherent's Start
+  // Date Month "June 2027 (graduating May 2027)" (F-795).
+  const heldJobDate = (i) => {
+    const hit = employmentRow.get(i);
+    return !!(hit && DATE_PART_RE.test(hit.part) && String(list[i]?.current ?? '').trim() && !wrongDatePart(i));
+  };
   const employmentValue = (i) => {
     const hit = employmentRow.get(i);
     if (!hit) return null;
     const job = jobs[hit.row];
     if (!job) return null;
-    // A box that already holds something is his (or the page's) — never typed over.
-    if (String(list[i]?.current ?? '').trim()) return null;
+    // A box that already holds something is his (or the page's) — never typed
+    // over. …UNLESS IT CANNOT BE THAT BOX'S ANSWER (F-795): Coherent's Oracle
+    // job row showed "2023" in Start Date MONTH and "2027" in End Date Month
+    // (his degree's years, 2026-10-22). A month box holding a year is wrong,
+    // and is given the job's own month.
+    if (String(list[i]?.current ?? '').trim() && !wrongDatePart(i)) return null;
     const bareDate = /^(from|to)$/i.test(tidyLabel(String(list[i]?.label || '')));
     const mmYYYY = (d) => (d?.month && d?.year ? `${String(d.month).padStart(2, '0')}/${d.year}` : '');
     if (bareDate && (hit.part === 'start' || hit.part === 'end')) {
       const v = hit.part === 'start' ? mmYYYY(job.start) : (job.current ? '' : mmYYYY(job.end));
       return v ? { value: v, part: hit.part, row: hit.row } : null;
     }
-    if (hit.part === 'current') return job.current ? { value: 'Yes', part: hit.part, row: hit.row } : null;
+    // …and No for a job that ended (F-876): Apple's "Current Employer" Yes/No
+    // in each job row fell to the current-employer rule and was given his
+    // employer's name. (A tick box is decided by `currentBox`, before this.)
+    if (hit.part === 'current') return { value: job.current ? 'Yes' : 'No', part: hit.part, row: hit.row };
     if (/^(start|end)(Month|Year)$/.test(hit.part)) {
       const d = hit.part.startsWith('start') ? job.start : (job.current ? null : job.end);
       const m = Number(d?.month);
@@ -1923,9 +2251,10 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
             // one — Workday hides the field entirely for a current job.
             : hit.part === 'end' ? (job.current ? '' : spellMonthYear(job.end))
               : hit.part === 'reason' ? (job.current
-                ? effective?.answers?.current_employer_reason
+                ? (effective?.answers?.current_employer_reason || 'Currently employed')
                 : effective?.answers?.reason_for_leaving)
-                : null;
+                : hit.part === 'employmentType' ? employmentTypeOf(job)[0]
+                  : null;
     const value = String(v ?? '').trim();
     return value ? { value, part: hit.part, row: hit.row } : null;
   };
@@ -1954,7 +2283,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   // TSMC, live 2026-09-24: `* Name`, `Description`, `Institution`, `Effective
   // Date`, `Expiration Date` in a row, no section on any of them. The dates
   // were left blank by the certification rule; `Name` was typed **"Anna Maria Alex
-  // Ha"** and `Institution` **"Lakeside University"** — his name as a
+  // Rivera"** and `Institution` **"Lakeside University"** — his name as a
   // certificate, his school as its issuer. The dates are what say whose row
   // this is, so a generic box within three places of one belongs to it, and
   // stays blank with the rest (his decision 2026-09-20: no certifications).
@@ -1973,7 +2302,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   // Makerspace row's End Date was reported as a question nobody could answer.
   const currentEnd = (i) => {
     const hit = employmentRow.get(i);
-    return !!(hit && hit.part === 'end' && jobs[hit.row]?.current);
+    return !!(hit && /^end(Month|Year)?$/.test(hit.part) && jobs[hit.row]?.current);
   };
   // "I currently work here" as a CHECKBOX: ticked for a job he holds, left
   // alone for one that ended — both are answers.
@@ -2009,8 +2338,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
         if (cur && g.member.test(bare)) cur.fields.push(i);
         else if (cur && bare) cur = null;
       });
-      // A single row is the ordinary form; the per-label rules already serve it.
-      if (rows.length < 2 || !g.names.length) continue;
+      if (!g.names.length) continue;
       const used = new Set();
       const named = rows.map((r) => {
         const held = rowKey(list[r.anchor]?.current);
@@ -2019,6 +2347,26 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
         if (k >= 0) used.add(k);
         return k;
       });
+      // A LANGUAGE ROW THAT ALREADY NAMES ONE OF HIS LANGUAGES IS LEFT ALONE
+      // (F-797). The bare label "Language" is also the preferred-language
+      // question, whose answer is English, so Terex's second row — Vietnamese,
+      // just entered — was typed over with English on the follow-up pass, and
+      // the page held English twice (2026-10-22).
+      if (g.kind === 'language') {
+        // An EMPTY row is null here, and null >= 0 is true: Ford's open
+        // language entry was skipped as "already names undefined" (F-902).
+        rows.forEach((r, n) => { if (Number.isInteger(named[n]) && named[n] >= 0) entryOverride.set(r.anchor, { skip: true, why: `already names ${g.names[named[n]]}, language ${named[n] + 1} in your profile` }); });
+        // AN ORACLE LANGUAGE SECTION'S EMPTY "Language" IS ITS OPEN ENTRY
+        // (F-902): content.js picks the next language his tiles lack into it
+        // and saves it. Answered here as the preferred-language question, it
+        // would hold English while the entry filler wanted Vietnamese.
+        if (sections.some((s) => s?.kind === 'language' && s.saved != null)) {
+          rows.forEach((r, n) => { if (named[n] === null) entryOverride.set(r.anchor, { skip: true, why: 'the open language entry — Jarvis picks and saves it with your languages' }); });
+          continue;
+        }
+      }
+      // A single row is the ordinary form; the per-label rules already serve it.
+      if (rows.length < 2) continue;
       rows.forEach((r, n) => {
         if (named[n] !== null) return;               // names something already: left as it is
         const k = g.names.findIndex((_, j) => !used.has(j));
@@ -2037,6 +2385,36 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     }
   }
 
+  // FIRST NAME BESIDE A PREFERRED FIRST NAME IS THE LEGAL ONE (his call,
+  // 2026-10-24: "preferred first name is still Alex, my legal first name is
+  // supposed to be Anna Maria Alex"). On a form that asks for both, the plain box
+  // gets his legal given names; alone, it stays Alex (2026-10-23).
+  {
+    const PREFERRED_RE = /preferred\s*(first|given)?\s*name|(first|given)\s*name\s*\(preferred\)|goes\s+by|\bnick\s*name\b/i;
+    const OTHER_PERSON_RE = /\breferr|\brelative|\breference|\bemergency|\bnext\s+of\s+kin|\bsupervisor|\bmanager|\bspouse|\brecruiter/i;
+    const legal = String(effective?.identity?.first_name || '').trim();
+    // A box he types a preferred name into — not Micron's "I have a preferred
+    // name" checkbox, whose three First Name boxes F-621 tells apart by order.
+    const hasPreferred = list.some((f) => PREFERRED_RE.test(String(f?.label || '')) && !/^(checkbox|radio)$/i.test(String(f?.type || '')));
+    const plainFirst = list.map((f, i) => i).filter((i) => {
+      const l = String(list[i]?.label || '');
+      return /(first|given)\s*name/i.test(l) && !PREFERRED_RE.test(l) && !OTHER_PERSON_RE.test(l) && !/\blast\b|\bfamily\b|\bsur/i.test(l);
+    });
+    if (legal && hasPreferred && plainFirst.length === 1 && !entryOverride.has(plainFirst[0])) {
+      entryOverride.set(plainFirst[0], { value: legal, why: 'your legal first name — this form asks for a preferred first name separately' });
+    }
+  }
+
+  // A LABEL THAT REPEATS ON THE PAGE IS ONE BOX PER ROW (F-800). His past
+  // answer to "Company / Organization" is one row's answer; borrowed by label
+  // it went into every job row on Yaskawa's UKG form — four rows of "Acme Steel
+  // Steel Stud Company", "2025" and "Mar" (2026-10-22). Past answers are for
+  // questions asked once.
+  const labelKey = (s) => tidyLabel(String(s || '')).toLowerCase();
+  const labelCount = new Map();
+  for (const f of list) { const k = labelKey(f?.label); if (k) labelCount.set(k, (labelCount.get(k) || 0) + 1); }
+  const noPast = typeof effective?.pastAnswer === 'function' ? { ...effective, pastAnswer: undefined } : effective;
+  const forField = (f) => ((labelCount.get(labelKey(f?.label)) || 0) > 1 ? noPast : effective);
   const actions = (Array.isArray(fields) ? fields : []).map((f, i) => {
     if (entryOverride.has(i)) {
       const o = entryOverride.get(i);
@@ -2078,19 +2456,42 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
           why: `you still hold this job (${jobs[employmentRow.get(i).row].company}), so it has no end date` }
       : currentBox(i)
       ? { ...planField({ ...f, label: '' }, effective), label: f.label || '',
+          // …and UNticked for one that ended (F-871): Paylocity ticks it by
+          // default and keeps the End Date hidden until it is cleared, so a
+          // skip left four jobs on Optomec marked current with no end date.
           ...(jobs[employmentRow.get(i).row]?.current
             ? { action: 'check', review: true }
-            : { action: 'skip' }),
+            : { action: 'uncheck' }),
           why: `job ${employmentRow.get(i).row + 1} in your history — ${jobs[employmentRow.get(i).row].company}${jobs[employmentRow.get(i).row]?.current ? ', which you still hold' : ', which has ended'}` }
+      : heldJobDate(i)
+      ? { ...planField({ ...f, label: '' }, effective), label: f.label || '', action: 'skip',
+          why: `already set to "${String(f?.current ?? '').trim()}"` }
       : job && /^(select|radio)$/i.test(String(f?.type || '')) && Array.isArray(f?.options) && f.options.length
       ? (() => {
         // A LIST IN A JOB ENTRY IS PICKED FROM, never typed into (Honda's
         // Current / Prior, Type of Business and Country, 2026-10-02).
         const held = jobs[job.row];
+        // A MONTH LIST UNDER "Start Date" / "End Date" (Apple, 2026-10-16,
+        // F-875): the whole "May 2025" matched no month — the matcher sets
+        // "may" aside as a common word — and every May start went out blank.
+        // The month alone, in the list's spellings.
+        const monthList = (f.options || []).filter((o) => /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?$/i.test(String(o?.text ?? o).trim())).length >= 6;
+        const dateOf = job.part === 'start' ? held?.start : job.part === 'end' ? held?.end : null;
+        const m = Number(dateOf?.month);
+        // A REASON-FOR-LEAVING LIST (Lincoln Electric, F-893): "No Selection |
+        // Involuntary | Not Applicable (Currently Employed) | Voluntary". An
+        // internship that ran its term was left by him, not let go.
+        const reasonList = job.part === 'reason'
+          ? (held?.current ? ['Not Applicable (Currently Employed)', 'Currently Employed', 'Not Applicable', 'N/A', job.value]
+            : [job.value, 'End of Internship', 'Internship Ended', 'Contract Ended', 'End of Assignment', 'Voluntary', 'Resigned'])
+          : null;
         const cands = job.part === 'employerType' ? (held?.current ? ['Current', 'Present'] : ['Prior', 'Previous', 'Former', 'Past'])
+          : reasonList ? reasonList
+          : job.part === 'employmentType' ? employmentTypeOf(held)
           : job.part === 'business' ? businessOf(held)
             : job.part === 'country' ? ['United States', 'United States of America', 'USA']
-              : [job.value];
+              : monthList && m >= 1 && m <= 12 ? [MONTH_FULL[m - 1], MONTH_FULL[m - 1].slice(0, 3), String(m).padStart(2, '0'), String(m)]
+                : [job.value];
         const b = { ...planField({ ...f, label: '' }, effective), label: f.label || '' };
         const why = `job ${job.row + 1} in your history — ${held?.company || held?.title}`;
         for (const c of cands) {
@@ -2112,7 +2513,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
             ? (formatForType(job.value, 'date').value || job.value)
             // A calendar picker's box takes MM/DD/YYYY (Honda): the first of
             // the month he started, the last of the month he left.
-            : f?.picker === 'mdy' && (job.part === 'start' || job.part === 'end')
+            : isMdyBox(f) && (job.part === 'start' || job.part === 'end')
               ? (pickerDate(job.part === 'start' ? jobs[job.row]?.start : jobs[job.row]?.end, job.part === 'end') || job.value)
               : fitToLength(job.value, f?.maxLength),
           review: true,
@@ -2139,7 +2540,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
         })()
         : half
           ? planField({ ...f, label: `Graduation ${half} — ${f.label || ''}` }, effective)
-          : planField(f, effective);
+          : planField(f, forField(f));
     return {
       ...planned,
       at: i,
@@ -2148,6 +2549,26 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
       fieldId: f?.id || '',
     };
   });
+  // HIS RESUME ALREADY LISTED ON THE PAGE IS ATTACHED (F-798). UKG empties
+  // the upload box after an upload and lists the file below it as a row of
+  // its own ("Alex Rivera - Yaskawa … Engineer.pdf", with a Document Type and a
+  // Description). The box read empty, every follow-along run uploaded again,
+  // and every upload made UKG parse the resume and re-fill the form over his
+  // answers — Address 1, Zip, Major and Skills went blank (Yaskawa,
+  // 2026-10-22). A file named for him, or called a resume or CV, counts.
+  {
+    const names = [profile?.identity?.full_name, profile?.identity?.preferred_full_name]
+      .map((n) => String(n || '').trim().toLowerCase()).filter((n) => n.length >= 4);
+    const FILE_RE = /([^\n]{2,200}?\.(?:pdf|docx?|rtf|odt))\b/i;
+    const listed = list.map((f) => (String(f?.type || '').toLowerCase() === 'file' ? null : (FILE_RE.exec(String(f?.label || '')) || [])[1]))
+      .find((n) => n && (names.some((m) => n.toLowerCase().includes(m)) || /\b(resume|résumé|cv)\b/i.test(n)));
+    if (listed) {
+      actions.forEach((a, k) => {
+        if (a.action === 'upload') actions[k] = { ...a, action: 'skip', value: '', why: `your resume is already on this page ("${listed.trim().slice(0, 80)}") — not adding another` };
+      });
+    }
+  }
+
   // WHICH "FIRST NAME" IS WHICH, BY PAGE ORDER (F-621). Eightfold names no
   // field: Micron's form reads "First name" (contact), "First Name" (legal),
   // "I have a preferred name", "First Name" (preferred) — and all three were
@@ -2166,6 +2587,10 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
       const before = firsts.filter((a) => a.at < pref);
       for (const a of firsts.filter((x) => x.at > pref).slice(0, 1)) Object.assign(a, { value: goesBy, why: 'the preferred name — the one you go by' });
       for (const a of before.slice(0, -1)) Object.assign(a, { value: goesBy, why: 'the contact name above the legal-name section — the one you go by', review: true });
+      // The one just above "I have a preferred name" IS the legal name, whatever
+      // its label says: a plain "First Name" now gets the name he goes by
+      // (2026-10-23), so the legal section is set here.
+      for (const a of before.slice(-1)) Object.assign(a, { value: legal, why: 'the legal-name section, just above "I have a preferred name"' });
     }
     // THE CONTACT BOX ALONE (F-631). Micron rebuilds its form after reading
     // the resume, and the second pass met "Email, First name, Last name" with
@@ -2215,6 +2640,34 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
       if (startsFrom) Object.assign(a, { value: '01', datePart: part, review: true, why: `available from ${said}: its first day` });
       else Object.assign(a, { action: 'unknown', value: '', why: `your files give ${said} and no day, and this date is taken whole — enter it yourself` });
     } else { a.value = part === 'month' ? String(mon).padStart(2, '0') : my[2]; a.datePart = part; }
+  }
+  // A SPLIT DATE AS THREE LISTS (F-812). Oracle asks "What is your earliest
+  // possible start date…? Month / Day / Year" as three dropdowns named only by
+  // that last word, and nothing marks them as date parts: each was offered the
+  // whole sentence (Legrand, 2026-10-07; he chose June / 1 / 2027). The part is
+  // read off the label; a month goes in by name, with its number as a spelling.
+  {
+    const MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    for (const a of actions) {
+      if (a.action !== 'prompt' || list[a.at]?.datePart) continue;
+      const label = String(list[a.at]?.label || '');
+      const pm = label.match(/\b(month|day|year)\s*\*?\s*$/i);
+      if (!pm) continue;
+      // Only a question about WHEN HE CAN START. A bare "Start Date Month" is a
+      // job row's (Oracle's work history) and its month is that job's (F-795).
+      const base = label.slice(0, pm.index);
+      if (!/\b(earliest|available|availability|can\s+you\s+(start|begin|join)|begin\s+work|join\s+us)\b/i.test(base)) continue;
+      const v = String(Array.isArray(a.value) ? a.value[0] : a.value || '').trim();
+      const my = v.match(/^([A-Za-z]{3,9})\.?\s+(\d{4})(?=$|\s*[(,;—–-])/);
+      const mi = my ? MON.findIndex((m) => m.slice(0, 3).toLowerCase() === my[1].slice(0, 3).toLowerCase()) : -1;
+      if (mi < 0) continue;
+      const part = pm[1].toLowerCase();
+      const said = my[0].trim();
+      if (part === 'month') Object.assign(a, { value: MON[mi], values: [MON[mi], MON[mi].slice(0, 3), String(mi + 1).padStart(2, '0'), String(mi + 1)] });
+      else if (part === 'year') Object.assign(a, { value: my[2], values: [my[2]] });
+      else if (/\b(start|begin|available|availability|join)\b/i.test(label)) Object.assign(a, { value: '1', values: ['1', '01'], review: true, why: `available from ${said}: its first day` });
+      else Object.assign(a, { action: 'unknown', value: '', why: `your files give ${said} and no day — enter the day yourself` });
+    }
   }
   // A DATE WITH NO DAY IS NOT HALF AN ANSWER (Rippling, Boom Supersonic,
   // measured live 2026-09-25). Its month / day / year boxes clear themselves
@@ -2306,6 +2759,22 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     if (!named.length) continue;
     let prev = null;
     for (let j = k - 1; j >= 0; j--) { if (actions[j].action === 'unknown' && /^\s*if\s+you\b/i.test(String(actions[j].label || ''))) continue; prev = actions[j]; break; }
+    // THE NAME BOX UNDER A SCHOOL OR DEGREE LIST SHOWING "OTHER" (P3): the
+    // list had no row for his school (the page chose "Other" after every
+    // spelling missed, or he did), so the box that opened under it takes the
+    // name. Only under such a list, only when it shows that row, only into a
+    // box that takes text.
+    const prevField = prev && Number.isInteger(prev.at) ? list[prev.at] : null;
+    const prevShows = String(prevField?.current ?? '').trim();
+    if ((short || enter) && named.includes('other') && prevField && notListedFor(prev.label, prevField.promptKind || 'single').notListed
+      && /^(other|not\s+listed|none\s+of\s+the\s+above)\b/i.test(prevShows) && !/^(select|radio|checkbox|prompt)$/i.test(String(a.type || ''))) {
+      const v = /^\s*degree\s*\*?\s*$/i.test(String(prev.label || '')) ? effective?.education?.degree : effective?.education?.school;
+      if (v) {
+        Object.assign(a, { action: 'fill', value: String(v), review: true, why: `the list above has no row for "${v}" and shows "${prevShows}", so the name goes here` });
+        delete a.optional;
+      }
+      continue;
+    }
     const said = String(prev?.value ?? '').trim();
     if (!prev || !/^(select|prompt|fill)$/.test(prev.action) || !said) continue;
     if (enter && !/^(select|prompt)$/.test(prev.action)) continue;
@@ -2322,14 +2791,15 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   {
     const CUR = /\b(dollar|euro|pound|yen|yuan|rupee|franc|peso|dirham|won|krona|krone|real|rand)\b|\b(usd|eur|gbp|cad|aud|jpy|cny|inr)\b/i;
     const isCurrencyList = (f) => /^(select|prompt|radio)$/i.test(String(f?.type || '')) && (f.options || []).filter((o) => CUR.test(String(o?.text ?? o))).length >= 3;
-    const money = String(profile?.answers?.salary_expectation || '').match(/\$\s*([\d,]+(?:\.\d+)?)\s*(k)?\b/i);
+    // From `effective`: a California role's figure, not the default (first mate's review, 2026-11-12).
+    const money = String(effective?.answers?.salary_expectation || '').match(/\$\s*([\d,]+(?:\.\d+)?)\s*(k)?\b/i);
     for (const a of actions) {
       const f = list[a.at];
       if (!/salary|compensation|pay\b|wage|currency/i.test(String(a.label || ''))) continue;
       // …and its period list (Hourly / Weekly / Monthly / Yearly): his figure
       // is per year.
       const PERIODS = /^(hourly|daily|weekly|bi-?weekly|monthly|yearly|annually|annual|per\s+(hour|day|week|month|year))$/i;
-      if (a.action === 'unknown' && money && /\/\s*(yr|year)|per\s+year|annual/i.test(String(profile?.answers?.salary_expectation || ''))
+      if (a.action === 'unknown' && money && /\/\s*(yr|year)|per\s+year|annual/i.test(String(effective?.answers?.salary_expectation || ''))
         && (f?.options || []).filter((o) => PERIODS.test(String(o?.text ?? o).trim())).length >= 3) {
         const opts = (f.options || []).map((o) => String(o?.text ?? o).trim());
         const k = opts.findIndex((o) => /^(yearly|annually|annual|per\s+year)$/i.test(o));
@@ -2390,11 +2860,35 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
   // "Additional Attachments" was given a second copy of the resume because the
   // real slot had been skipped as full (2026-10-03).
   if (!actions.some((a) => a.action === 'upload') && !list.some((f) => String(f?.type || '').toLowerCase() === 'file' && isResumeField(f))) {
+    // …nor a box that names itself extra (F-911): Oracle hides the resume
+    // slot's input once it holds a file, so "Optional: Miscellaneous Documents"
+    // looked like the only upload and took a copy on every run — seven at
+    // Oceaneering, eight at onsemi.
+    const EXTRA_DOCS_RE = /\b(miscellaneous|additional|optional|other|supplemental|extra)\b[^]{0,30}\b(documents?|attachments?|files?|uploads?)\b/i;
     const lone = actions.filter((a) => a.type === 'file' && a.action === 'unknown'
       && !NOT_RESUME_RE.test(`${a.label} ${list[a.at]?.id || ''} ${list[a.at]?.name || ''}`)
+      && !EXTRA_DOCS_RE.test(String(a.label || ''))
       && !PARSE_SLOT_RE.test(String(a.label || '')));
     if (lone.length === 1 && Number(list[lone[0].at]?.attached || 0) === 0) {
       Object.assign(lone[0], { action: 'upload', why: 'resume — the only document upload on the form' });
+    }
+  }
+  // A COVER LETTER ONLY WHERE THE FORM ASKS (his rule, 2026-11-04: "only write
+  // cover letter if you detect additional attachments or the word cover letter
+  // explicitly"). A form with no cover-letter slot that asks for additional
+  // attachments gets the letter there — one slot, an empty one. Every other
+  // extra-documents box is nothing he owes it.
+  // A cover-letter field of any kind — a file slot, or a text box the letter is written into — is the letter's place.
+  const hasLetterSlot = actions.some((a) => a.action === 'upload-letter' || COVER_LETTER_FIELD_RE.test(String(a.label || '')));
+  let letterPlaced = hasLetterSlot;
+  for (const a of actions) {
+    if (a.type === 'file' && a.action === 'unknown' && EXTRA_DOCS_LABEL_RE.test(String(a.label || ''))) {
+      if (!letterPlaced && !(Number(list[a.at]?.attached) > 0) && isAdditionalAttachmentsBox(a.label)) {
+        Object.assign(a, { action: 'upload-letter', why: 'the form asks for additional attachments and has no cover-letter slot: the cover letter goes here' });
+        letterPlaced = true;
+      } else if (!list[a.at]?.required) {
+        Object.assign(a, { optional: true, why: 'an extra-documents box — nothing needed; the resume and letter have their own slots' });
+      }
     }
   }
   // …and a TEXT box carrying the same label as a file input is that uploader's
@@ -2407,10 +2901,10 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
       }
     }
   }
-  for (const kind of ['upload', 'upload-letter']) {
+  for (const kind of ['upload', 'upload-letter', 'upload-portfolio']) {
     const uploads = actions.filter((a) => a.action === kind);
     if (uploads.length <= 1) continue;
-    const wanted = kind === 'upload' ? RESUME_FIELD_RE : COVER_LETTER_FIELD_RE;
+    const wanted = kind === 'upload' ? RESUME_FIELD_RE : kind === 'upload-letter' ? COVER_LETTER_FIELD_RE : PORTFOLIO_FILE_RE;
     const score = (a) => {
       const f = list[a.at] || {};
       if (/autofill|auto-fill|prefill|parse (your )?resume/i.test(String(f.near || ''))) return -1;
@@ -2420,9 +2914,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     for (const a of uploads) {
       if (a === best) continue;
       a.action = 'skip';
-      a.why = kind === 'upload'
-        ? 'a second resume slot on the same form — only one gets the file'
-        : 'a second cover-letter slot on the same form — only one gets the file';
+      a.why = `a second ${kind === 'upload' ? 'resume' : kind === 'upload-letter' ? 'cover-letter' : 'portfolio'} slot on the same form — only one gets the file`;
     }
   }
 
@@ -2475,6 +2967,15 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
     });
   }
 
+  // A PLACE TYPED INTO A BOX THAT SUGGESTS (P3): its other spellings, for the
+  // page to search with when the first finds nothing ("City, ST", the bare
+  // city). The label test is the page's own (content.js pickSuggestion).
+  for (const a of actions) {
+    if (a.action !== 'fill' || !/location|\bcity\b|where\b.{0,30}\b(live|located|based)/i.test(String(a.label || ''))) continue;
+    const alts = placeSpellings(a.value);
+    if (alts.length) a.placeAlts = alts;
+  }
+
   const by = (a) => actions.filter((x) => x.action === a);
   return {
     actions,
@@ -2485,6 +2986,7 @@ export function planForm(fields, profile, { familyKey = null, titles = null, ext
       check: by('check').length,
       upload: by('upload').length,
       letter: by('upload-letter').length,
+      portfolio: by('upload-portfolio').length,
       essay: by('essay').length,
       skip: by('skip').length,
       unknown: by('unknown').length,

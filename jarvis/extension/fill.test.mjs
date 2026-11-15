@@ -26,6 +26,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // report.js rides in the same injection as discover.js and content.js (2026-09-23).
 const DISCOVER = readFileSync(path.join(HERE, 'report.js'), 'utf-8') + String.fromCharCode(10) + readFileSync(path.join(HERE, 'discover.js'), 'utf-8');
 const CONTENT = readFileSync(path.join(HERE, 'content.js'), 'utf-8');
+// P2: the worker runs these in the page's world; the harness does the same.
+const ORACLE_SELECT = readFileSync(path.join(HERE, 'oracle-select.js'), 'utf-8');
 
 const PROFILE = {
   identity: {
@@ -66,11 +68,13 @@ test.before(async () => {
   // The worker forwards an open list to /api/choose, which ranks it with the
   // same matcher that made the plan. The fixture answers the same way.
   await page.exposeFunction('__jarvisChoose', (want, options) => chooseOption(want, options));
+  // His own hands, from inside a fixture's hook: a real click and real keys (P2).
+  await page.exposeFunction('__hisKeys', async (selector, text) => { await page.click(selector); await page.keyboard.type(text); });
 });
 test.after(async () => { await browser?.close(); });
 
 /** Load a fixture, then run discover.js + content.js exactly as shipped. */
-async function fill(html, { planError = '', editPlan = '', worker = null, url = '' } = {}) {
+async function fill(html, { planError = '', editPlan = '', worker = null, url = '', before = null } = {}) {
   // A FRESH DOCUMENT. `setContent` reuses the current one (document.write), so
   // an armed run's watcher, its timers and `__jarvisContent` would all survive
   // into the next fixture and race it.
@@ -83,6 +87,7 @@ async function fill(html, { planError = '', editPlan = '', worker = null, url = 
     await page.setContent(html);
   }
   await page.addScriptTag({ content: DISCOVER });
+  await page.addScriptTag({ content: ORACLE_SELECT });
   // Stub only the extension messaging channel.
   await page.evaluate(({ planError, editPlan, worker }) => {
     globalThis.__sentMsgs = [];
@@ -102,13 +107,32 @@ async function fill(html, { planError = '', editPlan = '', worker = null, url = 
             if (editPlan) plan = (0, eval)(`(${editPlan})`)(plan);
             reply({ ok: true, plan });
           }
+          // A resume still being written (F-989): a fixture sets __resume425 to how many "not yet" answers come first.
+          else if (msg.type === 'resume' && globalThis.__resume425 > 0) { globalThis.__resume425 -= 1; reply({ ok: false, status: 425, error: 'writing the resume' }); }
           else if (msg.type === 'resume') reply({ ok: true, bytes: await globalThis.__jarvisResume() });
           else if (msg.type === 'choose') { const index = await globalThis.__jarvisChoose(msg.want, msg.options); reply({ ok: true, index, value: index >= 0 ? msg.options[index] : null }); }
+          // The sign-in code from his email: whatever the fixture put in window.__code.
+          else if (msg.type === 'code') reply(globalThis.__code ? { code: globalThis.__code, from: 'Acme Careers' } : { code: null, why: 'none yet' });
+          // P2, as the worker does it: read the box's own list, choose, reply — and set only on the second ask.
+          // A fixture's __duringPick runs while the list is being read (the box changing under it).
+          else if (msg.type === 'oracle-pick') {
+            const r = globalThis.__jarvisOracleSelect.oracleSelectRead(msg.inputId);
+            let index = -1;
+            if (r.ok) for (const w of msg.wants || []) { index = await globalThis.__jarvisChoose(w, r.labels); if (index >= 0) break; }
+            if (typeof globalThis.__duringPick === 'function') await globalThis.__duringPick();
+            reply(!r.ok ? r : index >= 0 ? { ok: true, index, label: r.labels[index] } : { ok: false, why: 'his answer is not among its options' });
+          }
+          // __duringSet: runs after the content script's last look and before the page's (the race the guard closes).
+          else if (msg.type === 'oracle-set') {
+            if (typeof globalThis.__duringSet === 'function') await globalThis.__duringSet();
+            reply(globalThis.__jarvisOracleSelect.oracleSelectSet(msg.inputId, msg.index, msg.label, { before: msg.before, wanted: msg.wanted }));
+          }
           else reply({ ok: false, error: 'unknown' });
         },
       },
     };
   }, { planError, editPlan, worker });
+  if (before) await before();
   return page.evaluate(CONTENT);
 }
 
@@ -435,6 +459,391 @@ test('HONDA\'S UPLOADER (Phenom, 2026-10-03): the file is taken when its hidden 
   assert.equal(await page.evaluate(() => document.getElementById('extra').files.length), 0, 'no second copy in Additional Attachments');
 });
 
+test('F-911: a slot whose input is empty but whose chip already names a file is not attached to again', async () => {
+  // Oracle (Oceaneering, 2026-10-24): the input is cleared after each upload and
+  // the file shown as a chip; seven follow-along runs left seven copies.
+  const result = await fill(`
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <div class="attachments">
+        <h3>Resume</h3><label for="resume">Upload Resume</label>
+        <input id="resume" type="file" style="display:none">
+        <ul><li><button type="button" aria-label="Alex Rivera - Oceaneering - Mechanical Engineer.pdf Remove">Alex Rivera - Oceaneering - Mechanical Engineer.pdf</button></li></ul>
+      </div>
+      <div class="cover">
+        <h3>Cover Letter</h3><p>Accepted formats: .pdf, .docx</p><label for="cl">Upload Cover Letter</label>
+        <input id="cl" type="file" style="display:none">
+      </div>
+      <script>document.getElementById('resume').addEventListener('change', () => { window.__again = (window.__again || 0) + 1; });<\/script>
+    </form>`);
+  assert.equal(await page.evaluate(() => window.__again || 0), 0, 'the resume shown in the chip is not attached a second time');
+  assert.equal(result.uploaded, true, 'and the run still counts the resume as on the form');
+});
+
+test('F-989: a form that redraws while the resume is written still gets it, in the slot as it is now (Re:Build)', async () => {
+  // The press began the build; the filler waited; Greenhouse's form redrew
+  // and replaced the file input. The first press attached into the old one.
+  const html = `
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <label for="resume">Resume/CV</label><input id="resume" name="resume" type="file">
+    </form>
+    <script>
+      window.__resume425 = 1;   // the server is still writing it on the first ask
+      setTimeout(() => {
+        const old = document.getElementById('resume');
+        const fresh = document.createElement('input');
+        fresh.type = 'file'; fresh.id = 'resume'; fresh.name = 'resume';
+        old.replaceWith(fresh);
+      }, 1500);
+    </script>`;
+  const result = await fill(html);
+  const files = await page.evaluate(() => document.getElementById('resume').files.length);
+  assert.equal(files, 1, `the resume is in the slot on the page (${JSON.stringify(result.unanswered)})`);
+  assert.equal(result.uploaded, true);
+  assert.ok(!(result.unanswered || []).some((u) => /never showed the file|did not keep the file/.test(String(u.label || u))), JSON.stringify(result.unanswered));
+});
+
+// A resume slot that a parser redraws after the file goes on (Rippling, F-1009):
+// `times` is how many attaches it throws away, by replacing the input with an
+// empty one 300 ms after each change.
+const DROPPING_SLOT = (times) => `
+  <form>
+    <label for="first_name">First Name</label><input id="first_name" type="text">
+    <label for="resume">Resume</label><input id="resume" name="resume" type="file">
+  </form>
+  <script>
+    window.__attaches = 0;
+    let left = ${times};
+    const watch = (el) => el.addEventListener('change', () => {
+      window.__attaches += 1;
+      if (left <= 0) return;
+      left -= 1;
+      setTimeout(() => {
+        const fresh = document.createElement('input');
+        fresh.type = 'file'; fresh.id = 'resume'; fresh.name = 'resume';
+        document.getElementById('resume').replaceWith(fresh);
+        watch(fresh);
+      }, 300);
+    });
+    watch(document.getElementById('resume'));
+  </script>`;
+
+test('F-1009: a resume the page drops after the attach is attached again, and counted only when it stays (Rippling)', async () => {
+  const once = await fill(DROPPING_SLOT(1));
+  assert.equal(await page.evaluate(() => document.getElementById('resume').files.length), 1, `the file is back in the slot (${JSON.stringify(once.unanswered)})`);
+  assert.equal(await page.evaluate(() => window.__attaches), 2, 'attached twice: once, and once after the redraw');
+  assert.equal(once.uploaded, true);
+  assert.ok(!(once.unanswered || []).some((u) => /dropped it/.test(String(u.label || u))), JSON.stringify(once.unanswered));
+
+  const always = await fill(DROPPING_SLOT(9));
+  assert.equal(always.uploaded, false, 'a slot that stays empty is not "uploaded"');
+  assert.ok((always.unanswered || []).some((u) => /attached, then the page dropped it/.test(String(u.label || u))), JSON.stringify(always.unanswered));
+  assert.equal(await page.evaluate(() => window.__attaches), 2, 'one second try, never a loop');
+
+  const kept = await fill(DROPPING_SLOT(0));
+  assert.equal(kept.uploaded, true);
+  assert.equal(await page.evaluate(() => window.__attaches), 1, 'a slot that kept the file gets no second copy (F-413)');
+});
+
+test('F-1013 #7: his COVER LETTER\'S chip on the page is not his resume — an emptied resume slot is attached again and never reported uploaded', async () => {
+  const withLetter = DROPPING_SLOT(9).replace('</form>', '<div class="chip">Alex Rivera - Acme - Process Engineer - cover letter.pdf</div><div class="chip">Alex Rivera Portfolio.pdf</div></form>');
+  const r = await fill(withLetter);
+  assert.equal(r.uploaded, false, 'the letter\'s chip does not stand for the resume');
+  assert.equal(await page.evaluate(() => window.__attaches), 2, 'the resume was looked for, missed, and attached once more');
+  assert.ok((r.unanswered || []).some((u) => /attached, then the page dropped it/.test(String(u.label || u))), JSON.stringify(r.unanswered));
+});
+
+test('F-1002: a Submit pressed by a tool (not a trusted click) is watched, and the thank-you is reported (Ashby, Medra)', async () => {
+  // Ashby keeps the URL and swaps the form for its confirmation after the press.
+  const html = `<div id="app"><form onsubmit="return false">
+    <label for="first_name">First Name</label><input id="first_name" type="text">
+    <button type="button" id="send">Submit Application</button>
+  </form></div>
+  <script>
+    document.getElementById('send').addEventListener('click', () => setTimeout(() => {
+      document.getElementById('app').innerHTML = '<h2>Thank you for applying</h2><p>Your application was successfully submitted.</p>';
+    }, 300));
+  </script>`;
+  await fillAs(html, { armed: false, auto: false, reachable: true });
+  await page.evaluate(() => { globalThis.__sent.length = 0; document.getElementById('send').click(); });   // untrusted, as a tool's press can be
+  await page.waitForFunction(() => globalThis.__sent.some((m) => m.type === 'filled' && m.result?.submitted), null, { timeout: 8000 });
+  const said = await page.evaluate(() => globalThis.__sent.find((m) => m.type === 'filled' && m.result?.submitted).result.submitted);
+  assert.match(said, /thank you for applying|successfully submitted/i);
+});
+
+test('F-994 review: once a newer run claims the page, the old one types nothing more — one fill on the form', async () => {
+  // The worker took over a run it thought stalled; the old script is still here.
+  // A newer run claims the page as soon as the first field is typed.
+  const html = `<form>
+    <label for="first_name">First Name</label><input id="first_name" type="text">
+    <label for="last_name">Last Name</label><input id="last_name" type="text">
+    <label for="email">Email</label><input id="email" type="email">
+  </form>
+  <script>
+    document.getElementById('first_name').addEventListener('input', () => { globalThis.__jarvisActiveRun = 'the-newer-run'; });
+  </script>`;
+  const r = await fillAs(html, { armed: false, auto: false, runToken: 'the-old-run' });
+  const typed = await page.evaluate(() => ['first_name', 'last_name', 'email'].map((id) => document.getElementById(id).value));
+  assert.notEqual(typed[0], '', 'it had typed the first field');
+  assert.deepEqual(typed.slice(1), ['', ''], 'and nothing after the newer run claimed the page');
+  assert.ok((r.unanswered || []).some((u) => /a newer run took over/.test(String(u.label || u))), JSON.stringify(r.unanswered));
+});
+
+test('F-1002: a check-only run on a page with a form fills nothing (the look at a confirmation page)', async () => {
+  const html = `<form><label for="first_name">First Name</label><input id="first_name" type="text"></form>`;
+  const r = await fillAs(html, { armed: false, auto: true, checkOnly: true });
+  assert.equal(await page.evaluate(() => document.getElementById('first_name').value), '');
+  assert.equal(r.checkOnly, true);
+  assert.equal(r.filled, 0);
+});
+
+test('F-990: a run that began armed stops once he disarms the tab; one still armed fills as before (Re:Build)', async () => {
+  const html = `<form>
+    <label for="first_name">First Name</label><input id="first_name" type="text">
+    <label for="last_name">Last Name</label><input id="last_name" type="text">
+  </form>`;
+  const stopped = await fillAs(html, { armed: true, auto: false, stillArmed: false });
+  const typed = await page.evaluate(() => [document.getElementById('first_name').value, document.getElementById('last_name').value]);
+  assert.deepEqual(typed, ['', ''], 'nothing more goes on the form');
+  assert.ok((stopped.unanswered || []).some((u) => /you disarmed this tab/.test(String(u.label || u))), JSON.stringify(stopped.unanswered));
+  const goes = await fillAs(html, { armed: true, auto: false, stillArmed: true });
+  const typed2 = await page.evaluate(() => document.getElementById('first_name').value);
+  assert.notEqual(typed2, '', 'still armed: it fills');
+  assert.ok(!(goes.unanswered || []).some((u) => /disarmed/.test(String(u.label || u))));
+});
+
+test('F-913: a file left from an earlier application is removed once, and this posting\'s file goes on', async () => {
+  // onsemi (Oracle, 2026-10-24): the account put "AlexRiveraResume.pdf" from an
+  // earlier onsemi application back in the resume slot.
+  const html = `
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <div class="attachments">
+        <h3>Resume</h3><label for="resume">Upload Resume</label>
+        <input id="resume" type="file" style="display:none">
+        <ul id="chips"><li><button type="button">AlexRiveraResume.pdf</button><button type="button" aria-label="Remove">x</button></li></ul>
+      </div>
+      <script>
+        document.querySelector('[aria-label="Remove"]').addEventListener('click', (e) => e.target.closest('li').remove());
+        document.getElementById('resume').addEventListener('change', (e) => {
+          window.__put = (window.__put || 0) + 1;
+          document.getElementById('chips').innerHTML = '<li><button type="button">' + e.target.files[0].name + '</button><button type="button" aria-label="Remove">x</button></li>';
+          e.target.value = '';
+        });
+      <\/script>
+    </form>`;
+  const result = await fill(html, { url: 'https://careers.example.test/apply' });
+  const after = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips').textContent }));
+  assert.equal(after.put, 1, 'this posting\'s resume was attached');
+  assert.equal(/AlexRiveraResume/.test(after.chips), false, 'the earlier application\'s file is gone');
+  assert.equal(result.uploaded, true);
+
+  assert.equal(/Alex Rivera Resume\.pdf/.test(after.chips), true, 'and the slot now shows the tailored one');
+  // Later runs in this tab keep whatever is in the slot (F-413): the check is once per tab.
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('jv-earlier-files-checked')), '1');
+});
+
+test('F-916: a Jarvis file naming ANOTHER posting at this employer is removed; one naming this posting stays', async () => {
+  const html = (chipName) => `
+    <title>Production Engineer - Coherent Corp. US Careers</title>
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <div class="attachments">
+        <h3>Resume</h3><label for="resume">Upload Resume</label>
+        <input id="resume" type="file" style="display:none">
+        <ul id="chips"><li><button type="button">${chipName}</button><div><button type="button" aria-label="Remove Resume">Remove</button></div></li></ul>
+      </div>
+      <script>
+        document.querySelector('[aria-label="Remove Resume"]').addEventListener('click', (e) => e.target.closest('li').remove());
+        document.getElementById('resume').addEventListener('change', () => { window.__put = (window.__put || 0) + 1; });
+      <\/script>
+    </form>`;
+  await fill(html('Alex Rivera - Coherent Corp - Process Engineer - DMG (Diamond Material Growth).pdf'), { url: 'https://f916a.example.test/apply/one' });
+  let got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips').textContent }));
+  assert.equal(/Process Engineer/.test(got.chips), false, `the other posting's resume is removed: ${JSON.stringify(got)}`);
+  assert.equal(got.put, 1, 'and this posting\'s goes on');
+  await fill(html('Alex Rivera - Coherent Corp - Production Engineer.pdf'), { url: 'https://f916b.example.test/apply/two' });
+  got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips').textContent }));
+  assert.equal(/Production Engineer\.pdf/.test(got.chips), true, 'this posting\'s own file stays');
+  assert.equal(got.put, 0);
+});
+
+test('F-1013 #25: a dropdown resting on "-- Select --" (with a value behind it) is not an answer, and gets his', async () => {
+  await fill(`
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <label for="h">How did you hear about us?</label>
+      <select id="h"><option value="0" selected>-- Select --</option><option value="web">Company Website</option><option value="li">LinkedIn</option></select>
+    </form>`);
+  assert.notEqual(await page.evaluate(() => document.getElementById('h').value), '0', 'the placeholder was not kept as his answer');
+});
+
+test('F-1013 #15: a consent box that refuses the click is NOT counted as ticked, and is named for him', async () => {
+  const r = await fill(`
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <input type="checkbox" id="agree" onclick="return false"><label for="agree">I agree to the privacy policy and terms of use</label>
+    </form>`);
+  assert.equal(await page.evaluate(() => document.getElementById('agree').checked), false, 'precondition: the page refused it');
+  assert.equal(r.checked || 0, 0, 'nothing is claimed ticked');
+  assert.ok((r.unanswered || []).some((u) => /privacy policy/i.test(String(u.label || u)) && /did not keep the tick/.test(String(u.label || u))), JSON.stringify(r.unanswered));
+});
+
+test('F-1013 #14: an earlier file whose role only STARTS this posting\'s, or whose employer has a hyphen, is removed too', async () => {
+  const html = (title, chipName) => `
+    <title>${title}</title>
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <div class="attachments">
+        <h3>Resume</h3><label for="resume">Upload Resume</label>
+        <input id="resume" type="file" style="display:none">
+        <ul id="chips"><li><button type="button">${chipName}</button><div><button type="button" aria-label="Remove Resume">Remove</button></div></li></ul>
+      </div>
+      <script>
+        document.querySelector('[aria-label="Remove Resume"]').addEventListener('click', (e) => e.target.closest('li').remove());
+        document.getElementById('resume').addEventListener('change', () => { window.__put = (window.__put || 0) + 1; });
+      <\/script>
+    </form>`;
+  await fill(html('Process Engineer II - Coherent Corp. US Careers', 'Alex Rivera - Coherent Corp - Process Engineer.pdf'), { url: 'https://f1013a.example.test/apply/one' });
+  let got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips').textContent }));
+  assert.equal(/Process Engineer\.pdf/.test(got.chips), false, `"Process Engineer" is not "Process Engineer II": ${JSON.stringify(got)}`);
+  assert.equal(got.put, 1);
+  await fill(html('Mechanical Engineer - Rolls-Royce Careers', 'Alex Rivera - Rolls-Royce - Test Engineer.pdf'), { url: 'https://f1013b.example.test/apply/two' });
+  got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips').textContent }));
+  assert.equal(/Test Engineer\.pdf/.test(got.chips), false, 'a hyphenated employer no longer hides the role');
+  await fill(html('Mechanical Engineer - Rolls-Royce Careers', 'Alex Rivera - Rolls-Royce - Mechanical Engineer.pdf'), { url: 'https://f1013c.example.test/apply/three' });
+  got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips').textContent }));
+  assert.equal(/Mechanical Engineer\.pdf/.test(got.chips), true, 'this posting\'s own file stays');
+});
+
+test('F-942: a Jarvis file for ANOTHER posting that shows up after the first look is removed and this posting\'s file goes on; his own file stays', async () => {
+  const html = (chipName) => `
+    <title>Careers at Cummins</title>
+    <h1>Product Engineer</h1>
+    <script>try { sessionStorage.setItem('jv-earlier-files-checked', '1'); } catch {}<\/script>
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <div class="attachments">
+        <h3>Resume</h3><label for="resume">Upload Resume</label>
+        <input id="resume" type="file" style="display:none">
+        <ul id="chips"><li><button type="button">${chipName}</button><div><button type="button" aria-label="Remove Resume">Remove</button></div></li></ul>
+      </div>
+      <script>
+        document.querySelector('[aria-label="Remove Resume"]').addEventListener('click', (e) => e.target.closest('li').remove());
+        document.getElementById('resume').addEventListener('change', () => { window.__put = (window.__put || 0) + 1; });
+      <\/script>
+    </form>`;
+  const r = await fill(html('Alex Rivera - Cummins Inc. - Design Engineer.pdf'), { url: 'https://f942a.example.test/apply/one' });
+  let got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips')?.textContent || '' }));
+  assert.equal(/Design Engineer\.pdf/.test(got.chips), false, `the other posting's file is removed: ${JSON.stringify(got)}`);
+  assert.equal(got.put, 1, 'and this posting\'s resume goes on');
+  assert.equal(r.uploaded, true);
+  await fill(html('My Resume 2026.pdf'), { url: 'https://f942b.example.test/apply/two' });
+  got = await page.evaluate(() => ({ put: window.__put || 0, chips: document.getElementById('chips')?.textContent || '' }));
+  assert.equal(/My Resume 2026\.pdf/.test(got.chips), true, 'a file he chose himself stays (F-413)');
+  assert.equal(got.put, 0, '…and nothing is put on top of it');
+});
+
+test('F-1017 (1): a street-address box that suggests takes the one row for his street, and keeps it (Lam on Eightfold)', async () => {
+  // The box spells the street its own way and DROPS what was typed when its
+  // list closes without a pick, the way Lam's Eightfold address box did.
+  const box = (rows) => `
+    <form>
+      <label for="addr">Address Line 1</label>
+      <input id="addr" type="text" aria-controls="addr-list" autocomplete="off">
+      <ul id="addr-list" role="listbox" style="display:none"></ul>
+      <script>
+        const input = document.getElementById('addr'), list = document.getElementById('addr-list');
+        let chosen = false;
+        input.addEventListener('input', () => {
+          chosen = false;
+          list.innerHTML = ${JSON.stringify(rows)}.map((r) => '<li role="option">' + r + '</li>').join('');
+          list.style.display = input.value ? 'block' : 'none';
+        });
+        list.addEventListener('mousedown', (e) => e.preventDefault());
+        list.addEventListener('click', (e) => {
+          const li = e.target.closest('[role="option"]'); if (!li) return;
+          input.value = li.textContent; chosen = true; list.style.display = 'none';
+        });
+        input.addEventListener('blur', () => setTimeout(() => { if (!chosen) input.value = ''; list.style.display = 'none'; }, 50));
+        input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { list.style.display = 'none'; if (!chosen) input.value = ''; } });
+      <\/script>
+    </form>`;
+  const one = await fill(box(['1 Test Street, Springfield, WA, USA', '1 Testa Ave, Boston, MA, USA']));
+  const kept = await page.evaluate(() => document.getElementById('addr').value);
+  assert.equal(kept, '1 Test Street, Springfield, WA, USA', `the row for his street is taken and kept: ${JSON.stringify(one.unanswered)}`);
+  assert.ok(!(one.unanswered || []).some((u) => /Address Line 1/.test(String(u.label || u))), 'and it is not reported lost');
+  // Two rows for the same street: a choice he makes, said out loud, never a guess.
+  const two = await fill(box(['1 Test Street, Springfield, WA, USA', '1 Test Street, Seattle, WA, USA']));
+  assert.ok((two.unanswered || []).some((u) => /Address Line 1/.test(String(u.label || u))), `two candidate rows are left for him: ${JSON.stringify(two.unanswered)}`);
+});
+
+test('F-1017 (1) review: a street box with no suggestion list is still LEFT, so a form that commits on blur gets the address', async () => {
+  // Workday commits a text box when it hears blur/focusout; the stayed-in
+  // address box must still be left after its (empty) suggestion look.
+  await fill(`
+    <form>
+      <label for="street">Street Address</label><input id="street" type="text">
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <script>
+        const s = document.getElementById('street');
+        const commit = () => { s.dataset.committed = s.value; };
+        s.addEventListener('blur', commit); s.addEventListener('focusout', commit);
+      <\/script>
+    </form>`);
+  assert.equal(await page.evaluate(() => document.getElementById('street').dataset.committed || ''), '1 Test St', 'the box heard it was left, with his address in it');
+});
+
+test('F-1017 (3): his press on an Eightfold job page with no Apply control opens /careers/apply?pid=… directly', async () => {
+  const job = 'https://careers.f1017.example.test/careers/job/790300845183-mechatronics-engineer-2?domain=lamresearch.com';
+  const form = 'https://careers.f1017.example.test/careers/apply**';
+  await page.unroute(job).catch(() => {});
+  await page.route(job, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<title>Mechatronics Engineer 2 | Lam Research</title><h1>Mechatronics Engineer 2</h1><p>Design and validate mechatronic subsystems.</p>' }));
+  await page.route(form, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<title>Apply</title><p>apply form</p>' }));
+  await page.goto(job);
+  // This test loads the ATS table the extension injects before content.js.
+  await page.addScriptTag({ content: readFileSync(path.join(HERE, 'ats.js'), 'utf-8') });
+  await page.addScriptTag({ content: DISCOVER });
+  await page.evaluate(() => {
+    globalThis.__jarvisRun = { armed: false, auto: false };
+    globalThis.__sent = [];
+    globalThis.chrome = { runtime: { sendMessage: async (msg, reply) => { globalThis.__sent.push(msg.type); reply({ ok: true }); } } };
+  });
+  await Promise.all([page.waitForURL(/\/careers\/apply\?pid=790300845183&domain=lamresearch\.com/, { timeout: 15000 }), page.evaluate(CONTENT).catch(() => null)]);
+  assert.match(page.url(), /\/careers\/apply\?pid=790300845183&domain=lamresearch\.com$/);
+  await page.unroute(form).catch(() => {});
+});
+
+test('F-1013 #14 review: a heading that adds a requisition or a place keeps this posting\'s own file', async () => {
+  const html = (heading, chipName) => `
+    <title>Careers at Micron</title>
+    <h1>${heading}</h1>
+    <form>
+      <label for="first_name">First Name</label><input id="first_name" type="text">
+      <div class="attachments">
+        <h3>Resume</h3><label for="resume">Upload Resume</label>
+        <input id="resume" type="file" style="display:none">
+        <ul id="chips"><li><button type="button">${chipName}</button><div><button type="button" aria-label="Remove Resume">Remove</button></div></li></ul>
+      </div>
+      <script>
+        document.querySelector('[aria-label="Remove Resume"]').addEventListener('click', (e) => e.target.closest('li').remove());
+      <\/script>
+    </form>`;
+  await fill(html('Process Engineer (R-1234)', 'Alex Rivera - Micron - Process Engineer.pdf'), { url: 'https://f1013d.example.test/apply/four' });
+  let chips = await page.evaluate(() => document.getElementById('chips').textContent);
+  assert.equal(/Process Engineer\.pdf/.test(chips), true, `a requisition after the role is the same role: ${chips}`);
+  await fill(html('Process Engineer - Boise, ID', 'Alex Rivera - Micron - Process Engineer.pdf'), { url: 'https://f1013e.example.test/apply/five' });
+  chips = await page.evaluate(() => document.getElementById('chips').textContent);
+  assert.equal(/Process Engineer\.pdf/.test(chips), true, 'so is a place');
+  await fill(html('Process Engineer Intern', 'Alex Rivera - Micron - Process Engineer.pdf'), { url: 'https://f1013f.example.test/apply/six' });
+  chips = await page.evaluate(() => document.getElementById('chips').textContent);
+  assert.equal(/Process Engineer\.pdf/.test(chips), false, 'an internship is another posting');
+  await fill(html('Process Engineer - 2027 University Graduate', 'Alex Rivera - Micron - Process Engineer.pdf'), { url: 'https://f1013g.example.test/apply/seven' });
+  chips = await page.evaluate(() => document.getElementById('chips').textContent);
+  assert.equal(/Process Engineer\.pdf/.test(chips), false, 'a graduate program is another posting');
+});
+
 test('a drop-zone uploader gets the file dropped on it, and says so', async () => {
   const result = await fill(`
     <form>
@@ -703,6 +1112,42 @@ test('a stalled step reports the FORM\'S OWN words', async () => {
   assert.ok(!/VPS\|abc/.test(result.stoppedBecause), 'Workday\'s internal error code means nothing to him');
 });
 
+test('F-815: Oracle\'s screen-reader announcements are never given as the reason a step stalled', async () => {
+  // ekpl / First Solar / Denso, 2026-10-03..16: "the form would not move on:
+  // You're all set, Anna Maria Alex! · apply-flow.a11y.dependency-fields-loaded".
+  const result = await fill(`
+    <div>
+      <h2>Contact Information</h2>
+      <label for="a">Something</label><input id="a">
+      <div role="alert">You're all set, Anna Maria Alex!</div>
+      <div role="alert">The form Address form loaded</div>
+      <div role="alert">apply-flow.a11y.dependency-fields-loaded</div>
+      <div role="alert">The Address Line 1 field is required.</div>
+      <button data-automation-id="pageFooterNextButton">Next step</button>
+    </div>`);
+  assert.match(result.stoppedBecause, /Address Line 1 field is required/);
+  assert.doesNotMatch(result.stoppedBecause, /all set|form loaded|a11y/, result.stoppedBecause);
+});
+
+test('F-816: an Oracle pill drawn again when chosen is read as chosen', async () => {
+  // cx-select-pills (TI / Legrand / Denso markup, form-captures): the click
+  // re-renders the group, so the clicked button is detached and the chosen
+  // one is a new node. The run said "the page did not keep the choice".
+  const report = await fill(`
+    <div class="input-row"><div class="input-row__control-container" id="c"></div></div>
+    <script>
+      const opts = ['Yes', 'No'];
+      const draw = (chosen) => {
+        document.getElementById('c').innerHTML = '<ul role="radiogroup" aria-label="Are you legally authorized to work in the United States?" class="cx-select-pills-container">'
+          + opts.map((o) => '<li role="presentation"><button type="button" role="radio" aria-checked="' + (o === chosen) + '" class="cx-select-pill-section' + (o === chosen ? ' cx-select-pill-section--selected' : '') + '"><span class="cx-select-pill-name"> ' + o + '</span></button></li>').join('') + '</ul>';
+        for (const b of document.querySelectorAll('#c button')) b.addEventListener('click', () => setTimeout(() => { window.__chosen = b.textContent.trim(); draw(window.__chosen); }, 120));
+      };
+      draw(null);
+    <\/script>`);
+  assert.equal(await page.evaluate(() => window.__chosen), 'Yes', 'the pill was clicked');
+  assert.ok(!(report.unanswered || []).some((u) => /did not keep the choice/.test(u.label || u)), JSON.stringify(report.unanswered));
+});
+
 test('F-633: a success notice is never given as the reason a step stalled', async () => {
   // Onto Innovation, 2026-10-01: "the form would not move on: Alex Rivera - Onto
   // Innovation - Applications Engineer 3.pdf successfully uploaded".
@@ -734,11 +1179,414 @@ test('A NEXT THAT DOES NOTHING IS ONE STEP, even when filling changed the page (
   assert.equal(await page.evaluate(() => document.getElementById('r').value), 'Asian', 'the revealed question was still answered');
 });
 
+test('F-789: a Save and Continue that takes seconds to show the next step is not "the form stayed on this step" (Terex, 2026-10-22)', async () => {
+  // Workday keeps the old step on screen, unchanged, while it saves. The walk
+  // used to judge after 750 ms of stillness and stop; the next step painted a
+  // moment later and sat unfilled for five minutes.
+  const result = await fill(`
+    <div id="app">
+      <h2>My Information</h2><label for="a">First Name</label><input id="a">
+      <button data-automation-id="pageFooterNextButton" id="next">Save and Continue</button>
+    </div>
+    <script>
+      document.getElementById('next').onclick = () => {
+        setTimeout(() => {
+          document.getElementById('app').innerHTML = '<h2>My Experience</h2><label for="b">Last Name</label><input id="b">';
+        }, 2500);
+      };
+    <\/script>`);
+  assert.doesNotMatch(String(result.stoppedBecause), /stayed on this step/, result.stoppedBecause);
+  assert.equal(result.steps, 2, `the walk reached the second step: ${result.stoppedBecause}`);
+  assert.equal(await page.evaluate(() => document.getElementById('b')?.value), 'Rivera', 'and filled it');
+});
+
+test('F-798: a resume box that fills the form from the resume gets the file FIRST, once, and the answers go in on top of what it wrote (UKG, Yaskawa)', async () => {
+  // UKG parses the upload and re-writes the form; uploaded last, it blanked
+  // the address typed a moment before, and every later run uploaded again.
+  const result = await fill(`
+    <form onsubmit="return false">
+      <div id="rbox"><p>You can use a resume to fill out your application faster and it will be added automatically as an attachment.</p>
+        <label for="res">Upload Resume</label><input type="file" id="res"></div>
+      <label for="addr">Address 1</label><input id="addr">
+      <label for="city">City</label><input id="city">
+      <div id="attached"></div>
+    </form>
+    <script>
+      window.__uploads = 0;
+      document.getElementById('res').addEventListener('change', () => {
+        window.__uploads += 1;
+        setTimeout(() => {
+          document.getElementById('addr').value = '';
+          document.getElementById('city').value = 'Parsed City';
+          document.getElementById('attached').innerHTML = '<label><input type="checkbox" id="att"> Alex Rivera - Acme - Engineer.pdf</label>';
+          document.getElementById('res').value = '';
+        }, 600);
+      });
+    <\/script>`);
+  assert.equal(await page.evaluate(() => window.__uploads), 1, 'one upload, not one per pass');
+  assert.equal(result.uploaded, true);
+  assert.equal(await page.evaluate(() => document.getElementById('addr').value), '1 Test St', `the parse did not wipe the address: ${result.stoppedBecause}`);
+  assert.equal(await page.evaluate(() => document.getElementById('city').value), 'Springfield');
+});
+
+test('F-1009: a parsing resume box that redraws itself empty gets the file again, and the answers go back on top of the second parse (Rippling)', async () => {
+  // The first parse rewrites the form AND redraws the box empty, with no chip;
+  // the second keeps the file and shows it. The address it blanks each time
+  // must be his again at the end.
+  const result = await fill(`
+    <form onsubmit="return false">
+      <div id="rbox"><p>You can use a resume to fill out your application faster and it will be added automatically as an attachment.</p>
+        <label for="res">Upload Resume</label><input type="file" id="res" name="res"></div>
+      <label for="addr">Address 1</label><input id="addr">
+      <label for="city">City</label><input id="city">
+      <div id="attached"></div>
+    </form>
+    <script>
+      window.__uploads = 0;
+      const watch = (el) => el.addEventListener('change', () => {
+        window.__uploads += 1;
+        const first = window.__uploads === 1;
+        setTimeout(() => {
+          document.getElementById('addr').value = '';
+          document.getElementById('city').value = 'Parsed City';
+          if (first) {
+            const fresh = document.createElement('input');
+            fresh.type = 'file'; fresh.id = 'res'; fresh.name = 'res';
+            document.getElementById('res').replaceWith(fresh);
+            watch(fresh);
+          } else {
+            document.getElementById('attached').innerHTML = '<span>Alex Rivera - Acme - Engineer.pdf</span>';
+          }
+        }, 600);
+      });
+      watch(document.getElementById('res'));
+    <\/script>`);
+  assert.equal(await page.evaluate(() => window.__uploads), 2, 'attached again once, after the redraw');
+  assert.equal(result.uploaded, true, JSON.stringify(result.unanswered));
+  assert.equal(await page.evaluate(() => document.getElementById('addr').value), '1 Test St', 'the second parse did not leave the address blank');
+  assert.equal(await page.evaluate(() => document.getElementById('city').value), 'Springfield');
+});
+
+test('F-874: Phenom\'s "Make completing your job application easier" box is a prefilling box too — the file first, the answers on top (Honda)', async () => {
+  const result = await fill(`
+    <form onsubmit="return false">
+      <div id="rbox"><p>Upload options * Make completing your job application easier by uploading your resume or CV. Upload either DOC, DOCX, HTML, PDF, or TXT file types (3MB max)</p>
+        <label for="res">Upload Resume</label><input type="file" id="res"></div>
+      <label for="addr">Address</label><input id="addr">
+      <label for="city">City</label><input id="city">
+    </form>
+    <script>
+      window.__uploads = 0;
+      document.getElementById('res').addEventListener('change', () => {
+        window.__uploads += 1;
+        // Phenom's parse writes its own reading of the resume over the step.
+        setTimeout(() => { document.getElementById('addr').value = ''; document.getElementById('city').value = 'Parsed City'; }, 600);
+      });
+    <\/script>`);
+  assert.equal(await page.evaluate(() => window.__uploads), 1);
+  assert.equal(result.uploaded, true);
+  assert.equal(await page.evaluate(() => document.getElementById('addr').value), '1 Test St', `the parse did not wipe the address: ${result.stoppedBecause}`);
+  assert.equal(await page.evaluate(() => document.getElementById('city').value), 'Springfield');
+});
+
+test('F-881: on a run that follows him, what the site\'s resume parse wrote is not kept as his — what he typed before is (Honda Education End Date)', async () => {
+  await fillAs(`
+    <form onsubmit="return false">
+      <div id="rbox"><p>Make completing your job application easier by uploading your resume or CV.</p>
+        <label for="res">Upload Resume</label><input type="file" id="res"></div>
+      <label for="city">City</label><input id="city">
+      <label for="addr">Address</label><input id="addr" value="his own street">
+    </form>
+    <script>
+      document.getElementById('res').addEventListener('change', () => {
+        setTimeout(() => { document.getElementById('city').value = 'Parsed City'; }, 600);
+      });
+    <\/script>`, { armed: true, auto: true });
+  assert.equal(await page.evaluate(() => document.getElementById('city').value), 'Springfield', 'the parse\'s guess was replaced by his answer');
+  assert.equal(await page.evaluate(() => document.getElementById('addr').value), 'his own street', 'what was there before the upload is still his');
+});
+
+test('F-835: a SuccessFactors resume slot behind "Upload a Resume" is opened and the resume attached', async () => {
+  const result = await fill(`
+    <div class="rcmFormSection">
+      <label for="fn">First Name</label><input id="fn">
+      <h3>Resume</h3>
+      <a href="javascript:void(0)" id="open" onclick="window.__opened = (window.__opened || 0) + 1; document.getElementById('dlg').innerHTML = '<div role=&quot;dialog&quot;><label for=&quot;dev&quot;>Upload from Device</label><input type=&quot;file&quot; id=&quot;dev&quot;></div>'">Upload a Resume</a>
+      <div id="dlg"></div>
+    </div>`);
+  assert.equal(await page.evaluate(() => window.__opened), 1, 'the dialog was opened once');
+  assert.equal(result.uploaded, true, `the resume attached: ${result.stoppedBecause}`);
+  assert.equal(await page.evaluate(() => document.getElementById('dev').files.length), 1);
+});
+
+test('F-880: a resume the site refuses is reported as refused, in its words, never "attached" (career5, 2026-10-16)', async () => {
+  const result = await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <label for="cv">Resume/CV</label><input type="file" id="cv">
+    <div id="msg"></div>
+    <script>document.getElementById('cv').addEventListener('change', () => {
+      setTimeout(() => { document.getElementById('msg').innerHTML = '<div role="alert">Error Encountered while uploading your file.</div>'; }, 300);
+    });<\/script>`);
+  assert.equal(result.uploaded, false, `refused is not attached: ${JSON.stringify(result.unanswered)}`);
+  assert.ok(result.unanswered.some((u) => /refused the file: "Error Encountered while uploading your file\./.test(u)), JSON.stringify(result.unanswered));
+});
+
+test('F-880: a plain upload with no complaint still counts as attached', async () => {
+  const result = await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <label for="cv">Resume/CV</label><input type="file" id="cv">`);
+  assert.equal(result.uploaded, true);
+});
+
+test('F-894: SuccessFactors\' "+" that opens the resume dialog is pressed, in a closed section, and the cover letter\'s is not (Schindler, Lincoln, Veeco)', async () => {
+  const result = await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <div class="rcmFormSection">
+      <button type="button" id="docsBar" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true'); document.getElementById('docs').style.display='block'">My Documents</button>
+      <div id="docs" style="display:none">
+        <span id="lab-r" class="hiddenAriaContent" style="display:none">Resume</span>
+        <div class="attachmentBtn" id="51:_attach">
+          <div id="51:_attachLabel" class="attachmentLabel attachmentText" onclick="window.__tileClicked = 1"><span>Upload a Resume</span></div>
+          <div class="attachActions">
+            <span id="51:_attachIcon" class="glyphicon glyphicon-plus-sign addAttachments" role="button" tabindex="0" aria-labelledby="lab-r 51:_ariaActionLabel" style="display:inline-block;width:16px;height:16px"
+              onclick="window.__plusResume = (window.__plusResume || 0) + 1; document.getElementById('dlg').innerHTML = '<div role=&quot;dialog&quot;>Select a source for your file upload <label for=&quot;52:_file&quot;>Upload from Device</label><input type=&quot;file&quot; id=&quot;52:_file&quot; name=&quot;fileData1&quot;></div>'"></span>
+            <span id="51:_ariaActionLabel" class="hiddenAriaContent" style="display:none">Upload a Resume Opens a dialog</span>
+          </div>
+        </div>
+        <span id="lab-c" style="display:none">Cover Letter</span>
+        <div class="attachmentBtn" id="53:_attach"><div class="attachmentLabel"><span>Attach a Cover Letter</span></div>
+          <div class="attachActions"><span id="53:_attachIcon" class="glyphicon glyphicon-plus-sign addAttachments" role="button" tabindex="0" aria-labelledby="lab-c 53:_ariaActionLabel" style="display:inline-block;width:16px;height:16px" onclick="window.__plusCover = 1"></span>
+            <span id="53:_ariaActionLabel" style="display:none">Attach a Cover Letter Opens a dialog</span></div></div>
+      </div>
+    </div>
+    <div id="dlg"></div>`);
+  assert.equal(await page.evaluate(() => window.__plusResume || 0), 1, 'the resume "+" was pressed once');
+  assert.equal(await page.evaluate(() => window.__plusCover || 0), 0, 'the cover letter "+" was not');
+  assert.equal(await page.evaluate(() => document.getElementById('52:_file')?.files.length), 1, `the resume went into the dialog's box: ${result.stoppedBecause}`);
+  assert.equal(result.uploaded, true);
+});
+
+test('F-896: a hidden, unnamed file box elsewhere on the page does not stop the resume "+" (Lincoln, Veeco)', async () => {
+  const result = await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <div id="leftover" style="display:none"><input type="file" name="fileData9"></div>
+    <div class="attachmentBtn">
+      <span id="lab-r" style="display:none">Resume</span>
+      <div class="attachActions">
+        <span id="plus" class="glyphicon glyphicon-plus-sign addAttachments" tabindex="0" aria-labelledby="lab-r act-r" style="display:inline-block;width:16px;height:16px"
+          onclick="window.__plusResume = (window.__plusResume || 0) + 1; document.getElementById('dlg').innerHTML = '<div role=&quot;dialog&quot;>Select a source <label for=&quot;f1&quot;>Upload from Device</label><input type=&quot;file&quot; id=&quot;f1&quot; name=&quot;fileData1&quot;></div>'"></span>
+        <span id="act-r" style="display:none">Upload a Resume Opens a dialog</span>
+      </div>
+    </div>
+    <div id="dlg"></div>`);
+  assert.equal(await page.evaluate(() => window.__plusResume || 0), 1, 'the "+" (a focusable span with no role) was pressed once');
+  assert.equal(await page.evaluate(() => document.getElementById('f1')?.files.length), 1, `the resume went into the dialog's box: ${result.stoppedBecause}`);
+  assert.equal(result.uploaded, true);
+});
+
+test('the emailed code is typed into six one-digit boxes, Verify is pressed, and the form that follows is filled (his consent, 2026-10-23)', async () => {
+  const result = await fill(`
+    <script>window.__code = '482913';</script>
+    <h1>Verify your email</h1>
+    <p>Enter the verification code we sent to your email.</p>
+    <div id="pins">${[1, 2, 3, 4, 5, 6].map((i) => `<input id="p${i}" maxlength="1" inputmode="numeric" aria-label="Digit ${i}">`).join('')}</div>
+    <button type="button" id="verify" onclick="window.__typed = [...document.querySelectorAll('#pins input')].map((i) => i.value).join(''); document.body.innerHTML = '<h1>Application</h1><label for=fn>First Name</label><input id=fn>'">Verify</button>`);
+  assert.equal(await page.evaluate(() => window.__typed), '482913', 'every digit in its box before Verify');
+  assert.equal(await page.evaluate(() => document.getElementById('fn')?.value), 'Alex', `the form behind the code was filled: ${result.stoppedBecause}`);
+});
+
+test("Oracle's email-only screen: the email is filled, Next pressed, the emailed code typed (his consent, 2026-10-23)", async () => {
+  await fill(`
+    <script>window.__code = '731044';</script>
+    <h1>Welcome</h1>
+    <label for="em">Email Address</label><input id="em" type="email" name="email">
+    <label><input type="checkbox" id="agree"> I agree with the terms and conditions</label>
+    <script>
+      window.toForm = () => { window.__typed = document.getElementById('vc').value; document.body.innerHTML = '<label for="fn">First Name</label><input id="fn">'; };
+      window.toCode = () => { window.__next = 1; document.body.innerHTML = '<p>Enter the verification code we sent to your email.</p><label for="vc">Verification Code</label><input id="vc" name="verificationCode"><button type="button" onclick="toForm()">Verify</button>'; };
+    </script>
+    <form onsubmit="event.preventDefault(); toCode()"><button type="submit" id="next">Next</button></form>`,
+  { url: 'https://abcd.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/123/apply/email' });
+  assert.equal(await page.evaluate(() => window.__next || 0), 1, 'Next was pressed for the code');
+  assert.equal(await page.evaluate(() => window.__typed), '731044', 'the emailed code went in');
+  assert.equal(await page.evaluate(() => document.getElementById('fn')?.value), 'Alex');
+});
+
+test('an application page is never read as a code page: one-character boxes among questions, "one-time" in its text, a bare Submit (F-905 review)', async () => {
+  await fill(`
+    <script>window.__code = '482913';</script>
+    <label for="fn">First Name</label><input id="fn">
+    <p>This role includes a one-time relocation bonus. Best phone time: mornings.</p>
+    <label for="mi">Middle Initial</label><input id="mi" maxlength="1">
+    <div><input id="d1" maxlength="1" aria-label="Badge number part 1"><input id="d2" maxlength="1" aria-label="Badge number part 2"><input id="d3" maxlength="1" aria-label="Badge number part 3"><input id="d4" maxlength="1" aria-label="Badge number part 4"></div>
+    <button type="button" onclick="window.__submitted = 1">Submit</button>`);
+  assert.equal(await page.evaluate(() => window.__submitted || 0), 0, 'Submit was never pressed');
+  assert.equal(await page.evaluate(() => document.getElementById('d1').value), '', 'no code digits typed into the date boxes');
+  // (The planner leaves a page with four one-character boxes alone as a
+  // credential form — the older, safer rule; nothing here overrides it.)
+});
+
+test('a code box whose only button is "Submit" gets the code but nothing is pressed (F-905 review)', async () => {
+  await fill(`
+    <script>window.__code = '731044';</script>
+    <p>Enter the verification code we sent to your email.</p>
+    <label for="vc">Verification Code</label><input id="vc" name="verificationCode">
+    <button type="button" onclick="window.__submitted = 1">Submit</button>`);
+  assert.equal(await page.evaluate(() => document.getElementById('vc').value), '731044');
+  assert.equal(await page.evaluate(() => window.__submitted || 0), 0, 'a bare Submit is never the button for the code');
+});
+
+test('a "your session is about to expire" dialog gets its own Continue; one that asks for a human check does not (his call, 2026-10-23)', async () => {
+  await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <div id="warn"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<div role="dialog">Your session is about to expire. Do you want to continue? <button type="button" onclick="window.__stay = (window.__stay || 0) + 1; this.closest(\'[role=dialog]\').remove()">Continue</button></div>'
+      + '<div role="dialog">Are you still there? Please verify you are human. <button type="button" onclick="window.__bot = 1">Continue</button></div>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__stay || 0), 1, 'the session warning was answered once');
+  assert.equal(await page.evaluate(() => window.__bot || 0), 0, 'a human check is never pressed');
+});
+
+test('F-910: Oracle\'s "Are You Still With Us?" (a plain div) gets Continue Working, never End Session', async () => {
+  // Live 2026-10-24: TI, Oceaneering and Ford, all filled, all ended by this box.
+  await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <div id="warn"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<div class="standard-apply-session-expire-container"><h1>Are You Still With Us?</h1>'
+      + '<p>It seems you\'ve been gone for a while. For security reasons we will end your session automatically in 03:00 unless you would like to continue working.</p>'
+      + '<button type="button" onclick="window.__end = 1">End Session</button>'
+      + '<button type="button" onclick="window.__stay = (window.__stay || 0) + 1; this.parentElement.remove()">Continue Working</button></div>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__stay || 0), 1, 'Continue Working was pressed once');
+  assert.equal(await page.evaluate(() => window.__end || 0), 0, 'End Session is never pressed');
+});
+
+test('week review: a session dialog drawn INSIDE the application form never gets its type-less Continue; one with its own form does', async () => {
+  // A <button> with no type inside a <form> submits that form. A timeout
+  // dialog rendered inside the application's form would send the application.
+  await fill(`
+    <form id="app" onsubmit="window.__sent = (window.__sent || 0) + 1; return false">
+      <label for="fn">First Name</label><input id="fn">
+      <div id="warn"></div>
+    </form>
+    <div id="own"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<div role="dialog">Your session is about to expire. <button onclick="window.__inner = 1">Continue</button></div>';
+    document.getElementById('own').innerHTML = '<div role="dialog"><form onsubmit="window.__stay = (window.__stay || 0) + 1; this.closest(\'[role=dialog]\').remove(); return false">'
+      + 'Your session is about to expire. <button type="submit">Continue</button></form></div>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__sent || 0), 0, 'the application form was never submitted');
+  assert.equal(await page.evaluate(() => window.__inner || 0), 0, 'the Continue that would submit it was never pressed');
+  assert.equal(await page.evaluate(() => window.__stay || 0), 1, 'a dialog that submits only its own form still gets its Continue');
+});
+
+test('week-fixes J1a: a session container WRAPPING the whole application never gets the application\'s Continue', async () => {
+  // `.modal` and [class*=session-expire] match a container, not just a box:
+  // one that wraps the whole application puts the application's form
+  // "inside the dialog", and its type-less Continue submits it.
+  await fill(`
+    <div id="shell">
+      <form id="app" onsubmit="window.__sent = (window.__sent || 0) + 1; return false">
+        <label for="fn">First Name</label><input id="fn">
+        <div id="warn"></div>
+      </form>
+    </div>`);
+  await page.evaluate(() => {
+    document.getElementById('shell').className = 'standard-apply-session-expire-container';
+    document.getElementById('warn').innerHTML = 'Your session is about to expire. <button onclick="window.__press = 1">Continue</button>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__sent || 0), 0, 'the wrapped application was never submitted');
+  assert.equal(await page.evaluate(() => window.__press || 0), 0, 'its type-less Continue was never pressed');
+});
+
+test('week-fixes J1b: a session Continue outside any form whose form="…" names the application is never pressed', async () => {
+  // A button outside any form still submits the form its form="id" names.
+  await fill(`
+    <form id="app" onsubmit="window.__sent = (window.__sent || 0) + 1; return false">
+      <label for="fn">First Name</label><input id="fn">
+    </form>
+    <div id="warn"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<div role="dialog">Your session is about to expire. <button form="app" onclick="window.__press = 1">Continue</button></div>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__sent || 0), 0, 'the form named by form="app" was never submitted');
+  assert.equal(await page.evaluate(() => window.__press || 0), 0, 'the form="app" Continue was never pressed');
+});
+
+test('week-fixes K2a: a session dialog\'s own form that owns an application field by form="…" is never submitted', async () => {
+  // form.elements holds an <input form="sess"> drawn outside the form; a
+  // querySelector inside the form does not see it.
+  await fill(`
+    <label for="fn">First Name</label><input id="fn" form="sess">
+    <div id="warn"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<div role="dialog"><form id="sess" onsubmit="window.__sent = (window.__sent || 0) + 1; return false">'
+      + 'Your session is about to expire. <input type="hidden" name="t" value="1"><button type="submit">Continue</button></form></div>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__sent || 0), 0, 'the form that owns First Name was never submitted');
+});
+
+test('week-fixes K2b: a session dialog\'s own form holding a contenteditable field is never submitted', async () => {
+  await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <div id="warn"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<div role="dialog"><form onsubmit="window.__sent = (window.__sent || 0) + 1; return false">'
+      + 'Your session is about to expire. <div contenteditable>notes</div><button type="submit">Continue</button></form></div>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__sent || 0), 0, 'a form with a field he could type in was never submitted');
+});
+
+test('week-fixes K2c: a session dialog that IS its own form, holding only hidden inputs, still gets its Continue', async () => {
+  await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <div id="warn"></div>`);
+  await page.evaluate(() => {
+    document.getElementById('warn').innerHTML = '<form role="dialog" class="session-expire" onsubmit="window.__stay = (window.__stay || 0) + 1; this.remove(); return false">'
+      + 'Your session is about to expire. <input type="hidden" name="t" value="1"><button type="submit">Stay signed in</button></form>';
+  });
+  await page.waitForTimeout(17_000);
+  assert.equal(await page.evaluate(() => window.__stay || 0), 1, 'stay signed in was pressed once');
+});
+
+test('F-835: an Upload Resume button over a file box already on the page is never pressed', async () => {
+  await fill(`
+    <label for="fn">First Name</label><input id="fn">
+    <button type="button" id="up" onclick="window.__pressed = 1">Upload Resume</button>
+    <input type="file" id="cv" style="display:none" aria-label="Resume">`);
+  assert.equal(await page.evaluate(() => window.__pressed || 0), 0);
+});
+
+test('F-803: an optional field nothing answers is shown apart, never "left for you"', async () => {
+  // Moog's Workday listed "Suffix" beside the required questions, and every
+  // such run read as unfinished. Optional blanks are shown, not counted.
+  const result = await fill(`
+    <label for="a">First Name</label><input id="a">
+    <label for="b">Describe your ideal Tuesday</label><input id="b" required>
+    <label for="c">Your favourite colour of stapler</label><input id="c">`);
+  assert.ok(result.unanswered.some((u) => /Tuesday/.test(u)), `the required one is left for him: ${JSON.stringify(result.unanswered)}`);
+  assert.ok(!result.unanswered.some((u) => /stapler/.test(u)), `the optional one is not: ${JSON.stringify(result.unanswered)}`);
+  assert.ok((result.optionalBlank || []).some((u) => /stapler/.test(u)), `…but it is named: ${JSON.stringify(result.optionalBlank)}`);
+  const panel = await page.evaluate(() => document.getElementById('jarvis-overlay')?.shadowRoot?.getElementById('jarvis-panel')?.innerText || '');
+  assert.match(panel, /optional, left blank: .*stapler/i);
+  assert.match(panel, /1 left for you/);
+});
+
 test('a question it cannot answer is reported, never guessed', async () => {
   const result = await fill(`
     <label for="a">First Name</label><input id="a">
-    <label for="b">Describe your ideal Tuesday</label><input id="b">`);
+    <label for="b">Describe your ideal Tuesday</label><input id="b" required>`);
   assert.equal(result.filled, 1);
+  // Required, so it is his (an optional one is named apart — F-803).
   assert.deepEqual(result.unanswered, ['step 1: Describe your ideal Tuesday']);
   assert.equal(await page.evaluate(() => document.getElementById('b').value), '', 'left genuinely blank');
 });
@@ -766,8 +1614,9 @@ test('IT SHOWS WHAT IT DID, on the page', async () => {
   // honest experience of using it, with no way to see which things or why.
   await fill(`
     <label for="a">First Name</label><input id="a">
-    <label for="b">Describe your ideal Tuesday</label><input id="b">
+    <label for="b">Describe your ideal Tuesday</label><input id="b" required>
     <label for="c">I agree to the Terms</label><input id="c" type="checkbox">`);
+  // Required, so it is "left for you"; an optional blank is named apart (F-803).
 
   const panel = await page.evaluate(() => {
     const el = document.getElementById('jarvis-overlay')?.shadowRoot?.getElementById('jarvis-panel');
@@ -1134,6 +1983,71 @@ test('a combobox with no matching option is reported unanswered, not claimed', a
     'and he must be told which question went unanswered');
 });
 
+test('F-987: "Yes" is never committed to one of two "Yes, …" rows the matcher refused (Ginkgo, 2026-11-04)', async () => {
+  // Ginkgo's Greenhouse sponsorship question. The server's matcher rightly
+  // found no single row for "Yes"; the typed fallback then took the first row
+  // whose first comma part is "Yes" — "…sponsorship support now", a claim the
+  // plan never made.
+  // Since his answer (2026-11-04, F-995) Ginkgo's own list holds his row, and
+  // the plan names it: that row, never the "…support now" one.
+  const Q = 'Do you now or will you in the future need employer sponsorship for a visa to work in the country where the job is open?';
+  await fill(comboFixture(Q, ['Yes, I will need sponsorship support now', 'Yes, but not until the future', 'No']));
+  const ginkgo = await page.evaluate(() => document.querySelector('.select__single-value')?.textContent || '');
+  assert.equal(ginkgo, 'Yes, but not until the future', 'his row, named by the plan');
+  // The guard itself: two "Yes, …" rows and neither is his — nothing committed, nothing half-typed.
+  const result = await fill(comboFixture(Q, ['Yes, I will need sponsorship support now', 'Yes, I need sponsorship support for a transfer', 'No']));
+  const state = await page.evaluate(() => ({
+    inputValue: document.getElementById('q').value,
+    committed: document.querySelector('.select__single-value')?.textContent || '',
+  }));
+  assert.equal(state.committed, '', `two rows start with "Yes": neither is his answer by default (${state.committed})`);
+  assert.equal(state.inputValue, '', 'and no half-typed search term is left behind');
+  assert.ok(result.unanswered.some((u) => /sponsorship/.test(u.label || u)), 'and the question is left for him, named');
+});
+
+test('F-991: a combobox is asked every spelling of the answer in one opening, so "LinkedIn" is reached (Maven, 2026-11-04)', async () => {
+  // Maven's Greenhouse "How did you hear about us?": Google search | LinkedIn |
+  // Hacker News | Word of Mouth. The plan lists the company's own site first in
+  // many spellings, then LinkedIn; each spelling reopened the list, and the
+  // field's budget ran out on the eighth, before LinkedIn.
+  const began = Date.now();
+  const result = await fill(comboFixture('How did you hear about us?', ['Google search', 'LinkedIn', 'Hacker News', 'Word of Mouth']));
+  const took = Date.now() - began;
+  const committed = await page.evaluate(() => document.querySelector('.select__single-value')?.textContent || '');
+  assert.equal(committed, 'LinkedIn', `his ladder's first row the list has (${JSON.stringify(result.unanswered)})`);
+  assert.ok(took < 15000, `one opening, not one per spelling: ${took} ms`);
+});
+
+// F-995, SETTLED BY HIS ANSWER (2026-11-04): "Yes, but not until the future" IS
+// his row. The plan names it first, word for word, so it is chosen as itself —
+// never reached by a loose bare "Yes".
+test('F-995: his sponsorship row "Yes, but not until the future" is chosen because the plan names it (sponsorship)', async () => {
+  for (const options of [['Yes, but not until the future', 'No'], ['Yes, now', 'Yes, but not until the future', 'No']]) {
+    const result = await fill(comboFixture(
+      'Do you now or will you in the future need employer sponsorship for a visa to work in the country where the job is open?',
+      options,
+    ));
+    const committed = await page.evaluate(() => document.querySelector('.select__single-value')?.textContent || '');
+    assert.equal(committed, 'Yes, but not until the future', `his row, named by the plan (${options.join(' | ')}; ${JSON.stringify(result.unanswered)})`);
+  }
+});
+
+// F-996: chooseOption gave "Company Website" (and every "… Website" spelling)
+// to a row that only shares the word: "Website banner ad".
+test('F-991 review: an alternate spelling never takes a decoy row on the open list (F-996)', async () => {
+  // "Company Website" and its spellings are asked of the open list before
+  // LinkedIn; a row that only shares a word with them is not the company's site.
+  await fill(comboFixture('How did you hear about us?', ['Google search', 'Company newsletter', 'Website banner ad', 'LinkedIn', 'Word of Mouth']));
+  const committed = await page.evaluate(() => document.querySelector('.select__single-value')?.textContent || '');
+  assert.equal(committed, 'LinkedIn');
+});
+
+test('F-987: one row that starts with the answer is still taken', async () => {
+  await fill(comboFixture('Are you legally authorized to work in the United States?', ['Yes, I am authorized', 'No, I am not authorized']));
+  const committed = await page.evaluate(() => document.querySelector('.select__single-value')?.textContent || '');
+  assert.equal(committed, 'Yes, I am authorized');
+});
+
 /**
  * Ashby's "Search schools..." box (Applied Intuition, 2026-09-30, read from
  * Ashby's own bundle): nothing is listed until something is typed; the search
@@ -1212,6 +2126,112 @@ test('ORACLE RECRUITING CLOUD: a lookup whose rows are role=gridcell is read, an
     })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/zip/i.test(a.label)) { a.action = 'prompt'; a.value = '12345'; a.promptKind = 'combo'; } return plan; }` });
   const got = await page.evaluate(() => ({ value: document.getElementById('postalCode-32').value, searched: window.__searched }));
   assert.equal(got.value, '12345, Springfield, Springfield, WA');
+});
+
+test('F-878: an Oracle ZIP lookup that answers its first digits with another code is searched with the whole number (TI, 2026-10-23)', async () => {
+  // TI's lookup offered only "99009, Elk, Springfield, WA" for "12345". Here the
+  // three-digit search answers that, slowly; only the whole number finds 12345.
+  await fill(`
+    <label for="postalCode-30">ZIP Code</label>
+    <div class="cx-select-container"><input id="postalCode-30" name="postalCode" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="postalCode-30-listbox" aria-expanded="false" class="cx-select-input"></div>
+    <div id="postalCode-30-listbox" role="grid" class="cx-select__list"></div>
+    <script>(() => {
+      const input = document.getElementById('postalCode-30');
+      const grid = document.getElementById('postalCode-30-listbox');
+      const draw = (z) => {
+        grid.innerHTML = '';
+        for (const t of z) {
+          const row = document.createElement('div'); row.setAttribute('role', 'row');
+          const cell = document.createElement('div'); cell.setAttribute('role', 'gridcell'); cell.className = 'cx-select__list-item ';
+          cell.innerHTML = '<div class="cx-select__list-item-container"><span class="cx-select__list-item--content"><span>' + t + '</span></span></div>';
+          cell.addEventListener('click', () => { input.value = t; grid.innerHTML = ''; });
+          row.appendChild(cell); grid.appendChild(row);
+        }
+      };
+      input.addEventListener('input', () => {
+        (window.__searches = window.__searches || []).push(input.value);
+        if (input.value === '12345') { grid.setAttribute('aria-busy', 'true'); setTimeout(() => { grid.setAttribute('aria-busy', 'false'); draw(['12345, Springfield, Springfield, WA']); }, 400); }
+        else if (input.value.length >= 3) draw(['99009, Elk, Springfield, WA']);
+        else grid.innerHTML = '';
+      });
+    })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/zip/i.test(a.label)) { a.action = 'prompt'; a.value = '12345'; a.promptKind = 'combo'; } return plan; }` });
+  const got = await page.evaluate(() => ({ value: document.getElementById('postalCode-30').value, searches: window.__searches }));
+  assert.equal(got.value, '12345, Springfield, Springfield, WA', `searches: ${JSON.stringify(got.searches)}`);
+});
+
+test('F-883: Oracle\'s ZIP list follows its City — City first, and a saved wrong City is replaced even on a follow-along run (TI, 2026-10-23)', async () => {
+  // Page order ZIP, City (as TI draws them); the saved profile left City
+  // "Elk", so the ZIP list held only Elk's codes and his ZIP had no row.
+  const box = (name, label) => `<label for="${name}-1">${label}</label>
+    <div class="cx-select-container"><input id="${name}-1" name="${name}" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="${name}-1-listbox" aria-expanded="false" class="cx-select-input"></div>
+    <div id="${name}-1-listbox" role="grid" class="cx-select__list"></div>`;
+  await fillAs(`<form onsubmit="return false">${FOUR}${box('postalCode', 'ZIP Code')}${box('city', 'City')}</form>
+    <script>(() => {
+      const ZIPS = { Elk: ['99009, Elk, Springfield, WA'], Springfield: ['00000, Springfield, Springfield, WA', '12345, Springfield, Springfield, WA'] };
+      const CITIES = ['Airway Heights, Springfield, WA', 'Cheney, Springfield, WA', 'Elk, Springfield, WA', 'Springfield, Springfield, WA'];
+      const city = document.getElementById('city-1'); const zip = document.getElementById('postalCode-1');
+      city.value = 'Elk';
+      window.__order = [];
+      const wire = (input, rows) => {
+        const grid = document.getElementById(input.id + '-listbox');
+        const draw = () => {
+          grid.innerHTML = '';
+          for (const t of rows().filter((r) => !input.__typed || r.toLowerCase().includes(input.__typed.toLowerCase()))) {
+            const row = document.createElement('div'); row.setAttribute('role', 'row');
+            const cell = document.createElement('div'); cell.setAttribute('role', 'gridcell'); cell.className = 'cx-select__list-item ';
+            cell.innerHTML = '<div class="cx-select__list-item-container"><span class="cx-select__list-item--content"><span>' + t + '</span></span></div>';
+            cell.addEventListener('click', () => { input.value = t.split(',')[input === city ? 0 : 0].trim() === t.split(',')[0].trim() ? (input === city ? t.split(',')[0].trim() : t) : t; window.__order.push(input.name); grid.innerHTML = ''; input.setAttribute('aria-expanded', 'false'); if (input === city) zip.value = ''; });
+            row.appendChild(cell); grid.appendChild(row);
+          }
+          input.setAttribute('aria-expanded', 'true');
+        };
+        input.addEventListener('mousedown', () => { input.__typed = ''; draw(); });
+        input.addEventListener('input', () => { input.__typed = input.value; draw(); });
+      };
+      wire(city, () => CITIES);
+      wire(zip, () => ZIPS[city.value] || []);
+    })();<\/script>`, { armed: true, auto: true, choose: true });
+  const got = await page.evaluate(() => ({ city: document.getElementById('city-1').value, zip: document.getElementById('postalCode-1').value, order: window.__order }));
+  assert.equal(got.city, 'Springfield', `the saved "Elk" was replaced: ${JSON.stringify(got)}`);
+  assert.equal(got.zip, '00000, Springfield, Springfield, WA', `the ZIP came from Springfield's list: ${JSON.stringify(got)}`);
+  assert.deepEqual(got.order, ['city', 'postalCode'], 'City before ZIP');
+});
+
+test('F-883: a saved City of another town is replaced, Springfield is not "Springfield Valley", the ZIP it empties comes back, and his street is left alone (onsemi, Oceaneering)', async () => {
+  const box = (name, label) => `<label for="${name}-1">${label}</label>
+    <div class="cx-select-container"><input id="${name}-1" name="${name}" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="${name}-1-listbox" aria-expanded="false" class="cx-select-input"></div>
+    <div id="${name}-1-listbox" role="grid" class="cx-select__list"></div>`;
+  await fillAs(`<form onsubmit="return false">${FOUR}
+    <label for="a1">Address Line 1</label><input id="a1" name="addressLine1" value="456 Example Ave">
+    ${box('postalCode', 'ZIP Code')}${box('city', 'City')}</form>
+    <script>(() => {
+      const ZIPS = { Mica: ['99023, Mica, Springfield, WA'], Springfield: ['00000, Springfield, Springfield, WA'], 'Springfield Valley': ['99206, Springfield Valley, Springfield, WA'] };
+      const CITIES = ['Mica, Springfield, WA', 'Springfield Valley, Springfield, WA', 'Springfield, Springfield, WA'];
+      const city = document.getElementById('city-1'); const zip = document.getElementById('postalCode-1');
+      city.value = 'Mica'; zip.value = '00000';
+      const wire = (input, rows) => {
+        const grid = document.getElementById(input.id + '-listbox');
+        const draw = () => {
+          grid.innerHTML = '';
+          for (const t of rows().filter((r) => !input.__typed || r.toLowerCase().includes(input.__typed.toLowerCase()))) {
+            const row = document.createElement('div'); row.setAttribute('role', 'row');
+            const cell = document.createElement('div'); cell.setAttribute('role', 'gridcell'); cell.className = 'cx-select__list-item ';
+            cell.innerHTML = '<div class="cx-select__list-item-container"><span class="cx-select__list-item--content"><span>' + t + '</span></span></div>';
+            cell.addEventListener('click', () => { input.value = input === city ? t.split(',')[0].trim() : t; grid.innerHTML = ''; input.setAttribute('aria-expanded', 'false'); if (input === city) zip.value = ''; });
+            row.appendChild(cell); grid.appendChild(row);
+          }
+          input.setAttribute('aria-expanded', 'true');
+        };
+        input.addEventListener('mousedown', () => { input.__typed = ''; draw(); });
+        input.addEventListener('input', () => { input.__typed = input.value; draw(); });
+      };
+      wire(city, () => CITIES);
+      wire(zip, () => ZIPS[city.value] || []);
+    })();<\/script>`, { armed: true, auto: true, choose: true });
+  const got = await page.evaluate(() => ({ city: document.getElementById('city-1').value, zip: document.getElementById('postalCode-1').value, street: document.getElementById('a1').value }));
+  assert.equal(got.city, 'Springfield', `Mica replaced, and not by Springfield Valley: ${JSON.stringify(got)}`);
+  assert.equal(got.zip, '00000, Springfield, Springfield, WA', `the ZIP the City change emptied came back: ${JSON.stringify(got)}`);
+  assert.equal(got.street, '456 Example Ave', 'his street line is his');
 });
 
 test('F-735: an Oracle date\'s MONTH and YEAR share one name, and each gets its own list (Nokia, 2026-10-16)', async () => {
@@ -1394,9 +2414,11 @@ test('THE SECOND PASS IS HANDED ONLY THE REVEALED FIELDS', () => {
 
   assert.match(src, /async function fillCurrentStep\(only = null/,
     'it must be able to take a subset at all');
-  assert.match(src, /const fields = only \|\| discover\(\)/,
+  // (F-798 added a third case, a restricted re-plan on top of a pre-filled
+  // page; the subset still wins over re-reading the page.)
+  assert.match(src, /const fields = (?:restrict \? context : )?\(?only \|\| discover\(\)/,
     'and use that subset instead of re-reading the page');
-  assert.match(src, /await fillCurrentStep\(revealed, \{ keepExisting: auto, entries: false, readBack: true \}\)/,
+  assert.match(src, /await fillCurrentStep\(revealed, \{ keepExisting: auto, entries: false, readBack: true(?:, context: discover\(\))? \}\)/,
     'the second pass must pass the revealed fields, not re-plan everything — under the same follow-along rule as the first');
 
   // The guard: `revealed` has to be what its name says.
@@ -1730,20 +2752,36 @@ test('THE TRIGGER IS CLICKED AND SAVE AND CONTINUE IS NOT', async () => {
 // value already on the form, because it is either ours or his correction.
 
 /** Like fill(), but the page is told what kind of run this is, and every message it sends is kept. */
-async function fillAs(html, run) {
-  await page.goto('about:blank');   // a fresh document, see fill()
-  await page.setContent(html);
+async function fillAs(html, run, url = '') {
+  // `url`: served from a real origin, so sessionStorage — the tab's memory of
+  // steps it filled — outlives a reload (F-888).
+  if (url) {
+    await page.unroute(url).catch(() => {});
+    await page.route(url, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: html }));
+    await page.goto(url);
+  } else {
+    await page.goto('about:blank');   // a fresh document, see fill()
+    await page.setContent(html);
+  }
   await page.addScriptTag({ content: DISCOVER });
   await page.evaluate((ctx) => {
     globalThis.__jarvisRun = ctx;
     globalThis.__sent = [];
     globalThis.chrome = {
       runtime: {
+        // A worker the page can reach (its listeners install only then), when a test asks.
+        ...(ctx.reachable ? { id: 'jarvis-test' } : {}),
         sendMessage: async (msg, reply) => {
           globalThis.__sent.push(JSON.parse(JSON.stringify(msg)));
           if (msg.type === 'plan') reply({ ok: true, plan: await globalThis.__jarvisPlan(msg.fields) });
           else if (msg.type === 'resume') reply({ ok: true, bytes: await globalThis.__jarvisResume() });
-          else if (msg.type === 'posting') reply({ ok: true, id: 'from-page', status: 'tailoring', company: 'Acme', tailored: true });
+          // As the worker answers: with the tab's `started` (background.js 'posting'),
+          // or a refusal when a test says the server would not take the page.
+          else if (msg.type === 'posting') reply(ctx.postingRefused ? { ok: false, status: 404, error: 'couldn\'t read this page\'s job title' } : { ok: true, id: 'from-page', status: 'tailoring', company: 'Acme', tailored: true, ...(typeof ctx.started === 'boolean' ? { started: ctx.started } : {}) });
+          // Is the tab still armed? (F-990) Only when a test says what the worker would answer.
+          else if (msg.type === 'still-armed' && typeof ctx.stillArmed === 'boolean') reply({ ok: true, armed: ctx.stillArmed });
+          // A list's rows are matched by the real matcher only when a test asks (F-883).
+          else if (msg.type === 'choose' && ctx.choose) { const index = await globalThis.__jarvisChoose(msg.want, msg.options); reply({ ok: true, index, value: index >= 0 ? msg.options[index] : null }); }
           else reply({ ok: true });
         },
       },
@@ -1790,6 +2828,25 @@ test('F-573: a NEW step under the same heading is filled; the step he comes Back
   assert.match(String(back?.stoppedBecause || ''), /already filled/, 'the step he came back to is his to review');
 });
 
+test('F-925: a work-authorization answer the SITE saved (never seen by this tab) is answered from his files; his own change after that stays', async () => {
+  // Honeywell's Oracle form, 2026-10-25: the pills from his earlier application
+  // were pressed when the page opened — sponsorship "No" — and the follow-along
+  // run kept them as his.
+  const FORM = `${FOUR}
+    <fieldset><legend>Will you now or in the future require visa sponsorship to work in the United States?</legend>
+      <label for="sy">Yes</label><input type="radio" name="sp" id="sy" value="Yes">
+      <label for="sn">No</label><input type="radio" name="sp" id="sn" value="No" checked>
+    </fieldset>`;
+  await fillAs(FORM, { armed: true, auto: true, id: 'job-1' });
+  const first = await page.evaluate(() => document.querySelector('input[name=sp]:checked')?.value);
+  assert.equal(first, 'Yes', 'the saved "No" is replaced by his answer');
+  // He changes it by hand; the next follow-along run keeps it.
+  await page.evaluate(() => { document.getElementById('sn').checked = true; });
+  await page.evaluate(CONTENT);
+  const second = await page.evaluate(() => document.querySelector('input[name=sp]:checked')?.value);
+  assert.equal(second, 'No', 'after a run has planned it, the box is his');
+});
+
 test('A RUN HE DID NOT START NEVER WRITES OVER WHAT IS ON THE FORM', async () => {
   // After the first pass, everything on the form is either what we wrote or
   // what he corrected by hand, and there is no telling them apart. He fixes a
@@ -1803,7 +2860,9 @@ test('A RUN HE DID NOT START NEVER WRITES OVER WHAT IS ON THE FORM', async () =>
       <label for="y">Yes</label><input type="radio" name="auth" id="y" value="Yes">
       <label for="n">No</label><input type="radio" name="auth" id="n" value="No" checked>
     </fieldset>
-    <script>document.getElementById('g').value = 'Female';</script>`;
+    <script>document.getElementById('g').value = 'Female';
+      // "After the first pass": this tab has planned the question before (F-925).
+      globalThis.__jarvisSeenFields = new Set([location.pathname + '|Are you legally authorized to work in the United States?']);</script>`;
 
   const auto = await fillAs(FORM, { armed: true, auto: true, id: 'job-1' });
   const state = await page.evaluate(() => ({
@@ -1885,7 +2944,7 @@ test('THE WATCHER FILLS THE NEXT STEP AFTER HE PRESSES SAVE AND CONTINUE HIMSELF
   assert.equal(await page.evaluate(() => document.querySelector('h2').textContent), 'My Experience');
 
   // The watcher: 700ms debounce, then settle, then a 3s floor since the last run.
-  await wait(7000);
+  await wait(9000);
   const after = await page.evaluate(() => ({
     left: window.__left,
     onScreen: document.querySelector('h2').textContent,
@@ -2033,6 +3092,16 @@ test('A RUN NOBODY CLICKED FOR DOES NOT START AN APPLICATION HE DID NOT', async 
       document.getElementById('page').innerHTML = '<h1>Test Engineer</h1><p>Still an advert, with another Apply.</p><button id="apply2" onclick="window.__APPLIED += 1">Apply</button>'; };</script>`,
   { armed: true, auto: true, started: true });
   assert.equal(await page.evaluate(() => window.__APPLIED), 1, 'followed once, and not again on the page it revealed');
+});
+
+test('F-1013 #12: A "STARTED" TAB ON A POSTING THE SERVER COULD NOT CONFIRM DOES NOT PRESS APPLY', async () => {
+  // The tab carries "started" from job A; this page is job B and the server
+  // refused it (an unreadable title, a page it could not place). Without the
+  // server's word that THIS is his application, Apply is not pressed.
+  await fillAs(`
+    <h1>Test Engineer</h1><p>${'A long job advert. '.repeat(20)}</p>
+    <button id="apply" onclick="window.__APPLIED = true">Apply</button>`, { armed: true, auto: true, started: true, postingRefused: true });
+  assert.equal(await page.evaluate(() => !!window.__APPLIED), false, 'Apply was not pressed on an unconfirmed posting');
 });
 
 test('a run nobody clicked for fills only what looks like an application', async () => {
@@ -2446,6 +3515,318 @@ test('AN EDUCATION ENTRY\'S MONTH PICKERS ARE SET WHEN THE PROFILE STATES THE MO
   assert.ok(!result.unanswered.some((u) => /pick the month/.test(u)), JSON.stringify(result.unanswered));
 });
 
+test('F-795: a split Month / Year date in a generic entry never gets a year in its Month box (Coherent, Oracle)', async () => {
+  const result = await fill(`
+    <h2>Education</h2>
+    <div id="edu"><button type="button" id="add-edu">Add Education</button><div id="edu-panel"></div></div>
+    <script>
+      document.getElementById('add-edu').addEventListener('click', () => {
+        document.getElementById('edu-panel').innerHTML =
+          '<label for="s">School Name</label><input id="s">' +
+          '<label for="sm">Start Date Month</label><input id="sm">' +
+          '<label for="sy">Start Date Year</label><input id="sy">' +
+          '<label for="em">End Date Month</label><input id="em">' +
+          '<label for="ey">End Date Year</label><input id="ey">';
+      });
+    <\/script>`, {
+    editPlan: `(plan) => { for (const g of plan.entries || []) if (g.kind === 'education') for (const e of g.entries) Object.assign(e, { firstYear: 2023, firstMonth: 8, lastYear: 2027, lastMonth: 5 }); return plan; }`,
+  });
+  const got = await page.evaluate(() => Object.fromEntries(['s', 'sm', 'sy', 'em', 'ey'].map((id) => [id, document.getElementById(id)?.value ?? null])));
+  assert.ok(got.s !== null, `the entry was opened: ${JSON.stringify(result.unanswered)}`);
+  assert.ok(!/^\d{4}$/.test(String(got.sm)), `no year in Start Date Month: ${JSON.stringify(got)}`);
+  assert.ok(!/^\d{4}$/.test(String(got.em)), `no year in End Date Month: ${JSON.stringify(got)}`);
+  assert.equal(got.sy, '2023', `the year went into the Year box: ${JSON.stringify(got)}`);
+});
+
+test('F-887: an Oracle entry is saved with its own inline "Add Experience" (a type=submit in the form), the form is never sent, and the second entry goes in', async () => {
+  // Modelled on Ford's live markup (2026-10-23): the entry's footer is
+  // Cancel + button.save-btn[data-qa="profileItemInlineSaveButton"], both
+  // without a type attribute inside the application's <form>; one entry open
+  // at a time; the application's own Submit is a type=button pager control.
+  const result = await fill(`
+    <form class="apply-flow__content apply-flow__content-form" onsubmit="window.__nativeSubmit = (window.__nativeSubmit || 0) + 1; return false">
+      <label for="fn">First Name</label><input id="fn">
+      <h2>Experience</h2>
+      <div id="exp"><div id="cards"></div><button type="button" id="add" class="button apply-flow-profile-item-tile__new-tile">Add Experience</button><div id="panel"></div></div>
+      <button type="button" class="button apply-flow-pagination__submit-button" onclick="window.__SUBMITTED = 1">Submit</button>
+    </form>
+    <script>
+      const panel = document.getElementById('panel'), cards = document.getElementById('cards');
+      document.getElementById('add').addEventListener('click', () => {
+        if (panel.children.length) return;   // Oracle: one open entry at a time
+        panel.innerHTML = '<div class="standard-apply-flow-profile-item"><label for="t">Job Title</label><input id="t">'
+          + '<label for="c">Employer Name</label><input id="c">'
+          + '<div class="app-dialog__buttons-bar"><button class="button app-dialog__footer-button cancel-btn">Cancel</button>'
+          + '<button class="button app-dialog__footer-button save-btn" data-qa="profileItemInlineSaveButton">Add Experience</button></div></div>';
+        panel.querySelector('.save-btn').addEventListener('click', (e) => { e.preventDefault();
+          const c = document.createElement('div'); c.className = 'card';
+          c.textContent = document.getElementById('t').value + ' | ' + document.getElementById('c').value;
+          cards.appendChild(c); panel.innerHTML = ''; });
+        panel.querySelector('.cancel-btn').addEventListener('click', (e) => { e.preventDefault(); panel.innerHTML = ''; });
+      });
+    <\/script>`);
+  const got = await page.evaluate(() => ({ cards: [...document.querySelectorAll('#cards .card')].map((c) => c.textContent), open: document.getElementById('panel').children.length, native: window.__nativeSubmit || 0, submitted: !!window.__SUBMITTED }));
+  assert.equal(got.cards.length, 2, `both jobs saved as cards: ${JSON.stringify(got)} ${JSON.stringify(result.unanswered)}`);
+  assert.match(got.cards[0], /Mechanical Engineer Intern \| Acme Fab/);
+  assert.equal(got.open, 0, 'no entry left open');
+  assert.equal(got.native, 0, 'the application form was never submitted natively');
+  assert.equal(got.submitted, false, 'SUBMIT IS HIS');
+  assert.ok(!result.unanswered.some((u) => /Save yourself|did not open a sub-form/.test(u)), JSON.stringify(result.unanswered));
+});
+
+/**
+ * Oracle's profile-item sections as TI's live page drew them (2026-10-23):
+ * a .profile-item-container holding the saved tiles (article[data-qa=
+ * "profileItem<N>"]), the section's Add (data-qa="add<N>", hidden while an
+ * entry is open), the open entry's fields, and its footer — Cancel and the
+ * inline save, labelled "Add Education" like the Add itself. Degree is a
+ * required row of cx-select pills.
+ */
+const TILE_BTNS = '<button type="button" aria-label="Edit" title="Edit"></button><button type="button" aria-label="Delete" title="Delete"></button>';
+const ORACLE_SECTIONS = ({ eduTiles = [], eduOpen = false, workTiles = [], buttons = false } = {}) => `
+  <form onsubmit="window.__nativeSubmit = (window.__nativeSubmit || 0) + 1; return false">
+    <label for="fn">First Name</label><input id="fn">
+    <div class="apply-flow-block"><h3>Education</h3>
+      <div class="profile-item-container" id="edu"><div class="standard-apply-flow-profile-item">
+        <div class="profile-item-list" id="edu-tiles">${eduTiles.map((t) => `<article class="apply-flow-profile-item-tile" data-qa="profileItem106"><div class="apply-flow-profile-item-tile__summary"><span>${t}</span></div>${buttons ? TILE_BTNS : ''}</article>`).join('')}</div>
+        <div class="profile-add-item" id="edu-additem"><button type="button" class="button apply-flow-profile-item-tile__new-tile" data-qa="add106" id="edu-add"><span class="button__label">Add Education</span></button></div>
+        <div class="profile-item-content" id="edu-form"></div>
+        <div class="profile-item-footer" id="edu-foot"></div>
+      </div></div></div>
+    <div class="apply-flow-block"><h3>Experience</h3>
+      <div class="profile-item-container" id="work"><div class="standard-apply-flow-profile-item">
+        <div class="profile-item-list" id="work-tiles">${workTiles.map((t) => `<article class="apply-flow-profile-item-tile" data-qa="profileItem129"><div class="apply-flow-profile-item-tile__summary"><span>${t}</span></div>${buttons ? TILE_BTNS : ''}</article>`).join('')}</div>
+        <div class="profile-add-item" id="work-additem"><button type="button" class="button apply-flow-profile-item-tile__new-tile" data-qa="add129" id="work-add"><span class="button__label">Add Experience</span></button></div>
+        <div class="profile-item-content" id="work-form"></div>
+        <div class="profile-item-footer" id="work-foot"></div>
+      </div></div></div>
+    <button type="button" class="button apply-flow-pagination__submit-button" onclick="window.__SUBMITTED = 1">Submit</button>
+  </form>
+  <script>(() => {
+    window.__adds = { edu: 0, work: 0 }; window.__saves = { edu: 0, work: 0 };
+    const tile = (list, qa, text) => { const a = document.createElement('article'); a.className = 'apply-flow-profile-item-tile'; a.setAttribute('data-qa', qa);
+      a.innerHTML = '<div class="apply-flow-profile-item-tile__summary"><span></span></div>'; a.querySelector('span').textContent = text; document.getElementById(list).appendChild(a); };
+    const foot = (id, label, onSave) => { const f = document.getElementById(id);
+      f.innerHTML = '<div class="app-dialog__buttons-bar"><button class="button app-dialog__footer-button cancel-btn">Cancel</button>'
+        + '<button class="button app-dialog__footer-button save-btn" data-qa="profileItemInlineSaveButton"><span class="button__label">' + label + '</span></button></div>';
+      f.querySelector('.save-btn').addEventListener('click', (e) => { e.preventDefault(); onSave(); });
+      f.querySelector('.cancel-btn').addEventListener('click', (e) => { e.preventDefault(); close(id.split('-')[0]); }); };
+    const close = (k) => { document.getElementById(k + '-form').innerHTML = ''; document.getElementById(k + '-foot').innerHTML = ''; document.getElementById(k + '-additem').style.display = ''; };
+    const openEdu = () => {
+      document.getElementById('edu-additem').style.display = 'none';
+      document.getElementById('edu-form').innerHTML = '<div class="input-row input-row--has-picker"><label class="input-row__label"><span>Degree</span></label>'
+        + '<ul class="cx-select-pills-container">' + ["Associate's Degree/College Diploma", "Bachelor's Degree", "Master's Degree", 'Other']
+          .map((p) => '<li><button type="button" class="cx-select-pill-section"><span class="cx-select-pill-name">' + p + '</span></button></li>').join('') + '</ul></div>'
+        + '<div class="input-row"><label class="input-row__label" for="major"><span>Major</span></label><input class="input-row__control" id="major" name="major"></div>'
+        + '<div class="input-row"><label class="input-row__label" for="school"><span>School</span></label><input class="input-row__control" id="school" name="school"></div>';
+      document.getElementById('edu-form').querySelectorAll('.cx-select-pill-section').forEach((b) => b.addEventListener('click', () => {
+        document.querySelectorAll('#edu-form .cx-select-pill-section').forEach((x) => x.classList.remove('cx-select-pill-section--selected'));
+        b.classList.add('cx-select-pill-section--selected'); }));
+      foot('edu-foot', 'Add Education', () => {
+        window.__saves.edu += 1;
+        if (!document.querySelector('#edu-form .cx-select-pill-section--selected')) {
+          document.getElementById('edu-foot').insertAdjacentHTML('afterbegin', '<div role="alert">The Degree field is required.</div>'); return; }
+        tile('edu-tiles', 'profileItem106', document.getElementById('major').value || 'Unnamed Major'); close('edu'); });
+    };
+    const openWork = () => {
+      document.getElementById('work-additem').style.display = 'none';
+      document.getElementById('work-form').innerHTML = '<label for="jt">Job Title</label><input id="jt"><label for="emp">Employer Name</label><input id="emp">';
+      foot('work-foot', 'Add Experience', () => { window.__saves.work += 1;
+        tile('work-tiles', 'profileItem129', document.getElementById('jt').value + ' ' + document.getElementById('emp').value); close('work'); });
+    };
+    document.getElementById('edu-add').addEventListener('click', () => { window.__adds.edu += 1; if (!document.getElementById('edu-form').children.length) openEdu(); });
+    document.getElementById('work-add').addEventListener('click', () => { window.__adds.work += 1; if (!document.getElementById('work-form').children.length) openWork(); });
+    ${eduOpen ? 'openEdu();' : ''}
+    // A tile's own Edit and Delete (F-911): Delete takes the tile off; Edit on
+    // an education tile opens it again with its Major filled in.
+    window.__tileEdits = 0; window.__tileDeletes = 0;
+    document.addEventListener('click', (e) => {
+      const b = e.target.closest('article button'); if (!b) return;
+      const art = b.closest('article');
+      if (b.getAttribute('aria-label') === 'Delete') { window.__tileDeletes += 1; art.remove(); }
+      if (b.getAttribute('aria-label') === 'Edit' && art.closest('#edu-tiles')) {
+        window.__tileEdits += 1; const major = art.querySelector('span').textContent.replace(/Fields to fix.*$/, '').trim();
+        art.remove(); openEdu(); document.getElementById('major').value = major; }
+      // …and on a job tile (F-924): opens the job with what the tile held.
+      if (b.getAttribute('aria-label') === 'Edit' && art.closest('#work-tiles')) {
+        window.__tileEdits += 1; const t = art.querySelector('span').textContent.trim();
+        const emp = (t.match(/(Acme Fab|Test University)$/) || [''])[0];
+        art.remove(); openWork(); document.getElementById('jt').value = t.slice(0, t.length - emp.length).trim(); document.getElementById('emp').value = emp; }
+    });
+  })();<\/script>`;
+const ORACLE_DEGREE = `(plan) => { for (const g of plan.entries || []) if (g.kind === 'education') for (const e of g.entries) { e.degree = 'Bachelor of Science'; e.degreeAlts = ["Bachelor's Degree", "Bachelor's"]; } return plan; }`;
+const oracleState = () => page.evaluate(() => ({
+  edu: [...document.querySelectorAll('#edu-tiles article')].map((a) => a.textContent.trim()),
+  work: [...document.querySelectorAll('#work-tiles article')].map((a) => a.textContent.trim()),
+  adds: window.__adds, saves: window.__saves, eduOpen: !!document.getElementById('edu-form').children.length,
+  native: window.__nativeSubmit || 0, submitted: !!window.__SUBMITTED,
+}));
+
+test('F-889: an Oracle entry left open is filled and saved — its save is never taken for the Add — and a job a tile already shows is not added again (TI)', async () => {
+  const result = await fill(ORACLE_SECTIONS({ eduOpen: true, workTiles: ['Mechanical Engineer Intern Acme Fab'] }), { editPlan: ORACLE_DEGREE });
+  const got = await oracleState();
+  assert.deepEqual(got.edu, ['Mechanical Engineering'], `one education tile, with its Major: ${JSON.stringify(got)} ${JSON.stringify(result.unanswered)}`);
+  assert.equal(got.adds.edu, 0, 'the hidden Add was not pressed, and the open entry was used');
+  assert.equal(got.saves.edu, 1, 'its save pressed once, with the Degree pill chosen first');
+  assert.equal(got.eduOpen, false);
+  assert.deepEqual(got.work, ['Mechanical Engineer Intern Acme Fab', 'Manufacturing Lead Test University'], 'only the missing job added');
+  assert.equal(got.adds.work, 1);
+  assert.equal(got.native, 0, 'the application form was never submitted');
+  assert.equal(got.submitted, false, 'SUBMIT IS HIS');
+  assert.ok(!result.unanswered.some((u) => /Save yourself|did not open|you're all set/i.test(u)), JSON.stringify(result.unanswered));
+});
+
+test('F-889: on a later run, Oracle sections whose tiles already show his entries get nothing added (TI showed three education tiles after three runs)', async () => {
+  await fill(ORACLE_SECTIONS({ eduTiles: ['Mechanical Engineering'], workTiles: ['Mechanical Engineer Intern Acme Fab', 'Manufacturing Lead Test University'] }), { editPlan: ORACLE_DEGREE });
+  const got = await oracleState();
+  assert.deepEqual(got.edu, ['Mechanical Engineering'], JSON.stringify(got));
+  assert.equal(got.work.length, 2, JSON.stringify(got));
+  assert.deepEqual(got.adds, { edu: 0, work: 0 }, 'no Add pressed');
+});
+
+test('F-911: an Oracle row flagged "Fields to fix" is opened and finished, and an empty "Unnamed" row is deleted (Oceaneering, Ford)', async () => {
+  await fill(ORACLE_SECTIONS({
+    buttons: true,
+    eduTiles: ['Mechanical Engineering Fields to fix: 1'],
+    workTiles: ['Mechanical Engineer Intern Acme Fab', 'Unnamed Job Title Fields to fix: 1', 'Manufacturing Lead Test University'],
+  }), { editPlan: ORACLE_DEGREE });
+  const got = await oracleState();
+  const extra = await page.evaluate(() => ({ edits: window.__tileEdits, deletes: window.__tileDeletes }));
+  assert.equal(extra.edits, 1, `the flagged education row was opened with its Edit: ${JSON.stringify({ got, extra })}`);
+  assert.deepEqual(got.edu, ['Mechanical Engineering'], 'and saved finished — one row, nothing to fix');
+  assert.equal(got.adds.edu, 0, 'no second education row added');
+  assert.equal(extra.deletes, 1, 'the empty row was deleted');
+  assert.deepEqual(got.work, ['Mechanical Engineer Intern Acme Fab', 'Manufacturing Lead Test University'], 'his two jobs stay, nothing added');
+  assert.equal(got.submitted, false, 'SUBMIT IS HIS');
+});
+
+test('F-924: a saved Oracle job tile that drops "Intern" is opened with its Edit and saved again with his title — nothing added (Denso)', async () => {
+  const result = await fill(ORACLE_SECTIONS({
+    buttons: true,
+    eduTiles: ['Mechanical Engineering'],
+    workTiles: ['Mechanical Engineer Acme Fab', 'Manufacturing Lead Test University'],
+  }), { editPlan: ORACLE_DEGREE });
+  const got = await oracleState();
+  const extra = await page.evaluate(() => ({ edits: window.__tileEdits }));
+  assert.equal(extra.edits, 1, `the overstated tile was opened: ${JSON.stringify({ got, extra, u: result.unanswered })}`);
+  assert.deepEqual(got.work, ['Manufacturing Lead Test University', 'Mechanical Engineer Intern Acme Fab'], 'his title is back, one tile each');
+  assert.equal(got.adds.work, 0, 'no job added');
+  assert.equal(got.submitted, false, 'SUBMIT IS HIS');
+});
+
+test('F-915: Oracle timeline cards count as his saved jobs — matched by their dates when the short card hides the company (Coherent)', async () => {
+  const cards = '<div class="beautiful-timeline-item" role="group"><span>Process Intern</span> <span>From May 2026 to August 2026</span></div>'
+    + '<div class="beautiful-timeline-item" role="group"><span>Manufacturing Lead</span> <span>Test University</span> <span>From August 2024 to Present</span></div>';
+  await fill(ORACLE_SECTIONS({ eduTiles: ['Mechanical Engineering'] }).replace('<div class="profile-item-list" id="work-tiles">', '<div class="profile-item-list" id="work-tiles">' + cards), { editPlan: ORACLE_DEGREE });
+  const got = await oracleState();
+  assert.equal(got.adds.work, 0, `no job added again: ${JSON.stringify(got)}`);
+});
+
+test('F-900: Oracle tiles that spell the company shorter are his jobs — nothing added again — and the run names every entry as done', async () => {
+  // Ford's Experience went from 2 tiles to 5 in one run (2026-10-23); TI's
+  // tiles read "Manufacturing Engineer Intern Acme Steel Steel Stud Co…".
+  const result = await fill(ORACLE_SECTIONS({ eduTiles: ['Mechanical Engineering'], workTiles: ['Mechanical Engineer Intern Acme Fab', 'Manufacturing Lead Acme Steel Steel Stud Co'] }), {
+    editPlan: `(plan) => { for (const g of plan.entries || []) { if (g.kind === 'work') g.entries[1].company = 'Acme Steel Stud Company'; if (g.kind === 'education') for (const e of g.entries) { e.degree = 'Bachelor of Science'; e.degreeAlts = ["Bachelor's Degree"]; } } return plan; }`,
+  });
+  const got = await oracleState();
+  assert.equal(got.work.length, 2, `no job added again: ${JSON.stringify(got)}`);
+  assert.deepEqual(got.adds, { edu: 0, work: 0 });
+  const answered = result.answered || [];
+  for (const tag of ['Work experience 1 (Acme Fab)', 'Work experience 2 (Acme Steel Stud Company)', 'Work experience — this form said', 'Education — this form said']) {
+    assert.ok(answered.includes(tag), `"${tag}" reported done, so an older run's line about it is cleared: ${JSON.stringify(answered)}`);
+  }
+});
+
+test('F-902: a one-word answer typed into an Oracle lookup is still CLICKED (the box holding "Vietnamese" is not a choice), and a slow save is waited out (Ford)', async () => {
+  const result = await fill(`
+    <form onsubmit="window.__nativeSubmit = (window.__nativeSubmit || 0) + 1; return false">
+      <label for="fn">First Name</label><input id="fn">
+      <div class="apply-flow-block"><h3>Languages</h3>
+        <div class="profile-item-container" id="lang"><div class="standard-apply-flow-profile-item">
+          <div class="profile-item-list" id="lang-tiles"><article class="apply-flow-profile-item-tile" data-qa="profileItem140"><div class="apply-flow-profile-item-tile__summary"><span>English</span></div></article></div>
+          <div class="profile-add-item" id="lang-additem" style="display:none"><button type="button" class="button apply-flow-profile-item-tile__new-tile" data-qa="add140" id="lang-add"><span class="button__label">Add Language</span></button></div>
+          <div class="profile-item-content" id="lang-form">
+            <div class="input-row"><label class="input-row__label" for="lname"><span>Language</span></label>
+              <div class="cx-select-container"><input id="lname" name="contentItemId" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="lname-listbox" aria-expanded="false" aria-required="true" class="cx-select-input"></div>
+              <div id="lname-listbox" role="grid" class="cx-select__list"></div></div>
+          </div>
+          <div class="profile-item-footer" id="lang-foot"><div class="app-dialog__buttons-bar"><button class="button app-dialog__footer-button cancel-btn" id="lang-cancel">Cancel</button>
+            <button class="button app-dialog__footer-button save-btn" data-qa="profileItemInlineSaveButton"><span class="button__label">Add Language</span></button></div></div>
+        </div></div></div>
+      <button type="button" class="button apply-flow-pagination__submit-button" onclick="window.__SUBMITTED = 1">Submit</button>
+    </form>
+    <script>(() => {
+      window.__saves = 0; window.__cancels = 0;
+      const box = document.getElementById('lname'), grid = document.getElementById('lname-listbox');
+      const ALL = ['Afrikaans', 'Albanian', 'Arabic', 'English', 'French', 'Vietnamese', 'Welsh'];
+      // Only a clicked row is chosen; text typed to search chooses nothing.
+      let model = '';
+      const draw = (list) => { grid.innerHTML = ''; for (const t of list) { const row = document.createElement('div'); row.setAttribute('role', 'row');
+        const cell = document.createElement('div'); cell.setAttribute('role', 'gridcell'); cell.className = 'cx-select__list-item ';
+        cell.innerHTML = '<div class="cx-select__list-item-container"><span class="cx-select__list-item--content"><span>' + t + '</span></span></div>';
+        cell.addEventListener('click', () => { model = t; box.value = t; grid.innerHTML = ''; box.setAttribute('aria-expanded', 'false'); });
+        row.appendChild(cell); grid.appendChild(row); } };
+      const open = () => { box.setAttribute('aria-expanded', 'true'); if (!grid.children.length) draw(ALL.slice(0, 3)); };
+      box.addEventListener('mousedown', open); box.addEventListener('click', open); box.addEventListener('focus', open);
+      let timer = null;
+      box.addEventListener('keyup', () => { model = ''; clearTimeout(timer); timer = setTimeout(() => {
+        const q = box.value.toLowerCase(); draw(ALL.filter((t) => t.toLowerCase().includes(q)).slice(0, 3)); }, 300); });
+      const foot = document.getElementById('lang-foot');
+      foot.querySelector('.save-btn').addEventListener('click', (e) => { e.preventDefault(); window.__saves += 1;
+        if (!model) { if (!foot.querySelector('[role=alert]')) foot.insertAdjacentHTML('afterbegin', '<div role="alert">The Language field is required.</div>'); return; }
+        // Oracle's server answers in its own time.
+        setTimeout(() => { const a = document.createElement('article'); a.className = 'apply-flow-profile-item-tile'; a.setAttribute('data-qa', 'profileItem140');
+          a.innerHTML = '<div class="apply-flow-profile-item-tile__summary"><span>' + model + '</span></div>'; document.getElementById('lang-tiles').appendChild(a);
+          document.getElementById('lang-form').innerHTML = ''; foot.innerHTML = ''; document.getElementById('lang-additem').style.display = ''; }, 5500); });
+      foot.querySelector('.cancel-btn').addEventListener('click', (e) => { e.preventDefault(); window.__cancels += 1; });
+    })();<\/script>`, {
+    editPlan: `(plan) => { plan.entries = (plan.entries || []).filter((g) => g.kind !== 'language'); plan.entries.push({ kind: 'language', entries: [{ name: 'English' }, { name: 'Vietnamese' }] }); return plan; }`,
+  });
+  const got = await page.evaluate(() => ({ tiles: [...document.querySelectorAll('#lang-tiles article')].map((a) => a.textContent.trim()), saves: window.__saves, cancels: window.__cancels, native: window.__nativeSubmit || 0, submitted: !!window.__SUBMITTED }));
+  assert.deepEqual(got.tiles, ['English', 'Vietnamese'], `Vietnamese saved once, English not again: ${JSON.stringify(got)} ${JSON.stringify(result.unanswered)}`);
+  assert.equal(got.cancels, 0, 'a slow save is not cancelled');
+  assert.equal(got.native, 0);
+  assert.equal(got.submitted, false, 'SUBMIT IS HIS');
+  // (The test profile has no languages, so the planner leaves the bare box as
+  // "step 1: Language"; with his profile it skips it — apply-plan.test F-902.)
+  assert.ok(!result.unanswered.some((u) => /Language \d|this form said/.test(u)), JSON.stringify(result.unanswered));
+});
+
+test('F-887: an Oracle lookup that searches only on keystrokes, and opens on an unfiltered first page, is typed key by key (onsemi School)', async () => {
+  await fill(`
+    <label for="sch">School</label>
+    <div class="cx-select-container"><input id="sch" name="educationalEstablishment" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="sch-listbox" aria-expanded="false" class="cx-select-input"></div>
+    <div id="sch-listbox" role="grid" class="cx-select__list"></div>
+    <script>(() => {
+      const box = document.getElementById('sch'), grid = document.getElementById('sch-listbox');
+      const ALL = ['Aalborg University', 'Alpen-Adria-Universitat Klagenfurt', 'American University', 'Lakeside University', 'Springfield Falls Community College'];
+      const draw = (list) => { grid.innerHTML = ''; for (const t of list) { const row = document.createElement('div'); row.setAttribute('role', 'row');
+        const cell = document.createElement('div'); cell.setAttribute('role', 'gridcell'); cell.className = 'cx-select__list-item ';
+        cell.innerHTML = '<div class="cx-select__list-item-container"><span class="cx-select__list-item--content"><span>' + t + '</span></span></div>';
+        cell.addEventListener('click', () => { box.value = t; grid.innerHTML = ''; box.setAttribute('aria-expanded', 'false'); });
+        row.appendChild(cell); grid.appendChild(row); } };
+      const open = () => { box.setAttribute('aria-expanded', 'true'); if (!grid.children.length) draw(ALL.slice(0, 3)); };
+      box.addEventListener('mousedown', open); box.addEventListener('click', open); box.addEventListener('focus', open);
+      // The search listens to KEYS: text inserted whole, with no keyup, filters nothing.
+      let timer = null;
+      box.addEventListener('keyup', () => { clearTimeout(timer); timer = setTimeout(() => {
+        const q = box.value.toLowerCase(); draw(ALL.filter((t) => t.toLowerCase().includes(q)).slice(0, 3)); }, 300); });
+    })();<\/script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/school/i.test(a.label)) Object.assign(a, { action: 'prompt', value: 'Lakeside University', promptKind: 'combo' }); return plan; }` });
+  assert.equal(await page.evaluate(() => document.getElementById('sch').value), 'Lakeside University');
+});
+
+test('F-888: a step this tab filled, emptied by a reload, is filled again by the run that follows him (Ford, cookie banner)', async () => {
+  const url = 'https://jarvis-test.example/apply/email';
+  await fillAs(`<h2>You don't need to have an account</h2>${FOUR}`, { armed: true, auto: false }, url);
+  assert.equal(await page.evaluate(() => document.getElementById('first_name').value), 'Alex', 'his press filled it');
+  // The banner's accept reloads the page: a fresh document, the boxes blank,
+  // the tab's memory of the step (sessionStorage) still there.
+  const r = await fillAs(`<h2>You don't need to have an account</h2>${FOUR}<button type="button" onclick="window.__NEXT = 1">Next</button>`, { armed: true, auto: true }, url);
+  assert.match(String(r?.stoppedBecause || ''), /came back empty/, JSON.stringify(r));
+  assert.equal(await page.evaluate(() => document.getElementById('first_name').value), 'Alex', 'filled again after the reload');
+  assert.equal(await page.evaluate(() => window.__NEXT || 0), 0, 'and Next left for him');
+});
+
 test('A COMPONENT FORM\'S EXPERIENCE AND EDUCATION ARE ENTERED BY THEIR LABELS AND SAVED (F-341)', async () => {
   const result = await fill(SR_EXPERIENCE);
   const got = await page.evaluate(() => ({
@@ -2496,6 +3877,44 @@ test('AN APPLY THAT OPENS A MENU: the plain "Apply Now" is chosen, never LinkedI
   const got = await page.evaluate(() => ({ applied: window.__applied || null, first: document.getElementById('f')?.value || '' }));
   assert.equal(got.applied, 'manual', `the plain item was chosen (stopped: ${result.stoppedBecause})`);
   assert.equal(got.first, 'Alex', 'and the form it revealed was filled');
+});
+
+test('F-884: a posting with a chat widget still chooses the Apply menu\'s "Apply Now", and the chat\'s video upload never gets the resume (Schindler)', async () => {
+  // Schindler (SuccessFactors career site, 2026-10-23): Paradox's "Eli" is an
+  // <apply-widget> whose shadow root holds "Write a reply..." and a hidden
+  // "Upload Video" input; the Apply toggle says aria-haspopup and opens a menu
+  // with "Apply Now", a javascript:alert help link and LinkedIn.
+  const result = await fill(`
+    <h1>Manufacturing Engineer</h1>
+    <div class="btn-group">
+      <button type="button" class="btn dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-label="Apply now" id="apply">Apply now</button>
+      <ul class="dropdown-menu socialbutton" id="menu" style="display:none">
+        <li><a role="menuitem" class="applyOption" href="#" id="manual">Apply Now</a></li>
+        <li><a class="socialbutton-help" href="javascript:window.__alerted = 1">?</a></li>
+        <li><a role="menuitem" class="applyOption" href="#" id="li">Start apply with LinkedIn</a></li>
+      </ul>
+    </div>
+    <div id="form"></div>
+    <apply-widget id="eli"></apply-widget>
+    <script>
+      const root = document.getElementById('eli').attachShadow({ mode: 'open' });
+      root.innerHTML = '<div><p>Eli said, Hi! I am Eli, your virtual recruiter.</p><textarea placeholder="Write a reply..."></textarea><label>Upload Video<input type="file" accept="video/*" style="display:none"></label></div>';
+      document.getElementById('apply').addEventListener('click', () => { document.getElementById('menu').style.display = 'block'; });
+      document.getElementById('manual').addEventListener('click', (e) => { e.preventDefault(); window.__applied = 'manual'; document.getElementById('menu').style.display = 'none';
+        document.getElementById('form').innerHTML = '<form><label for="f">First Name</label><input id="f"><label for="cv">Resume</label><input id="cv" type="file"></form>'; });
+      document.getElementById('li').addEventListener('click', (e) => { e.preventDefault(); window.__applied = 'linkedin'; });
+    <\/script>`);
+  const got = await page.evaluate(() => ({
+    applied: window.__applied || null, alerted: window.__alerted || 0,
+    first: document.getElementById('f')?.value || '',
+    video: document.getElementById('eli').shadowRoot.querySelector('input[type=file]').files.length,
+    reply: document.getElementById('eli').shadowRoot.querySelector('textarea').value,
+  }));
+  assert.equal(got.applied, 'manual', `the menu's Apply Now was chosen (stopped: ${result.stoppedBecause})`);
+  assert.equal(got.alerted, 0, 'the javascript: help link was never clicked');
+  assert.equal(got.first, 'Alex', 'the form it revealed was filled');
+  assert.equal(got.video, 0, 'nothing went into the chat\'s video upload');
+  assert.equal(got.reply, '', 'and nothing was typed into the chat');
 });
 
 test('the panel lives in a shadow root, out of reach of the page\'s and other extensions\' CSS', async () => {
@@ -3178,6 +4597,31 @@ test('F-581: …and a box that takes only KEYS gets digits with their key codes'
   assert.equal(result.unanswered.some((u) => /Date/.test(u)), false, result.unanswered.join(' · '));
 });
 
+test('F-801: a Workday date whose number lives in aria-valuenow is read from there — no fallback keys into a widget that moved on', async () => {
+  // Live markup (Samsung, 2026-10-04): the box clears itself; the number is in
+  // aria-valuenow and a "-display" div. Read from the box, a date Workday had
+  // taken looked empty and the key fallback ran — the month's digits became
+  // the year (KION 2005, ITW and Terex 2008).
+  const seg = (part, max) => `<div class="sec"><div data-automation-id="dateSection${part}-display"></div><input role="spinbutton" data-automation-id="dateSection${part}-input" data-p="${part}" data-max="${max}" aria-label="${part}"></div>`;
+  const result = await fill(`<form>
+    <div data-automation-id="formField-availableFrom"><label>From</label>
+      <div data-automation-id="dateInputWrapper">${seg('Month', 2)}${seg('Year', 4)}</div></div>
+    <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>
+    <script>
+      window.__keys = 0;
+      for (const box of document.querySelectorAll('input[data-p]')) {
+        const disp = box.parentElement.querySelector('[data-automation-id$="-display"]');
+        const take = (digits) => { const m = digits.slice(-Number(box.dataset.max)); disp.textContent = m; box.setAttribute('aria-valuenow', String(Number(m))); box.value = ''; };
+        box.addEventListener('input', (e) => { if (e.inputType === 'insertText') take(String(box.value).replace(/\\D/g, '')); });
+        box.addEventListener('keydown', () => { window.__keys += 1; });
+      }
+    <\/script>`, { editPlan: `(plan) => { const parts = ['month', 'year']; const v = { month: '08', year: '2024' }; plan.actions.forEach((a, i) => { if (a.label === 'From') { const p = parts[i]; Object.assign(a, { action: 'fill', datePart: p, key: 'formField-availableFrom', value: v[p], why: '' }); } }); return plan; }` });
+  const held = await page.evaluate(() => [...document.querySelectorAll('input[data-p]')].map((b) => b.getAttribute('aria-valuenow')));
+  assert.deepEqual(held, ['8', '2024'], `the widget holds 08/2024: ${held.join('/')} · ${result.unanswered.join(' · ')}`);
+  assert.equal(await page.evaluate(() => window.__keys), 0, 'no fallback keys were sent into a date already taken');
+  assert.equal(result.unanswered.some((u) => /From/.test(u)), false, result.unanswered.join(' · '));
+});
+
 test('F-618: a date part the page turns into something else is named with both values', async () => {
   // HP, 2026-09-27: 06 / 01 / 2027 typed, the form held 6 / 1 / 2006, and the
   // report said only "the page did not keep the value".
@@ -3189,6 +4633,23 @@ test('F-618: a date part the page turns into something else is named with both v
   const model = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => b.dataset.model || b.value));
   assert.deepEqual(model.slice(0, 2).map(Number), [6, 1], `the month and day hold: ${model.join("/")} · ${result.unanswered.join(" · ")}`);
   assert.ok(result.unanswered.some((u) => /year box reads "2006" — it should be 2027/.test(u)), result.unanswered.join(' · '));
+});
+
+test('2026-10-26: a year that changes AFTER it was typed is read again and typed once more (Terex 2006, Brooks 2010)', async () => {
+  // The year held 2027 when it was checked, then the page wrote the month's
+  // digits into it while another part was handled. Fixture: the first time any
+  // OTHER part is focused after the year was set, the year becomes "2006".
+  await fill(`<form>${dateField('availableFrom')}<button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button></form>${WD_DATE_MODEL}
+    <script>
+      const y = document.querySelector('input[data-part="year"]');
+      let spoiled = false;
+      for (const b of document.querySelectorAll('input[data-part="month"], input[data-part="day"]')) {
+        b.addEventListener('focus', () => { if (!spoiled && y.value === '2027') { spoiled = true; window.__spoiled = true; setTimeout(() => { y.value = '2006'; y.dataset.model = '2006'; }, 50); } });
+      }
+    </script>`, { editPlan: `(plan) => { const v = { month: '06', day: '01', year: '2027' }; const parts = plan.actions.filter((a) => a.datePart); for (const a of parts) { a.action = 'fill'; a.value = v[a.datePart]; } plan.actions.sort((a, b) => (a.datePart === 'year' ? -1 : 0) - (b.datePart === 'year' ? -1 : 0)); return plan; }` });
+  const model = await page.evaluate(() => [...document.querySelectorAll('input[data-part]')].map((b) => b.dataset.model || b.value));
+  assert.equal(await page.evaluate(() => !!window.__spoiled), true, 'the fixture did spoil the year');
+  assert.deepEqual(model.map(Number), [6, 1, 2027], `the date ends whole: ${model.join('/')}`);
 });
 
 test('F-633: a box that holds "6" for "06", or "90000" for "$90000/year", kept the answer', async () => {
@@ -3207,6 +4668,23 @@ test('F-633: a box that holds "6" for "06", or "90000" for "$90000/year", kept t
   const held = await page.evaluate(() => [document.querySelector('input[data-part="month"]').value, document.querySelector('input[data-part="day"]').value, document.getElementById('pay').value]);
   assert.deepEqual(held, ['6', '1', '90000'], 'the fixture behaves as Onto\'s page did');
   assert.ok(!result.unanswered.some((u) => /box reads|did not keep/.test(u)), result.unanswered.join(' · '));
+});
+
+test('a salary the page refuses as written is retyped as its number and Next pressed again (ADP, 2026-10-17)', async () => {
+  await fill(`<form id="f">
+      <h2>Questions</h2>
+      <label for="pay">What is your desired salary?</label><input id="pay" type="text">
+      <div id="err"></div>
+      <button type="button" id="next">Next</button></form>
+    <script>
+      document.getElementById('next').addEventListener('click', () => {
+        const v = document.getElementById('pay').value;
+        if (/\\D/.test(v)) { document.getElementById('err').innerHTML = '<div role="alert">Correct the information in highlighted fields. Invalid salary value.</div>'; return; }
+        document.getElementById('f').innerHTML = '<h2>Voluntary Self-ID</h2><p>Step 4</p>';
+      });
+    </script>`, { editPlan: `(plan) => { for (const a of plan.actions) if (/salary/i.test(a.label)) { a.action = 'fill'; a.value = '$90000/year'; } return plan; }` });
+  const where = await page.evaluate(() => document.querySelector('h2')?.textContent);
+  assert.equal(where, 'Voluntary Self-ID', 'the step moved on once the salary was the number alone');
 });
 
 test('F-581: a signature date is taken from the calendar\'s Today button when there is one', async () => {
@@ -3381,6 +4859,449 @@ test('WERFEN (iCIMS): email in, the CA box for a CA job, then the privacy "I acc
   assert.equal(r.signInRequired, true);
 });
 
+// R4 (2026-11-07): a step that will not move on names the boxes the site marked invalid — labels only.
+test('R4: a stalled step names the boxes the site marked invalid, by label, never their values', async () => {
+  const result = await fill(`
+    <div>
+      <h2>My Information</h2>
+      <label for="ph">Phone Number</label><input id="ph" aria-invalid="true" aria-describedby="ph-err"><div id="ph-err">Enter a valid phone number</div>
+      <label for="zip">Postal Code *</label><input id="zip" aria-invalid="true">
+      <label for="prefname">Preferred Name</label><input id="prefname">
+      <button data-automation-id="pageFooterNextButton">Save and Continue</button>
+    </div>`);
+  const why = String(result.stoppedBecause || '');
+  assert.match(why, /the site marked these invalid: /, why);
+  const listed = why.split('the site marked these invalid: ')[1] || '';
+  assert.match(listed, /Phone Number/, 'a box with its own message');
+  assert.match(listed, /Postal Code/, 'and one with none');
+  assert.doesNotMatch(listed, /\*/, 'the required star is not part of the label');
+  assert.doesNotMatch(listed, /Preferred Name/, 'a box the site did not mark is not listed');
+  assert.doesNotMatch(listed, /\d{3}/, 'no value goes in: no phone digits, no ZIP');
+});
+
+test('R4: a stalled step with no box marked invalid says nothing more', async () => {
+  const result = await fill(`
+    <div>
+      <h2>My Experience</h2>
+      <label for="a">Something</label><input id="a">
+      <div role="alert">The field Upload a file (5MB max) is required and must have a value.</div>
+      <button data-automation-id="pageFooterNextButton">Save and Continue</button>
+    </div>`);
+  assert.match(String(result.stoppedBecause), /would not move on/);
+  assert.doesNotMatch(String(result.stoppedBecause), /marked these invalid/);
+});
+
+test('R4: at most six boxes are named', async () => {
+  const boxes = Array.from({ length: 8 }, (_, i) => `<label for="q${i}">Question ${i + 1}</label><input id="q${i}" aria-invalid="true">`).join('');
+  const result = await fill(`<div><h2>Application Questions</h2>${boxes}<button data-automation-id="pageFooterNextButton">Save and Continue</button></div>`);
+  const listed = (String(result.stoppedBecause).split('the site marked these invalid: ')[1] || '').split(' — ')[0];
+  assert.equal(listed.split(' · ').length, 6, listed);
+});
+
+// R5 step 1 (2026-11-07): Oracle's experience entries are RECORDED around the resume parse — never changed.
+const ORACLE_ENTRIES = `
+  <div class="profile-section"><h3>Experience</h3>
+    <button data-qa="add1">Add Experience</button>
+    <article data-qa="profileItem1"><div>Manufacturing Engineer Intern</div><div>Acme Steel</div><div>06/2024 - 08/2024</div><button>Edit</button><button>Delete</button></article>
+    <article data-qa="profileItem1"><div>Mechanical Engineering Intern</div><div>Acme Steel</div><button>Edit</button><button>Delete</button></article>
+    <label for="note">Note</label><input id="note" value="his own words">
+  </div>
+  <div><h3>Education</h3><button data-qa="add2">Add Education</button><article data-qa="profileItem2"><div>Lakeside</div></article></div>`;
+
+test('R5: Oracle\'s experience entries are captured whole (tiles, buttons, labels) with no values, once per moment, and nothing on the form changes', async () => {
+  await fill(ORACLE_ENTRIES, { url: 'https://fa-test.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/apply' });
+  const before = await page.evaluate(() => document.querySelectorAll('article[data-qa^="profileItem"]').length);
+  const got = await page.evaluate(() => {
+    globalThis.__sentMsgs = [];
+    const first = globalThis.__jarvisContent.captureOracleEntries('after the resume parse');
+    const again = globalThis.__jarvisContent.captureOracleEntries('after the resume parse');
+    return { first, again, msgs: globalThis.__sentMsgs.filter((m) => m.type === 'capture') };
+  });
+  assert.equal(got.first, 1, 'the experience section only, not education');
+  assert.equal(got.again, 0, 'once per page and moment');
+  assert.equal(got.msgs.length, 1);
+  const m = got.msgs[0];
+  assert.match(m.why, /^R5: Oracle entries after the resume parse \(2 shown\)$/);
+  assert.equal(m.label, 'Add Experience');
+  assert.match(m.html, /profileItem1/);
+  assert.match(m.html, /Mechanical Engineering Intern/, 'the tile text it already shows is kept');
+  assert.match(m.html, />Delete</, 'its controls too');
+  assert.doesNotMatch(m.html, /his own words/, 'no value leaves the box');
+  assert.doesNotMatch(m.html, /Lakeside/, 'another section is not swept in');
+  assert.equal(await page.evaluate(() => document.querySelectorAll('article[data-qa^="profileItem"]').length), before, 'nothing on the form changed');
+});
+
+test('R5: no capture anywhere but Oracle', async () => {
+  await fill(ORACLE_ENTRIES, { url: 'https://acme.wd1.myworkdayjobs.com/en-US/careers/job/x/apply' });
+  const n = await page.evaluate(() => globalThis.__jarvisContent.captureOracleEntries('after the resume parse'));
+  assert.equal(n, 0);
+});
+
+test('S6: a run returns where its time went — phase names and whole ms, nothing of the page', async () => {
+  // The plan answer takes a known 30 ms here, so the plan's clock is proved
+  // without depending on how fast this machine reads a four-field form.
+  const slowPlan = '(plan) => { const t0 = Date.now(); while (Date.now() - t0 < 30) { /* the dashboard thinking */ } return plan; }';
+  const result = await fill(`<h2>Apply</h2>${FOUR}`, { editPlan: slowPlan });
+  const t = result.timings;
+  assert.ok(t && typeof t === 'object', JSON.stringify(result).slice(0, 300));
+  for (const k of ['total', 'discover', 'plan', 'answers', 'resume', 'dropdowns', 'entries', 'waits']) {
+    assert.ok(Number.isInteger(t[k]) && t[k] >= 0, `${k}: ${t[k]}`);
+  }
+  assert.ok(t.total >= t.plan && t.total >= t.discover, 'the phases sit inside the run');
+  assert.ok(t.plan >= 25, `the plan's wait was timed: ${JSON.stringify(t)}`);
+  assert.ok(['discover', 'plan', 'answers', 'resume', 'dropdowns', 'entries', 'waits'].includes(t.slowest));
+  const words = JSON.stringify(t).replace(/"(total|discover|plan|answers|resume|dropdowns|entries|waits|slowest|hidden|waitSites|v)"/g, '');
+  assert.doesNotMatch(words, /Alex|First|Name|Email|Phone|@|http/i, 'no page text and no answers in it');
+  // S5: each wait is charged to the line that asked for it, numbers only.
+  assert.ok(Array.isArray(t.waitSites) && t.waitSites.length > 0, `the waits are named: ${JSON.stringify(t.waitSites)}`);
+  const lines = CONTENT.split(/\r?\n/);
+  for (const s of t.waitSites) {
+    assert.equal(s.length, 5);
+    assert.ok(s.every((x) => Number.isInteger(x) && x >= 0), JSON.stringify(s));
+    assert.match(lines[s[0] - 1] || '', /pause\(/, `line ${s[0]} is a wait: ${lines[s[0] - 1]}`);
+    assert.ok(s[3] >= 1, 'counted');
+  }
+  for (let i = 1; i < t.waitSites.length; i += 1) assert.ok(t.waitSites[i - 1][1] >= t.waitSites[i][1], 'longest first');
+});
+
+// P2 (2026-11-07, review fixes): Oracle's cx-select, set through its own React
+// props once the menu found nothing. The menu here never shows a row (Oracle's
+// filtered window without the right one); the props hold the whole list.
+// `owner`: whose props the nearest option list is — 'self' (the box's id) or
+// another field's. The box's own valueObserver writes the label into it.
+// `silent`: the box's own setter runs but never writes the label back (a read-back that fails).
+function oracleBox(question, id, options, { owner = 'self', silent = false } = {}) {
+  return `
+    <label for="${id}">${question}</label>
+    <div class="cx-select-container"><input id="${id}" name="${id}" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="${id}-listbox" aria-expanded="false" class="cx-select-input"></div>
+    <div id="${id}-listbox" role="grid" class="cx-select__list"></div>
+    <script>(() => {
+      const input = document.getElementById('${id}');
+      const OPTIONS = ${JSON.stringify(options)}.map((o, i) => ({ label: o, value: 'v' + i }));
+      window.__setCalls = window.__setCalls || [];
+      const props = {
+        id: ${JSON.stringify(owner === 'self' ? id : owner)}, options: OPTIONS,
+        valueObserver: (v) => { window.__setCalls.push(${JSON.stringify(owner === 'self' ? id : owner)}); if (${JSON.stringify(owner === 'self' && !silent)}) input.value = OPTIONS.find((o) => o.value === v).label; },
+      };
+      input['__reactFiber$p2test'] = { memoizedProps: { className: 'cx-select-input' }, return: { memoizedProps: { className: 'row' }, return: { memoizedProps: props, return: null, child: null }, child: null } };
+    })();<\/script>`;
+}
+const MONTHS12 = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const asPrompt = (re, value) => `(plan) => { for (const a of plan.actions) if (${re}.test(a.label)) { a.action = 'prompt'; a.value = ${JSON.stringify(value)}; a.values = undefined; a.promptKind = 'combo'; } return plan; }`;
+const p2Sent = () => page.evaluate(() => ({
+  picks: globalThis.__sentMsgs.filter((m) => m.type === 'oracle-pick').length,
+  sets: globalThis.__sentMsgs.filter((m) => m.type === 'oracle-set').length,
+  said: globalThis.__sentMsgs.filter((m) => m.type === 'capture' && /^P2:/.test(m.why || '')).map((m) => m.why),
+  setCalls: window.__setCalls || [],
+}));
+
+test('P2: the menu found nothing, so the box\'s OWN list is set through its props — and the box shows it', async () => {
+  const result = await fill(oracleBox('Start month', 'startMonth-4', MONTHS12), { editPlan: asPrompt('/start month/i', 'May') });
+  assert.equal(await page.evaluate(() => document.getElementById('startMonth-4').value), 'May');
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets], [1, 1], 'read once, set once');
+  assert.deepEqual(s.setCalls, ['startMonth-4']);
+  assert.match(s.said.join(' | '), /kept/);
+  assert.ok(result.filled >= 1, JSON.stringify(result.unanswered));
+});
+
+test('P2: a list that belongs to ANOTHER field (an ancestor\'s model) is refused, and nothing is set', async () => {
+  await fill(oracleBox('Start month', 'startMonth-4', MONTHS12, { owner: 'gender-7' }), { editPlan: asPrompt('/start month/i', 'May') });
+  assert.equal(await page.evaluate(() => document.getElementById('startMonth-4').value), '');
+  const s = await p2Sent();
+  assert.equal(s.sets, 0, 'never asked to set');
+  assert.deepEqual(s.setCalls, [], 'the other field\'s setter never called');
+  assert.match(s.said.join(' | '), /not set \(the nearest option list is not this box/);
+});
+
+test('P2: self-identification, work authorization and the like never go through this path, whatever the plan says', async () => {
+  await fill(oracleBox('Veteran status', 'veteran-2', ['I am not a protected veteran', 'I am a protected veteran'])
+    + oracleBox('Will you now or in the future require visa sponsorship?', 'sponsor-3', ['Yes', 'No']), {
+    editPlan: `(plan) => { for (const a of plan.actions) { const v = /veteran/i.test(a.label) ? 'I am not a protected veteran' : /sponsorship/i.test(a.label) ? 'Yes' : null; if (v) { a.action = 'prompt'; a.value = v; a.values = undefined; a.promptKind = 'combo'; } } return plan; }`,
+  });
+  assert.deepEqual(await page.evaluate(() => [document.getElementById('veteran-2').value, document.getElementById('sponsor-3').value]), ['', '']);
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls.length], [0, 0, 0]);
+});
+
+test('P2: work authorization and export wordings with no "visa" or "sponsor" in them never go through this path either (third review)', async () => {
+  const qs = [
+    ['Are you legally eligible to work in the U.S.?', 'legal-1'],
+    ['Do you now or in the future require immigration support?', 'immig-2'],
+    ['Are you currently on OPT?', 'opt-3'],
+    ['Is any of your past work subject to EAR?', 'ear-4'],
+    ['Are you a U.S. person under export rules?', 'usp-5'],
+  ];
+  await fill(qs.map(([q, id]) => oracleBox(q, id, ['Yes', 'No'])).join(''), { editPlan: asPrompt('/legally|immigration|OPT|EAR|U\\.S\\. person/', 'Yes') });
+  assert.deepEqual(await page.evaluate((ids) => ids.map((id) => document.getElementById(id).value), qs.map(([, id]) => id)), qs.map(() => ''));
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls.length], [0, 0, 0]);
+});
+
+test('P2: a generic label under a work-authorization heading is refused', async () => {
+  await fill(`<section><h2>Work Authorization</h2>${oracleBox('Select one', 'wa-9', ['Yes', 'No'])}</section>`, { editPlan: asPrompt('/select one/i', 'Yes') });
+  assert.equal(await page.evaluate(() => document.getElementById('wa-9').value), '');
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls.length], [0, 0, 0]);
+});
+
+test('P2: an ordinary label with "year", "early" or "option" in it is NOT blocked by the new words', async () => {
+  const result = await fill(oracleBox('Earliest year you could start (pick an option)', 'year-6', ['2026', '2027']), { editPlan: asPrompt('/earliest year/i', '2027') });
+  assert.equal(await page.evaluate(() => document.getElementById('year-6').value), '2027');
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets], [1, 1]);
+  assert.match(s.said.join(' | '), /kept/);
+  assert.ok(result.filled >= 1, JSON.stringify(result.unanswered));
+});
+
+test('P2: a pick that never answers is given up after the limit, and the box is left as it is', async () => {
+  const result = await fill(oracleBox('Start month', 'startMonth-4', MONTHS12), {
+    editPlan: asPrompt('/start month/i', 'May'),
+    before: () => page.evaluate(() => { globalThis.__jarvisP2LimitMs = 1000; globalThis.__duringPick = () => new Promise(() => {}); }),
+  });
+  assert.notEqual(await page.evaluate(() => document.getElementById('startMonth-4').value), 'May');
+  const s = await p2Sent();
+  // The settled-page retry (F-716) may ask once more; each ask is bounded.
+  assert.ok(s.picks >= 1 && s.picks <= 2, `picks ${s.picks}`);
+  assert.deepEqual([s.sets, s.setCalls.length], [0, 0]);
+  assert.match(s.said.join(' | '), /not set \(no answer within 1 s\)/);
+  assert.match(result.unanswered.join(' | '), /Start month/);
+});
+
+test('P2: the setter ran but the box does not show it: reported as set but not confirmed, for him to check', async () => {
+  const result = await fill(oracleBox('Start month', 'startMonth-4', MONTHS12, { silent: true }), { editPlan: asPrompt('/start month/i', 'May') });
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls], [1, 1, ['startMonth-4']]);
+  assert.match(s.said.join(' | '), /set, but not confirmed; check this field/);
+  assert.match(result.unanswered.join(' | '), /Start month \(set through the list's own props, but not confirmed; check this field\)/);
+  assert.doesNotMatch(result.unanswered.join(' | '), /nothing matched/);
+});
+
+test('P2: a generic label under a self-identification heading is refused too', async () => {
+  await fill(`<section><h2>Voluntary Self-Identification</h2>${oracleBox('Select one', 'eeo-9', ['Option A', 'Option B'])}</section>`, { editPlan: asPrompt('/select one/i', 'Option A') });
+  assert.equal(await page.evaluate(() => document.getElementById('eeo-9').value), '');
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls.length], [0, 0, 0]);
+});
+
+test('P2: he types into the box after Jarvis\'s last look but before the page\'s setter — nothing is written', async () => {
+  await fill(oracleBox('Start month', 'startMonth-4', MONTHS12), {
+    editPlan: asPrompt('/start month/i', 'May'),
+    before: () => page.evaluate(() => { globalThis.__duringSet = () => globalThis.__hisKeys('#startMonth-4', 'Ju'); }),
+  });
+  assert.equal(await page.evaluate(() => document.getElementById('startMonth-4').value), 'Ju', 'his keys stand');
+  const s = await p2Sent();
+  assert.deepEqual([s.sets, s.setCalls.length], [1, 0], 'asked to set, and the page refused');
+  assert.match(s.said.join(' | '), /not set \(box changed/);
+});
+
+test('P2: the box holding exactly the wanted text while FOCUSED is not taken as ours', async () => {
+  await fill(oracleBox('Start month', 'startMonth-4', MONTHS12), {
+    editPlan: asPrompt('/start month/i', 'May'),
+    before: () => page.evaluate(() => { globalThis.__duringPick = () => { const b = document.getElementById('startMonth-4'); b.value = 'May'; b.focus(); }; }),
+  });
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls.length], [1, 0, 0]);
+  assert.match(s.said.join(' | '), /the box changed while its list was read/);
+});
+
+test('P2: the box filled while its list was being read is left as it is', async () => {
+  await fill(oracleBox('Start month', 'startMonth-4', MONTHS12), {
+    editPlan: asPrompt('/start month/i', 'May'),
+    before: () => page.evaluate(() => { globalThis.__duringPick = () => { document.getElementById('startMonth-4').value = 'June'; }; }),
+  });
+  assert.equal(await page.evaluate(() => document.getElementById('startMonth-4').value), 'June', 'what arrived meanwhile stays');
+  const s = await p2Sent();
+  assert.deepEqual([s.picks, s.sets, s.setCalls.length], [1, 0, 0]);
+  assert.match(s.said.join(' | '), /the box changed while its list was read/);
+});
+
+// F-1035 (2026-11-07): a search that finds nothing never leaves its word in a box that already held an answer.
+test('F-1035: a combobox that already holds an answer is not left showing the search word when nothing matches', async () => {
+  // No React fiber here, so P2's path stays out of it: only the menu path is under test.
+  await fill(`
+    <label for="startMonth-9">Start month</label>
+    <div class="cx-select-container"><input id="startMonth-9" name="startMonth-9" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="startMonth-9-listbox" aria-expanded="false" class="cx-select-input" value="June"></div>
+    <div id="startMonth-9-listbox" role="grid" class="cx-select__list"></div>`, { editPlan: asPrompt('/start month/i', 'May') });
+  assert.equal(await page.evaluate(() => document.getElementById('startMonth-9').value), 'June', 'the answer it held, not the typed search');
+});
+
+test('F-1035: a box he types into during the search is left as he left it, not put back', async () => {
+  // Once the search word is in, his own keys (trusted, from the test) arrive while the list is awaited.
+  await fill(`
+    <label for="startMonth-10">Start month</label>
+    <div class="cx-select-container"><input id="startMonth-10" name="startMonth-10" type="text" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="startMonth-10-listbox" aria-expanded="false" class="cx-select-input" value="June"></div>
+    <div id="startMonth-10-listbox" role="grid" class="cx-select__list"></div>`, {
+    editPlan: asPrompt('/start month/i', 'May'),
+    before: () => page.evaluate(() => {
+      const b = document.getElementById('startMonth-10');
+      let done = false;
+      b.addEventListener('input', () => {
+        if (done || b.value !== 'May') return;
+        done = true;
+        globalThis.__hisDone = globalThis.__hisKeys('#startMonth-10', 'Jul').then(() => { globalThis.__hisLeft = b.value; });
+      });
+    }),
+  });
+  await page.evaluate(() => globalThis.__hisDone);
+  const [shown, left] = await page.evaluate(() => [document.getElementById('startMonth-10').value, globalThis.__hisLeft]);
+  assert.ok(left && left !== 'June' && left !== 'May', `his keys landed: ${left}`);
+  assert.equal(shown, left, 'what he typed stands');
+});
+
+test('P2: a box he touched is his — never set through its props', async () => {
+  await fill(oracleBox('Start month', 'startMonth-4', MONTHS12), {
+    editPlan: asPrompt('/start month/i', 'May'),
+    // His own keys (a script's would not be his): typed, then cleared.
+    before: async () => { await page.click('#startMonth-4'); await page.keyboard.type('Ma'); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await wait(2700); },
+  });
+  assert.equal(await page.evaluate(() => document.getElementById('startMonth-4').value), '');
+  const s = await p2Sent();
+  assert.deepEqual([s.sets, s.setCalls.length], [0, 0]);
+});
+
+// (F-1024's tests sit above this block: they read the page clock moving — review 2026-11-06.)
+// F-1024 (2026-11-06): "i try to edit it myself the dropdown but it keeps running my shit over".
+// What he touched is his: no run writes it again, not even one he presses.
+const HIS_FORM = `<h2>Apply</h2>${FOUR}
+  <label for="g">Gender</label><select id="g"><option>Select</option><option>Male</option><option>Female</option><option>Decline to answer</option></select>`;
+
+test('F-1024: he picks a different option, and even a run he presses leaves it', async () => {
+  await fillAs(HIS_FORM, { armed: true, auto: false });
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Male', 'the first run answers it');
+  // His own pick, with real keys: a scripted change would not be his.
+  await page.focus('#g');
+  await page.keyboard.press('ArrowDown');
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Female');
+  await wait(2700);   // past the run's wait for his hands
+  await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+  const again = await page.evaluate(CONTENT);
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Female', 'his pick stays');
+  assert.ok(again && !String(again.stoppedBecause || '').match(/error/i), JSON.stringify(again?.stoppedBecause));
+});
+
+test('F-1024: he clears a box, and it stays empty', async () => {
+  await fillAs(HIS_FORM, { armed: true, auto: false });
+  assert.ok(await page.evaluate(() => document.getElementById('phone').value), 'the first run answers it');
+  await page.click('#phone', { clickCount: 3 });
+  await page.keyboard.press('Backspace');
+  assert.equal(await page.evaluate(() => document.getElementById('phone').value), '');
+  await wait(2700);
+  await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+  await page.evaluate(CONTENT);
+  assert.equal(await page.evaluate(() => document.getElementById('phone').value), '', 'the box he emptied stays empty');
+});
+
+test('F-1024: the SITE wipes a box once, and Jarvis puts it back; one that is wiped every time is entered three times at most', async () => {
+  // Jarvis's own typing raises trusted input events (execCommand): it must never count as his.
+  await fillAs(`<h2>Apply</h2>${FOUR}
+    <script>
+      let wiped = 0;
+      document.getElementById('email').addEventListener('change', (e) => { if (wiped++ === 0) setTimeout(() => { e.target.value = ''; }, 50); });
+      globalThis.__phoneWrites = 0;
+      document.getElementById('phone').addEventListener('change', (e) => { globalThis.__phoneWrites += 1; setTimeout(() => { e.target.value = ''; }, 50); });
+    <\/script>`, { armed: true, auto: false });
+  assert.equal(await page.evaluate(() => document.getElementById('email').value), 'v@example.test', 'the wiped box is filled again');
+  // One typed entry raises several change events, so count the RUNS that wrote it.
+  const changes = () => page.evaluate(() => globalThis.__phoneWrites);
+  const wrote = [(await changes()) > 0];
+  const said = [];
+  for (let i = 0; i < 3; i += 1) {
+    const before = await changes();
+    await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+    const r = await page.evaluate(CONTENT);
+    said.push(...(r?.unanswered || []));
+    wrote.push((await changes()) > before);
+  }
+  assert.deepEqual(wrote, [true, true, true, false], `entered by the first run, again twice, then left alone: ${JSON.stringify(wrote)}`);
+  assert.ok(said.some((u) => /Phone.*kept clearing it/.test(u)), `named for him once it gave up: ${JSON.stringify(said)}`);
+});
+
+test('F-1024: his pick stays his when the site redraws the box a moment after it', async () => {
+  // Workday and react-select re-key a field on change; the old node is gone within the half second (review).
+  await fillAs(`${HIS_FORM}
+    <script>
+      document.addEventListener('change', (e) => {
+        if (e.target.id !== 'g' || !e.isTrusted) return;
+        setTimeout(() => { const old = document.getElementById('g'); const fresh = old.cloneNode(true); fresh.value = old.value; old.replaceWith(fresh); }, 30);
+      }, true);
+    <\/script>`, { armed: true, auto: false });
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Male');
+  await page.focus('#g');
+  await page.keyboard.press('ArrowDown');
+  await wait(2700);
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Female', 'the redraw kept his pick');
+  await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+  await page.evaluate(CONTENT);
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Female', 'remembered by its question, not only its node');
+});
+
+test('F-1024: a consent box the site unticks is ticked again on every run, never called "kept clearing it"', async () => {
+  // The refill cap reads emptiness; a tick has none to read, so it is not capped (review).
+  await fillAs(`<h2>Apply</h2>${FOUR}
+    <label><input type="checkbox" id="agree"> I agree with the terms and conditions</label>`, { armed: true, auto: false });
+  assert.equal(await page.evaluate(() => document.getElementById('agree').checked), true);
+  const said = [];
+  for (let i = 0; i < 4; i += 1) {
+    await page.evaluate(() => { document.getElementById('agree').checked = false; });   // the site unticks it
+    await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+    said.push(...((await page.evaluate(CONTENT))?.unanswered || []));
+    assert.equal(await page.evaluate(() => document.getElementById('agree').checked), true, `ticked again on run ${i + 1}: ${JSON.stringify(said)}`);
+  }
+  assert.ok(!said.some((u) => /kept clearing it/.test(u)), JSON.stringify(said));
+});
+
+test('F-1024: the refill cap holds on a hash-routed form whose token changes every step', async () => {
+  // #/apply?t=… changes per step; the cap is per posting, read as discover.js's pageKey reads it (review).
+  const base = 'https://apply.example.test/careers/apply';
+  const html = `<h2>Apply</h2>${FOUR}
+    <script>
+      globalThis.__phoneWrites = 0;
+      document.getElementById('phone').addEventListener('change', (e) => { globalThis.__phoneWrites += 1; setTimeout(() => { e.target.value = ''; }, 50); });
+    <\/script>`;
+  // A route never sees the #fragment, so the page is served at its address without it.
+  await page.route(base, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: html }));
+  try {
+    await fillAs(html, { armed: true, auto: false }, `${base}#/apply?t=1`);
+  } finally { await page.unroute(base).catch(() => {}); }
+  const changes = () => page.evaluate(() => globalThis.__phoneWrites);
+  const wrote = [(await changes()) > 0];
+  for (let i = 2; i <= 4; i += 1) {
+    await page.evaluate((t) => { location.hash = `#/apply?t=${t}`; }, i);
+    const before = await changes();
+    await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+    await page.evaluate(CONTENT);
+    wrote.push((await changes()) > before);
+  }
+  assert.deepEqual(wrote, [true, true, true, false], `capped across the token changes: ${JSON.stringify(wrote)}`);
+});
+
+test('F-1024: what he set on one posting is not his on the next posting in the same tab', async () => {
+  // Eightfold, Phenom and Taleo keep one path for every job and name it in the query (review).
+  const url1 = 'https://apply.example.test/careers/apply?pid=111';
+  const url2 = 'https://apply.example.test/careers/apply?pid=222';
+  await fillAs(HIS_FORM, { armed: true, auto: false }, url1);
+  await page.focus('#g');
+  await page.keyboard.press('ArrowDown');
+  await wait(800);   // his question remembered by label
+  await fillAs(HIS_FORM, { armed: true, auto: false }, url2);
+  assert.equal(await page.evaluate(() => document.getElementById('g').value), 'Male', 'a new posting is answered as usual');
+});
+
+test('F-1024: while he is typing, the run waits for him instead of racing him', async () => {
+  await fillAs(`<h2>Apply</h2>${FOUR}`, { armed: true, auto: false });
+  await page.evaluate(() => { document.getElementById('first_name').value = ''; document.getElementById('email').value = ''; });
+  await page.click('#first_name');
+  await page.keyboard.type('Vin');
+  await page.evaluate(() => { globalThis.__jarvisRun = { armed: true, auto: false }; });
+  const running = page.evaluate(CONTENT);   // a run starts while his hands are on the form
+  await page.keyboard.type('cent', { delay: 150 });
+  const r = await running;
+  assert.equal(await page.evaluate(() => document.getElementById('first_name').value), 'Vincent', 'what he typed stays');
+  assert.equal(await page.evaluate(() => document.getElementById('email').value), 'v@example.test', 'the run went on once he stopped');
+  assert.ok(!(r?.unanswered || []).some((u) => /First Name/.test(u)), JSON.stringify(r?.unanswered));
+});
+
 // LAST IN THE FILE ON PURPOSE: it freezes the page clock, which would skew any
 // later test that compares the page's date with the test's own.
 test('F-706: a Workday signature date with no Today button is typed from the UTC clock — Workday\'s today', async () => {
@@ -3424,4 +5345,364 @@ test('F-732: a signature date Workday refuses is retyped once as the other today
   assert.equal(seen.accepted, local.join('/'), `the step took his date after the retry (presses ${seen.presses}; ${result.stoppedBecause})`);
   assert.equal(seen.presses, 2, 'one refused press, one retry — never a loop');
   assert.doesNotMatch(String(result.stoppedBecause || ''), /would not move on/);
+});
+
+test('F-855: a masked date box that refuses "May 2026" gets "05/2026" (Paylocity work history, Optomec 2026-10-04)', async () => {
+  const result = await fill(`
+    <form>
+      <label for="c">Company Name (required)</label><input id="c">
+      <label for="p">Position</label><input id="p">
+      <label for="s">Start Date</label><input id="s" placeholder="">
+    </form>
+    <script>
+      // The mask keeps digits and slashes only, as Paylocity's does.
+      document.getElementById('s').addEventListener('input', (e) => { const v = e.target.value.replace(/[^0-9/]/g, ''); if (v !== e.target.value) e.target.value = v; });
+    <\/script>`);
+  assert.equal(await page.evaluate(() => document.getElementById('c').value), 'Acme Fab');
+  assert.equal(await page.evaluate(() => document.getElementById('s').value), '05/2026', JSON.stringify(result.unanswered));
+  assert.ok(!(result.unanswered || []).some((u) => /Start Date/.test(u)), `not left for him: ${JSON.stringify(result.unanswered)}`);
+});
+
+test('F-871/F-872: an ended job\'s "Currently Working Here" is cleared, and the End Date it reveals gets that job\'s end (Paylocity, Optomec 2026-10-04)', async () => {
+  const result = await fill(`
+    <form>
+      <label for="c">Company Name (required)</label><input id="c">
+      <label for="s">Start Date</label><input id="s">
+      <div><span>Reason for Leaving</span> <label><input type="checkbox" id="cur" checked> Currently Working Here</label></div>
+      <div id="endbox"></div>
+    </form>
+    <script>
+      // Paylocity draws the End Date only once the box is cleared.
+      document.getElementById('cur').addEventListener('change', (e) => {
+        document.getElementById('endbox').innerHTML = e.target.checked ? '' : '<label for="e">End Date</label><input id="e">';
+      });
+    <\/script>`);
+  assert.equal(await page.evaluate(() => document.getElementById('c').value), 'Acme Fab');
+  assert.equal(await page.evaluate(() => document.getElementById('cur').checked), false, 'an ended job is not current');
+  const end = await page.evaluate(() => document.getElementById('e')?.value ?? null);
+  assert.ok(end && /2026/.test(end) && /08|aug/i.test(end), `the revealed End Date is the job's own end, not left or guessed: ${JSON.stringify(end)} ${JSON.stringify(result.unanswered)}`);
+});
+
+test('F-897: SuccessFactors inline job rows — Add opens a row per missing job, filled boxes are never reused, no Save is asked for', async () => {
+  // Modelled on Lincoln Electric's Previous Employment (2026-10-23): one row of
+  // boxes, a section Add, MM/DD/YYYY date boxes. The Add here REDRAWS the whole
+  // section (new elements, values kept) — the worst case for "new controls".
+  const result = await fill(`
+    <form onsubmit="return false">
+      <label for="fn">First Name</label><input id="fn">
+      <div id="sec"><h3>Previous Employment</h3><div id="rows"></div><button type="button" id="add"><span></span> Add</button></div>
+    </form>
+    <script>
+      const vals = [{}];
+      const draw = () => {
+        document.getElementById('rows').innerHTML = vals.map((v, i) =>
+          '<div class="row"><label for="c' + i + '">* Company Name</label><input id="c' + i + '">'
+          + '<label for="t' + i + '">* Position Title</label><input id="t' + i + '">'
+          + '<label for="s' + i + '">From Date</label><input id="s' + i + '" placeholder="MM/DD/YYYY">'
+          + '<label for="e' + i + '">End Date</label><input id="e' + i + '" placeholder="MM/DD/YYYY"></div>').join('');
+        vals.forEach((v, i) => { for (const k of ['c', 't', 's', 'e']) { const el = document.getElementById(k + i); el.value = v[k] || ''; el.addEventListener('input', () => { v[k] = el.value; }); el.addEventListener('change', () => { v[k] = el.value; }); } });
+      };
+      draw();
+      document.getElementById('add').addEventListener('click', () => { vals.push({}); draw(); });
+    <\/script>`);
+  const rows = await page.evaluate(() => [...document.querySelectorAll('#rows .row')].map((r) => [...r.querySelectorAll('input')].map((i) => i.value)));
+  assert.equal(rows.length, 2, `one row per job, no extra: ${JSON.stringify(rows)} ${JSON.stringify(result.unanswered)}`);
+  assert.equal(rows[0][0], 'Acme Fab');
+  assert.equal(rows[0][2], '05/01/2026', 'MM/DD/YYYY, never "May 2026" (F-899)');
+  assert.equal(rows[1][0], 'Test University', `the second job goes in the new row: ${JSON.stringify(rows)}`);
+  assert.equal(rows[1][1], 'Manufacturing Lead');
+  assert.match(rows[1][2], /^08\/01\/2024$/);
+  assert.ok(!result.unanswered.some((u) => /Save yourself|did not open a sub-form/.test(u)), JSON.stringify(result.unanswered));
+});
+
+test('S2: the worker resumes the copy already in the page with THIS run\'s context, not whatever sits in the shared slot', async () => {
+  await fillAs(`<h2>Apply</h2>${FOUR}`, { armed: true, auto: false, runToken: 'A', loadId: 'L1' });
+  const got = await page.evaluate(async () => {
+    const before = { has: typeof globalThis.__jarvisResumeRun, active: globalThis.__jarvisActiveRun, filled: document.querySelector('#first_name').value };
+    globalThis.__jarvisRun = { runToken: 'OTHER' };   // another press's context in the shared slot
+    const res = await globalThis.__jarvisResumeRun({ armed: true, auto: false, runToken: 'B', loadId: 'L1' });
+    return { before, active: globalThis.__jarvisActiveRun, run: globalThis.__jarvisRun.runToken, content: globalThis.__jarvisContent.RUN.runToken, startedArmed: globalThis.__jarvisContent.RUN.startedArmed, res: !!res && typeof res === 'object' };
+  });
+  assert.equal(got.before.has, 'function', 'content.js leaves the entry point');
+  assert.equal(got.before.active, 'A');
+  assert.ok(got.before.filled, 'the first run filled the form');
+  assert.equal(got.active, 'B', 'the resume claims the page for its own run');
+  assert.equal(got.run, 'B');
+  assert.equal(got.content, 'B', 'the resident copy now carries this run');
+  assert.equal(got.startedArmed, true);
+  assert.ok(got.res, 'and answers like a run');
+});
+
+// ── P3 (Simplify plan, phase 3, approved 2026-11-06): school and degree, Places, ticked rows ──
+
+/**
+ * A Greenhouse-style School box over a REMOTE list: opening it shows a first
+ * page; typing searches the whole list (contains, case aside) after 200 ms
+ * and shows at most `pageSize` rows, as a server's first page does. With
+ * `otherBox`, choosing "Other" opens a name box under it.
+ */
+function remoteSchoolFixture({ firstPage, schools, otherBox = false, pageSize = 3, label = 'School' }) {
+  return `
+    <label id="s-label" for="s">${label}</label>
+    <div class="select__control"><div class="select__value-container">
+      <div class="select__input-container">
+        <input id="s" class="select__input" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-labelledby="s-label">
+      </div>
+    </div></div>
+    <div id="menu"></div>
+    <div id="other-wrap"></div>
+    <script>(() => {
+      const FIRST = ${JSON.stringify(firstPage)};
+      const ALL = ${JSON.stringify(schools)};
+      const input = document.getElementById('s');
+      const menu = document.getElementById('menu');
+      const vc = document.querySelector('.select__value-container');
+      window.__searched = [];
+      const show = (rows) => {
+        menu.textContent = '';
+        for (const o of rows) {
+          const d = document.createElement('div');
+          d.setAttribute('role', 'option');
+          d.textContent = o;
+          d.addEventListener('click', () => {
+            input.value = '';
+            let sv = vc.querySelector('.select__single-value');
+            if (!sv) { sv = document.createElement('div'); sv.className = 'select__single-value'; vc.prepend(sv); }
+            sv.textContent = o;
+            menu.textContent = '';
+            input.setAttribute('aria-expanded', 'false');
+            if (${otherBox ? 'true' : 'false'} && o === 'Other' && !document.getElementById('o')) {
+              document.getElementById('other-wrap').innerHTML = '<label for="o">If other, please enter your school name</label><input id="o" type="text">';
+            }
+          });
+          menu.appendChild(d);
+        }
+        input.setAttribute('aria-expanded', rows.length ? 'true' : 'false');
+      };
+      let t = 0;
+      input.addEventListener('mousedown', () => { if (!input.value) show(FIRST); });
+      input.addEventListener('input', () => {
+        clearTimeout(t);
+        const q = input.value.trim().toLowerCase();
+        if (!q) { show(FIRST); return; }
+        window.__searched.push(q);
+        t = setTimeout(() => {
+          const hits = ALL.filter((s) => s.toLowerCase().includes(q)).slice(0, ${pageSize});
+          if (hits.length) show(hits);
+          else { menu.innerHTML = '<div role="option">No options</div>'; }
+        }, 200);
+      });
+    })();<\/script>`;
+}
+
+const P3_UNIS = ['University of Alabama', 'University of Arizona', 'University of Arkansas', 'University of Washington', 'Washington State University'];
+const P3_FIRST = ['Abilene Christian University', 'Adelphi University', 'Other'];
+const schoolShown = () => page.evaluate(() => document.querySelector('.select__single-value')?.textContent || '');
+
+test('P3: a school that opens on "University of" is searched by the word that tells it apart', async () => {
+  await fill(remoteSchoolFixture({ firstPage: P3_FIRST, schools: P3_UNIS }), {
+    editPlan: `(plan) => { for (const a of plan.actions) if (a.label === 'School') { a.value = 'University of Washington'; delete a.values; } return plan; }`,
+  });
+  assert.equal(await schoolShown(), 'University of Washington');
+  const searched = await page.evaluate(() => window.__searched);
+  assert.ok(searched.includes('washington'), `searched: ${searched.join(' | ')}`);
+});
+
+test('P3: a first page holding "Other" never wins over his school, which the search finds', async () => {
+  const result = await fill(remoteSchoolFixture({ firstPage: P3_FIRST, schools: [...P3_UNIS, 'Lakeside University', 'Other'] }));
+  assert.equal(await schoolShown(), 'Lakeside University');
+  assert.equal(result.unanswered.some((u) => /chose "Other"/.test(u)), false);
+});
+
+test('P3: a school list without his school takes its "Other" row last, names it for him, and the name box under it gets the name', async () => {
+  const result = await fill(remoteSchoolFixture({ firstPage: P3_FIRST, schools: [...P3_UNIS, 'Other'], otherBox: true }));
+  assert.equal(await schoolShown(), 'Other');
+  assert.ok(result.unanswered.some((u) => /(^|: )School \(chose "Other": "Lakeside University" is not on this list/.test(u)), `unanswered: ${result.unanswered.join(' | ')}`);
+  assert.equal(result.unanswered.some((u) => /School \(no "Lakeside University"\)/.test(u)), false, 'one line for the field, not two');
+  const named = await page.evaluate(() => document.getElementById('o')?.value || '');
+  assert.equal(named, 'Lakeside University', 'the box that opened under "Other" holds his school');
+});
+
+test('P3: "Other" is never taken over an answer already in the box', async () => {
+  const result = await fill(remoteSchoolFixture({ firstPage: P3_FIRST, schools: [...P3_UNIS, 'Other'] }), {
+    before: () => page.evaluate(() => {
+      const vc = document.querySelector('.select__value-container');
+      const sv = document.createElement('div'); sv.className = 'select__single-value'; sv.textContent = 'Adelphi University'; vc.prepend(sv);
+    }),
+  });
+  assert.equal(await schoolShown(), 'Adelphi University');
+  assert.equal(result.unanswered.some((u) => /chose "Other"/.test(u)), false);
+});
+
+/**
+ * Google Places, as its markup is drawn (not met live yet): a .pac-container
+ * at the end of <body>, .pac-item rows of inline spans. The HOVERED row is
+ * what the box takes when it loses focus; a click alone does nothing. This
+ * list answers "Springfield, WA" and "Springfield", never "Springfield, Washington".
+ */
+function placesFixture({ takesHover = true } = {}) {
+  return `
+    <label for="loc">Location</label><input id="loc" type="text" autocomplete="off">
+    <script>(() => {
+      const PLACES = [['Springfield', 'WA, USA'], ['Springfield Valley', 'WA, USA']];
+      const input = document.getElementById('loc');
+      window.__typedPlaces = [];
+      let box = null, hovered = null, t = 0;
+      const close = () => { if (box) box.remove(); box = null; };
+      input.addEventListener('input', () => {
+        clearTimeout(t); close(); hovered = null;
+        const q = input.value.trim().toLowerCase();
+        if (!q) return;
+        window.__typedPlaces.push(q);
+        t = setTimeout(() => {
+          const hits = PLACES.filter(([n, r]) => (n + ', ' + r).toLowerCase().startsWith(q));
+          if (!hits.length) return;
+          box = document.createElement('div'); box.className = 'pac-container';
+          for (const [n, r] of hits) {
+            const row = document.createElement('div'); row.className = 'pac-item';
+            row.innerHTML = '<span class="pac-icon pac-icon-marker"></span><span class="pac-item-query"><span class="pac-matched">' + n + '</span></span><span>' + r + '</span>';
+            if (${takesHover ? 'true' : 'false'}) row.addEventListener('mouseover', () => { hovered = n + ', ' + r; });
+            box.appendChild(row);
+          }
+          document.body.appendChild(box);
+        }, 150);
+      });
+      input.addEventListener('blur', () => { if (hovered) { input.value = hovered; window.__placeChosen = hovered; } close(); });
+    })();<\/script>`;
+}
+
+test('P3: a Google Places box is searched "City, ST" when "City, State" finds nothing, and the row is taken by hover then blur', async () => {
+  await fill(placesFixture());
+  const got = await page.evaluate(() => ({ value: document.getElementById('loc').value, chosen: window.__placeChosen || '', typed: window.__typedPlaces }));
+  assert.equal(got.chosen, 'Springfield, WA, USA', `typed: ${got.typed.join(' | ')}`);
+  assert.equal(got.value, 'Springfield, WA, USA');
+  assert.ok(got.typed.includes('springfield, wa'), `the state's code was tried: ${got.typed.join(' | ')}`);
+});
+
+test('P3: a Places list that ignores the hover is not reported as chosen (review 2026-11-12)', async () => {
+  const result = await fill(placesFixture({ takesHover: false }));
+  const got = await page.evaluate(() => ({ value: document.getElementById('loc').value, chosen: window.__placeChosen || '' }));
+  assert.equal(got.chosen, '', 'the list took nothing');
+  assert.ok(result.unanswered.some((u) => /(^|: )Location \(/.test(u)), `Location is named for him: ${result.unanswered.join(' | ')} (box reads "${got.value}")`);
+});
+
+test('P3: the "Other" last resort takes only an Other row, never a school named "Other Valley College"', async () => {
+  const result = await fill(remoteSchoolFixture({ firstPage: ['Abilene Christian University', 'Adelphi University'], schools: [...P3_UNIS, 'Other Valley College'] }));
+  assert.equal(await schoolShown(), '', 'no row is a school he did not attend');
+  assert.equal(result.unanswered.some((u) => /chose "Other/.test(u)), false, `unanswered: ${result.unanswered.join(' | ')}`);
+});
+
+/**
+ * A Workday multi-select whose rows carry checkboxes, where clicking a
+ * TICKED row un-chooses it — the row is a toggle. AutoCAD is already chosen.
+ */
+function tickedMultiFixture(taxonomy, already) {
+  return `
+    <form>
+      <div data-automation-id="formField-skills">
+        <label>Type to Add Skills *</label>
+        <div data-automation-id="multiSelectContainer">
+          <div data-automation-id="selectedItemList" id="chips"></div>
+          <input data-automation-id="searchBox" id="search" type="text" aria-controls="lb" aria-required="true">
+        </div>
+      </div>
+      <ul id="lb" role="listbox" style="display:none"></ul>
+      <button data-automation-id="pageFooterNextButton" type="submit">Save and Continue</button>
+    </form>
+    <script>(() => {
+      const TAX = ${JSON.stringify(taxonomy)};
+      const picked = new Set(${JSON.stringify(already)});
+      const box = document.getElementById('search');
+      const lb = document.getElementById('lb');
+      const chips = document.getElementById('chips');
+      const drawChips = () => { chips.innerHTML = [...picked].map((p) => '<span>' + p + '</span>').join(''); };
+      drawChips();
+      box.addEventListener('keyup', () => {
+        const q = box.value.trim().toLowerCase();
+        setTimeout(() => {
+          const hits = q ? TAX.filter((t) => t.toLowerCase().includes(q)) : [];
+          lb.innerHTML = hits.length ? hits.map((t) => '<li role="option"><input type="checkbox"' + (picked.has(t) ? ' checked' : '') + '>' + t + '</li>').join('') : '<li role="option">No Items.</li>';
+          lb.style.display = 'block';
+        }, 120);
+      });
+      lb.addEventListener('click', (e) => {
+        const row = e.target.closest('[role="option"]');
+        if (!row || /No Items/.test(row.textContent)) return;
+        const t = row.textContent.trim();
+        if (picked.has(t)) picked.delete(t); else picked.add(t);
+        drawChips(); box.value = ''; lb.style.display = 'none';
+      });
+    })();<\/script>`;
+}
+
+test('P3: a row already ticked in a Workday multi-select is answered, never clicked (which would un-choose it)', async () => {
+  await fill(tickedMultiFixture(['AutoCAD', 'Python (Programming Language)', 'Welding'], ['AutoCAD']), {
+    editPlan: `(plan) => { for (const a of plan.actions) if (/Skills/.test(a.label)) { a.action = 'prompt'; a.promptKind = 'multi'; a.values = ['AutoCAD', 'Python (Programming Language)']; a.value = 'AutoCAD'; } return plan; }`,
+  });
+  const chips = await page.evaluate(() => [...document.querySelectorAll('#chips span')].map((s) => s.textContent));
+  assert.ok(chips.includes('AutoCAD'), `AutoCAD is still chosen: ${chips.join(', ')}`);
+  assert.ok(chips.includes('Python (Programming Language)'), `and the next skill was added: ${chips.join(', ')}`);
+});
+
+/**
+ * P4: A FILL NEVER MOVES THE PAGE (Simplify research 2026-11-06). He reads the
+ * form while it fills; a page that jumps to each box loses his place. Every
+ * box here sits below the fold of a 720 px window, the page starts part-way
+ * down, and the window's position is recorded on every scroll event.
+ */
+const P4_GAP = '<div style="height:900px"></div>';
+const watchScroll = () => page.evaluate(() => {
+  window.scrollTo(0, 300);
+  window.__ys = [];
+  window.addEventListener('scroll', () => window.__ys.push(Math.round(window.scrollY)), { passive: true });
+});
+const scrollsSeen = () => page.evaluate(() => ({ now: Math.round(window.scrollY), ys: window.__ys }));
+
+test('P4: a fill of boxes, a list, a search box and a consent below the fold leaves the page where he had it', async () => {
+  const result = await fill(`
+    ${P4_GAP}
+    <label for="fn">First Name</label><input id="fn" type="text">
+    ${P4_GAP}
+    <label for="ln">Last Name</label><input id="ln" type="text">
+    ${P4_GAP}
+    <label for="em">Email</label><input id="em" type="email">
+    ${P4_GAP}
+    <label for="co">Country</label><select id="co"><option value="">Select</option><option>Canada</option><option>United States</option></select>
+    ${P4_GAP}
+    ${remoteSchoolFixture({ firstPage: P3_FIRST, schools: [...P3_UNIS, 'Lakeside University'] })}
+    ${P4_GAP}
+    <label><input id="ok" type="checkbox"> I agree to the privacy policy</label>
+    ${P4_GAP}`, { before: watchScroll });
+  const got = await scrollsSeen();
+  const vals = await page.evaluate(() => ({ fn: document.getElementById('fn').value, em: document.getElementById('em').value, co: document.getElementById('co').value, ok: document.getElementById('ok').checked }));
+  assert.ok(vals.fn && vals.em && vals.co === 'United States', `the boxes filled: ${JSON.stringify(vals)} (answered ${result.answered?.length})`);
+  assert.equal(await schoolShown(), 'Lakeside University', 'the search box filled');
+  assert.deepEqual({ now: got.now, moved: got.ys.filter((y) => y !== 300) }, { now: 300, moved: [] }, `the window moved: ${got.ys.join(', ')}`);
+});
+
+test('P4: a walk to the next step presses a Next below the fold without scrolling to it', async () => {
+  const result = await fill(`
+    <div id="app"></div>
+    <script>
+      const tall = '<div style="height:2400px"></div>';
+      const steps = [
+        '<h2>My Information</h2>' + tall + '<label for="first_name">First Name</label><input id="first_name">' + tall +
+          '<button data-automation-id="pageFooterNextButton">Save and Continue</button><div style="height:300px"></div>',
+        '<h2>Review</h2>' + tall + '<label for="email">Email</label><input id="email">' + tall +
+          '<button data-automation-id="pageFooterNextButton">Submit</button><div style="height:300px"></div>',
+      ];
+      let i = 0;
+      const render = () => {
+        document.getElementById('app').innerHTML = steps[i];
+        const b = document.querySelector('[data-automation-id="pageFooterNextButton"]');
+        if (b && b.textContent === 'Save and Continue') b.onclick = () => { i += 1; render(); };
+        if (b && b.textContent === 'Submit') b.onclick = () => { window.__SUBMITTED = true; };
+      };
+      render();
+    </script>`, { before: watchScroll });
+  assert.equal(result.steps, 2, JSON.stringify(result.stoppedBecause));
+  assert.equal(await page.evaluate(() => document.getElementById('email')?.value), 'v@example.test');
+  assert.equal(await page.evaluate(() => !!window.__SUBMITTED), false, 'SUBMIT IS HIS');
+  const got = await scrollsSeen();
+  assert.deepEqual({ now: got.now, moved: got.ys.filter((y) => y !== 300) }, { now: 300, moved: [] }, `the window moved: ${got.ys.join(', ')}`);
 });

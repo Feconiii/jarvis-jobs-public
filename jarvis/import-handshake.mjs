@@ -278,6 +278,7 @@ async function main(argv) {
   if (has('dry-run')) { say(`\n  (dry run — nothing written)\n`); return 0; }
   if (!take.length) { say(`\n  Nothing to import.\n`); return 0; }
   const { added, updated } = upsertJobs(take);
+  await (await import('./dedupe.mjs')).recheckAfterUpsert();   // F-1028
   say(`\n  Store updated: ${added} added, ${updated} updated.\n`);
   return 0;
 }

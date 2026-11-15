@@ -62,7 +62,11 @@ export function registrableDomain(hostname) {
   const labels = String(hostname || '').toLowerCase().split('.').filter(Boolean);
   if (labels.length <= 2) return labels.join('.');
   const lastTwo = labels.slice(-2).join('.');
-  return MULTI_PART_TLDS.has(lastTwo) ? labels.slice(-3).join('.') : lastTwo;
+  // A generic second level under a country code is a public suffix too
+  // (review, 2026-11-03): gov.uk, com.hk, com.tr, co.kr, com.tw, gob.mx…
+  const sld = labels[labels.length - 2], tld = labels[labels.length - 1];
+  const ccSuffix = /^[a-z]{2}$/.test(tld) && /^(?:co|com|net|org|gov|gob|gouv|ac|edu|ltd|plc|nic|ne|or|mil|go)$/.test(sld);
+  return MULTI_PART_TLDS.has(lastTwo) || ccSuffix ? labels.slice(-3).join('.') : lastTwo;
 }
 
 /** The service a URL belongs to, or '' when it cannot be parsed. */

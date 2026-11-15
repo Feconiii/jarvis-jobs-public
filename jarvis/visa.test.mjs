@@ -342,5 +342,115 @@ check('…but "regardless of race, color, religion" is still EEO text',
 check('…and "regardless of sexual orientation" too',
   blockKey('We hire regardless of sexual orientation, gender identity, or visa status.'), null);
 
+// ── the block KEY comes from what the sentence demands (F-662..F-664) ──
+//
+// Found 2026-10-03, fixed 2026-10-18. All three were hidden for the wrong
+// reason: the key was taken from the first word that matched.
+console.log('🧪 visa: an agency name, a field heading and "citizen or authorized" are not what they look like');
+
+// F-662, Stoke Space: the I-9 agency's name.
+const STOKE_I9 = 'Employees must comply with the United States Citizenship and Immigration Services employment verification requirements, and, therefore, they must complete an Employment Eligibility Verification Form I-9 at the start of employment and re-verify authorization to work periodically.';
+const STOKE_ITAR = 'To conform to U.S. Government space technology export regulations, including the International Traffic in Arms Regulations (ITAR), you must be a U.S. citizen, lawful permanent resident of the U.S., protected individual as defined by 8 U.S.C. 1324b(a)(3), or eligible to obtain the required authorizations from the U.S. Department of State.';
+check('the USCIS name in an I-9 paragraph is not a citizenship demand',
+  blockKey(STOKE_I9), null);
+check('…nor is "USCIS" spelled as initials',
+  blockKey('All hires complete Form I-9 as required by USCIS.'), null);
+check("…and Stoke's real constraint is the ITAR list, a U.S.-person caution",
+  [blockKey(`${STOKE_I9}\n${STOKE_ITAR}`), keys(`${STOKE_I9}\n${STOKE_ITAR}`).includes('us_person')], [null, true]);
+check('…the export-licence alternative is not "authorized to work"',
+  keys(STOKE_ITAR).includes('us_person'), true);
+check('a real citizenship demand next to the agency still blocks',
+  blockKey('Must be a U.S. citizen. Hires complete the U.S. Citizenship and Immigration Services Form I-9.'), 'us_citizen');
+
+// F-663, Boeing: labelled fields, the heading on one line and the value on the next.
+const BOEING_NO_CLEARANCE = 'Export Control Requirement:\nThis is not an Export Control position.\n\nSafety Sensitive:\nThis is not a Safety Sensitive Position.\n\nSecurity Clearance:\nThis position does not require a Security Clearance.\n\nVisa Sponsorship:\nEmployer will not sponsor applicants for employment visa status.';
+check('a "Security Clearance:" heading whose value says none is not a clearance block',
+  blockKey(BOEING_NO_CLEARANCE), 'no_sponsorship');
+check('…and with "willing to sponsor" the job is not hidden at all',
+  blockKey('Security Clearance:\nThis position does not require a Security Clearance.\n\nVisa Sponsorship:\nEmployer willing to sponsor applicants for employment visa status.'), null);
+check('…while a value that demands one still blocks',
+  blockKey('Security Clearance:\nThis position requires the ability to obtain a U.S. Security Clearance for which the U.S. Government requires U.S. Citizenship. An interim and/or final U.S. Secret Clearance Post-Start is required.\n\nVisa Sponsorship:\nEmployer will not sponsor applicants for employment visa status.'), 'clearance');
+check('Parsons: "Security Clearance Requirement:" with "None" under it',
+  blockKey('Security Clearance Requirement:\nNone\nThis position is part of our Critical Infrastructure team.'), null);
+check('…a value the old pattern did not know still blocks once the heading stops doing the work',
+  blockKey('Security Clearance:\nActive DoW TS clearance with SCI eligibility required'), 'clearance');
+check('"not required to apply; however … must be able to obtain" still blocks on its second half',
+  blockKey('A security clearance is not required to apply; however, the selected candidate must be able to obtain a Secret clearance which requires U.S. citizenship, prior to the start date.'), 'clearance');
+check('"no clearance required, must be clearable" still wants someone clearable',
+  blockKey('Security Clearance: No clearance required, must be clearable.'), 'clearance');
+check('"preferred but not required" is not a demand',
+  blockKey('- Active U.S. Security Clearance preferred but not required'), null);
+check('Astranis form question: "While a security clearance is not required…"',
+  blockKey('While a security clearance is not required, please let us know if you currently hold one or would be open to obtaining one: (required)'), null);
+
+// F-664, Trane and the general shape "citizen or <authorized to work>".
+const TRANE = '• Be a U.S. citizen or have the legal right to work in the U.S. without requiring sponsorship now or in the future.';
+check('Trane: "citizen or legal right to work without sponsorship" is not a citizenship block',
+  blockKey(TRANE) !== 'us_citizen' && blockKey(TRANE) !== null, true);
+// The tree already keys this exact demand perm_authorization (the F-405 row
+// above, "legal right to work … without sponsorship now or in the future").
+check('…it keys as the permanent-authorization demand the rest of the sentence is',
+  blockKey(TRANE), 'perm_authorization');
+check('Owens Corning: "citizen or have the right to work" hides nothing',
+  blockKey('Must be a US citizen or have the right to work in the US'), null);
+check('UPS: a list ending "or an alien authorized to work" accepts OPT',
+  blockKey('Must be a U.S. Citizen or National of the U.S., an alien lawfully admitted for permanent residence, or an alien authorized to work in the U.S. for this employer.'), null);
+check('"citizen or authorization to work permanently for any Employer" demands permanence',
+  blockKey('•US citizen or authorization to work permanently for any Employer in the United States'), 'perm_authorization');
+check('"citizen or permanent resident WITH work authorization" offers a green card, not work authorization',
+  keys('Must be a US citizen or permanent resident with work authorization.').includes('us_person'), true);
+check('"as a U.S. citizen or lawful permanent resident" still demands a green card',
+  blockKey('Applicants must be legally authorized to work in the United States as a U.S. citizen or lawful permanent resident (green card holder).'), 'perm_authorization');
+check('"Permanent Residency" is the same alternative as "permanent resident"',
+  [blockKey('• Proof of U.S. Citizenship or US Permanent Residency is a requirement for this position.'), keys('• Proof of U.S. Citizenship or US Permanent Residency is a requirement for this position.').includes('us_person')], [null, true]);
+check('…and "Greencard" written as one word',
+  blockKey('• US Citizenship or a Greencard'), null);
+check('"citizen or national" is still citizen-only',
+  blockKey('- A U.S. citizen or national'), 'us_citizen');
+
+// Found by the F-662..F-664 diff, 2026-10-18.
+const GT_EEO = 'Further, Georgia Tech prohibits citizenship status, immigration status, and national origin discrimination in hiring, firing, and recruitment, except where such restrictions are required in order to comply with law, regulation, executive order, or Attorney General directive, or where they are required by Federal, State, or local government contract.';
+check('Georgia Tech: "prohibits citizenship status … discrimination" is EEO text, not a refusal',
+  blockKey(GT_EEO), null);
+check('…and a real refusal beside it still blocks',
+  blockKey(`${GT_EEO}\nWe will not sponsor visas for this position.`), 'no_sponsorship');
+check('Boeing: "This is not an Export Control position." raises no export-control caution',
+  keys('Export Control Requirement:\nThis is not an Export Control position.').includes('export_control'), false);
+check('…while a real export-control line still does',
+  keys('This position requires access to export-controlled information (ITAR).').includes('export_control'), true);
+check('Honeywell: a "US Person:" heading over a definition that says "protected status" keeps its caution',
+  [blockKey('US Person:\n\nDue to compliance with U.S export control laws and regulations, candidate must be a US person which is defined as a US Citizen, a US permanent resident, or have protected status in the US under asylum or refugee status'),
+    keys('US Person:\n\nDue to compliance with U.S export control laws and regulations, candidate must be a US person which is defined as a US Citizen, a US permanent resident, or have protected status in the US under asylum or refugee status').includes('us_person')], [null, true]);
+check('…while plain EEO text naming protected status is still skipped',
+  blockKey('We do not discriminate on the basis of citizenship status, protected veteran status or any other protected status.'), null);
+check('…and a citizen-or-PR line beside a refusal still blocks on the refusal',
+  blockKey('Successful candidates for positions subject to ITAR/EAR restrictions must provide proof of U.S. Citizenship or Permanent Residence and must not require sponsorship for export-restricted work authorization.'), 'no_sponsorship');
+
+// ── F-627: a teaser nobody read in full is not screened ─────────────
+console.log('🧪 visa: a short body with no full read says "not screened", never "clean"');
+// GE HealthCare's stored summary; the full body says it will not sponsor.
+const GEHC_TEASER = 'Job Description Summary: Join our Madison manufacturing team to lead process improvements on our MR coil lines. Bachelor\'s degree in engineering.';
+const thinKeys = (d) => classifyVisa('Manufacturing Engineer', d, { thin: true }).warnings.map(w => w.key);
+check('a thin body gets the "not screened" note instead of "does not mention sponsorship"',
+  [thinKeys(GEHC_TEASER).includes('sponsorship_unscreened'), thinKeys(GEHC_TEASER).includes('sponsorship_unmentioned')], [true, false]);
+check('…and it is never a block',
+  classifyVisa('Manufacturing Engineer', GEHC_TEASER, { thin: true }).block, null);
+check('…and a teaser that mentions OPT does not earn a green badge',
+  classifyVisa('Engineer', 'New grads on OPT welcome. Apply today.', { thin: true }).warnings.some(w => w.level === 'good'), false);
+check('…while a refusal in the teaser still blocks, however short',
+  classifyVisa('Engineer', 'We will not sponsor individuals for employment visas, now or in the future.', { thin: true }).block?.key, 'no_sponsorship');
+check('…and the same body read in full stays as it was',
+  keys(GEHC_TEASER, 'Manufacturing Engineer'), ['sponsorship_unmentioned']);
+
+// F-954: the refusal leads and the sponsorship noun sits two commas later.
+check('"does not intend to hire … job seekers who will need, now or in the future, … sponsorship" blocks',
+  blockKey('Bachelor’s degree in Mechanical Engineering. Entegris does not intend to hire experienced or entry level job seekers who will need, now or in the future, Entegris sponsorship through H-1B ("H-1B lottery")', 'Engineer I, Mechanical Engineering'), 'no_sponsorship');
+check('"we will not consider applicants who require, now or in the future, visa sponsorship" blocks',
+  blockKey('We will not consider applicants who require, now or in the future, visa sponsorship.'), 'no_sponsorship');
+check('…but considering those who need sponsorship is no refusal',
+  blockKey('We will consider candidates who will need, now or in the future, sponsorship.'), null);
+check('…and not hiring people who need supervision says nothing about visas',
+  blockKey('We do not hire engineers who need constant supervision, and we offer great benefits.'), null);
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

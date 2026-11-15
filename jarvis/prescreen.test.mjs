@@ -2,7 +2,7 @@
 // reader judged (2026-10-07/08): the ones it turned down for years or field,
 // and the KEEP / MAYBE ones the script must leave alone.
 
-import { prescreen, yearsBar, disciplineBar, minYears } from './prescreen.mjs';
+import { prescreen, yearsBar, disciplineBar, minYears, gradProgram, stretchYears, stretchEmployer } from './prescreen.mjs';
 
 let pass = 0, fail = 0;
 function check(label, got, want) {
@@ -39,6 +39,9 @@ console.log('\n🧪 prescreen: left for the reader (each was a KEEP or MAYBE)');
   check('"1-3 years" starts at one (Banner, MAYBE)', drops('• 1 - 3 years of relevant experience'), false);
   check('"0–2 years … includes internships" (Crusoe, MAYBE)', drops('- Experience: 0–2 years of mechanical design experience (includes internships, co-ops, or relevant academic capstone projects).'), false);
   check('"0 – 10 years … preferred" (Hyundai, MAYBE)', drops('0 – 10 years job related experience in an engineering/industrial environment preferred'), false);
+  check('"zero to two years" is a range from zero (Yaskawa, F-959)', drops('Bachelor of Science degree and zero to two years related experience in mechanical engineering.'), false);
+  check('"zero (0) to two (2) years" too', drops('- BS in ME with zero (0) to two (2) years of experience required.'), false);
+  check('"two to four years" still starts at two', minYears('- Two to four years of experience in manufacturing engineering required.'), 2);
   check('"Up to two (2) years" is a ceiling (Wabtec, MAYBE)', drops('• Up to two (2) years’ experience in industry related field.'), false);
   check('"Less than three years" is a ceiling (Toray, MAYBE)', drops('• Less than three years of experience working in composite materials, aerospace manufacturing industry'), false);
   check('"fresh graduates welcome" (Qualcomm)', drops('* Work Experience: 3+ years preferred ( fresh graduates welcome to apply )'), false);
@@ -82,6 +85,57 @@ console.log('\n🧪 prescreen: one reading of the years with triage (F-724)');
   }
   check('"Nobody has ten years of it yet" is no ask', classifyExperience('Automation Engineer', 'Nobody has ten years of it yet, so what you build becomes the standard.').level, 'unknown');
   check('"3+ years of programming" is not a program', minYears('3+ years of programming in Python'), 3);
+}
+
+console.log('\n🧪 prescreen: a role made for his graduating class never fails on years (his rule, 2026-11-06)');
+{
+  // The screen cuts a required 2+ (a "1-3" goes to the reader, whose brief and drop exception carry the rule too).
+  const formlabs = 'Minimum Qualifications\n• 2+ years of experience in manufacturing engineering';
+  check('a "May 2027 Graduates" role with a required 2+ years goes to the reader, not cut', drops(formlabs, 'Manufacturing Engineer - May 2027 Graduates'), false);
+  check('…the same years line on an ordinary title is still cut', drops(formlabs, 'Manufacturing Engineer'), true);
+  check('"New Grad- Robotics Reliability Engineer" is a program', gradProgram({ title: 'New Grad- Robotics Reliability Engineer' }), true);
+  check('"Quality Engineering Graduate Program - September 2027" is one', gradProgram({ title: 'Quality Engineering Graduate Program - September 2027' }), true);
+  check('"Early Career Mechanical Engineer" is one', gradProgram({ title: 'Early Career Mechanical Engineer' }), true);
+  check('a body that calls itself a new grad program is one', gradProgram({ title: 'Process Engineer', text: 'This is a new grad program for students graduating in 2027.' }), true);
+  check('"Graduate" alone in a degree line is not', gradProgram({ title: 'Process Engineer', text: "Bachelor's degree; graduate degree a plus." }), false);
+  check('an ordinary title is not', gradProgram({ title: 'Mechanical Engineer II' }), false);
+  // Review 2026-11-06.
+  check('a new-grad title asking 3+ years is still cut (his earlier rule)', drops('Minimum Qualifications\n• 3+ years of experience in manufacturing engineering', 'New Grad Manufacturing Engineer'), true);
+  check('"not designed for new grads" is no program', gradProgram({ title: 'Process Engineer', text: 'This role is not designed for new grads.' }), false);
+  check('"NCG" is one', gradProgram({ title: 'NCG Mechanical Engineer' }), true);
+  check('"Graduate Mechanical Engineer" is one', gradProgram({ title: 'Graduate Mechanical Engineer' }), true);
+  check('"Engineering Rotational Program" is one', gradProgram({ title: 'Engineering Rotational Program' }), true);
+}
+
+console.log('\n🧪 prescreen: a degree\'s length is not experience (Fluor, 2026-11-06)');
+{
+  const fluor = 'Basic Job Requirements\n• Accredited four (4) year Bachelor\'s Degree in Chemical Engineering and no required years of experience';
+  check('"four (4) year Bachelor\'s Degree" is no years bar', yearsBar(fluor), null);
+  check('…nor "4-year degree in mechanical engineering"', yearsBar('Requirements\n• 4-year degree in mechanical engineering required'), null);
+  check('…while "4+ years of experience" still is', !!yearsBar('Requirements\n• 4+ years of experience in process engineering'), true);
+}
+
+console.log('\n🧪 prescreen: at a robotics company a required 1-2 years is a stretch (his answer 2026-11-06, "5. ye")');
+{
+  const two = 'Minimum Qualifications\n• 2+ years of experience in mechanical engineering';
+  const three = 'Minimum Qualifications\n• 3+ years of experience in mechanical engineering';
+  check('Figure AI asking 2+ years goes to the reader', !!prescreen({ title: 'Mechanical Engineer, Arms', text: two, company: 'Figure AI' }), false);
+  check('…the same line at a non-robotics employer is still cut', !!prescreen({ title: 'Mechanical Engineer', text: two, company: 'Acme Valves' }), true);
+  check('…and 3+ at a robotics company is still cut', !!prescreen({ title: 'Mechanical Engineer', text: three, company: 'Figure AI' }), true);
+  check('a 2+ years line at Agility is a stretch', stretchYears({ company: 'Agility Robotics', title: 'Mechanical Engineer II', text: two }), true);
+  check('…so is a required "1-2 years of experience"', stretchYears({ company: 'Dexterity', title: 'Mechanical Engineer', text: 'Requirements\n• 1-2 years of industry experience' }), true);
+  check('…but not 3+', stretchYears({ company: 'Agility Robotics', title: 'Mechanical Engineer', text: three }), false);
+  check('…nor a role made for graduating students (its own rule)', stretchYears({ company: 'Formlabs', title: 'Manufacturing Engineer - May 2027 Graduates', text: two }), false);
+  check('…nor a non-robotics employer', stretchYears({ company: 'Acme Valves', title: 'Mechanical Engineer', text: two }), false);
+  check('Tesla stays capped: not on the robotics list', stretchEmployer('Tesla'), false);
+  // Review 2026-11-06.
+  check('"Figure Lending" is not Figure AI', stretchEmployer('Figure Lending'), false);
+  check('"Agility Logistics" is not Agility Robotics', stretchEmployer('Agility Logistics'), false);
+  check('"1X Technologies" and "Divergent Technologies, Inc." are', stretchEmployer('1X Technologies') && stretchEmployer('Divergent Technologies, Inc.'), true);
+  check('a Field Engineer at Intuitive is no stretch', stretchYears({ company: 'Intuitive Surgical', title: 'Field Engineer', text: two }), false);
+  check('…and is still cut before reading', !!prescreen({ title: 'Field Engineer', text: two, company: 'Intuitive Surgical' }), true);
+  check('"0-1 years of experience" is a true fit, not a stretch', stretchYears({ company: 'Dexterity', title: 'Mechanical Engineer', text: 'Requirements\n• 0-1 years of experience' }), false);
+  check('"within 1 year you will…" asks for nothing', stretchYears({ company: 'Dexterity', title: 'Mechanical Engineer', text: 'Within 1 year you will own the experience of our test cell.' }), false);
 }
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);

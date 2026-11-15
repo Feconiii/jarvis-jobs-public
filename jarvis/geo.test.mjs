@@ -13,7 +13,7 @@
 //
 // Run: `node jarvis/geo.test.mjs` (exit 1 on any failure).
 
-import { classifyLocation } from './geo.mjs';
+import { classifyLocation, bucketDrifted } from './geo.mjs';
 
 let pass = 0, fail = 0;
 function eq(input, want, note = '') {
@@ -139,8 +139,9 @@ eq2('Hamburg', 'Engineer (m/w/d)', 'non-us');
 // employer using the notation is not mislabelled — TX is not a country code.
 eq2('Austin, TX', 'Manufacturing Engineer (f/m/d)', 'us');
 eq2('USA - Texas - Austin', 'Engineer (m/w/d)', 'us');
-// …and without the notation nothing changes about any of them.
-eq2('Marktoberdorf, DE', 'Manufacturing Engineer', 'us');
+// …and without the notation Berlin is still unknown. "Marktoberdorf, DE" is
+// Germany on its own since 2026-11-03: it is no Delaware place (see below).
+eq2('Marktoberdorf, DE', 'Manufacturing Engineer', 'non-us');
 eq2('Berlin', 'Manufacturing Engineer', 'unknown');
 
 console.log('🧪 geo: foreign towns that were actually sitting in the deck');
@@ -339,6 +340,145 @@ eq('FXE-EU/DEU/GTIA/GTIA/Road Transit', 'non-us');
 eq('FXE-EU/POL/KCWA/KCWA/Chorzow', 'non-us');
 eq('DE Arteaga Mex', 'non-us', 'a title-cased trailing code is the only foreign signal here');
 eq('PAN - Panama City', 'non-us', 'an ambiguous code still counts when positioned AND capitalised');
+
+console.log('🧪 geo: F-759 — US towns named after countries, "Town, ST" wins');
+// CONVERGIX, LG Energy Solution and Yanfeng (Holland, MI), Lennox (Grenada,
+// MS) and Amphenol (Macedonia, OH) were all filed non-us: the country NAME in
+// the town outranked the state code after the comma.
+for (const t of ['Holland, MI', 'Holland, MI 49423', 'South Holland, IL', 'Grenada, MS',
+                 'Macedonia, OH', 'Canada, KY', 'Jamaica, NY', 'Angola, IN', 'Brazil, IN',
+                 'North Wales, PA', 'Little Canada, MN', 'Lebanon, PA', 'Lebanon, OH',
+                 'Lebanon, NH', 'Lebanon, TN', 'Mexico, MO', 'Peru, IN', 'Poland, OH',
+                 'Jordan, MN', 'Cuba, MO', 'Denmark, WI', 'Norway, ME', 'Panama City, FL',
+                 'Paris, TX', 'Athens, GA', 'Berlin, NH', 'Moscow, ID', 'Dublin, OH',
+                 'Dublin, CA', 'Toronto, OH', 'London, KY', 'Nederland, TX', 'Amsterdam, NY',
+                 'Dresden, TN', 'Ontario, CA', 'Glasgow, DE', 'Glasgow, KY', 'Cairo, IL',
+                 'Leeds, AL', 'PA-Warrington', 'SC-Swansea']) {
+  eq(t, 'us', 'a US town');
+}
+// A ZIP after the state code is still the canonical shape.
+eq('Paris, TN 38242', 'us', 'was France: "TN 38242" was not exactly "TN"');
+eq('Vincennes, IN 47591', 'us');
+eq('New Orleans, LA 70123', 'us', 'was Laos, via the French Orleans');
+eq('Saint John, IN 46373', 'us');
+// The code the line ENDS on is the state, not the first capitalised pair.
+eq('La Palma, CA', 'us', 'the "La" is not Louisiana/Laos');
+eq('Little Italy SD, 2008 India St., San Diego, CA 92101', 'us', 'a street line is not a country');
+eq2('', 'Sales Supervisor, Leeds, AL', 'us');
+// …and the rule does not pull real foreign postings in.
+for (const t of ['Germany, DE', 'India, IN', 'Canada, CA', 'Israel, IL', 'Germany-wide, DE',
+                 'Panama City, PA', 'Panama City, 8, PA', 'Australia, WA',
+                 'Perth, AU, Australia, WA', 'Bangalore, India, IN', 'India, India, IN',
+                 'Toronto, Canada, CA', "Ra'anana, ISR, IL", 'Amsterdam, NH, Netherlands',
+                 'Pithampur, MP, IN', 'Bogotá, DC, CO', 'Tunis, TN', 'Sfax, TN']) {
+  eq(t, 'non-us', 'a country beside its own code, or a country later in the line');
+}
+
+console.log('🧪 geo: state codes that are also foreign region codes');
+// Tamil Nadu (TN), Assam (AS), Odisha (OR), Madhya Pradesh (MP), Noord-Holland
+// (NH): Indian and Dutch tenants write these exactly like US states. "Chennai,
+// TN" was 76 rows in the US bucket.
+for (const t of ['Chennai, TN', 'Coimbatore, TN', 'Guwahati, AS', 'Bhubaneswar, OR',
+                 'Indore, MP', 'Amsterdam, NH', 'Hilversum, NH', 'Kiel, DE', 'Kempten, DE',
+                 'Fellbach, BW, DE', 'Hude-Wüsting, NI, DE', 'Warstein, NRW,DE, DE',
+                 'Bergkamen, Nordrhein-Westfalen, DE', 'Weimar, Thüringen, DE',
+                 '_, TNG, MA, 94031', 'Al Matar, Cairo Governorate, Egypt']) {
+  eq(t, 'non-us');
+}
+// "X, DE" IS DELAWARE ONLY WHEN IT IS IN DELAWARE (2026-11-03). "Stays
+// shown" was the rule while nothing listed Delaware's places; now every one
+// is listed, and its ZIPs all start 197-199.
+for (const t of ['Marktoberdorf, DE', 'Neuenstein, DE', 'Lindenberg im Allgäu, DE', 'Bensheim, DE, 64625',
+                 'Schwaikheim, DE, 71409', 'Wolfsburg, DE', 'Bonndorf/Schwarzwald, BW, DE, D-79848']) eq(t, 'non-us');
+for (const t of ['Wilmington, DE', 'Newark, DE', 'Glasgow, DE', 'Rehoboth Beach, DE', 'RPSNA Middletown DE',
+                 'Milford, DE, US, 19963', 'Some Plant, DE, 19706', 'US - Wilmington - DE',
+                 'Washington, DC, Baltimore, MD, Sterling, VA, Georgetown, DE']) eq(t, 'us');
+eq('DE005 Greentree - Clinic', 'us', 'a site code glued to digits keeps the older reading');
+// "Remote, DE" names no place: Delaware or Germany, so remote, not abroad (review).
+for (const t of ['Remote, DE', 'Remote - DE', 'Remote, Remote, DE']) eq(t, 'remote');
+eq('Remote (DE), Germany', 'non-us');
+// retriage --location picks rows by this (2026-11-03): stored vs current reading.
+{
+  const ok = (name, got, want) => { if (got === want) pass++; else { fail++; console.log(`✗ ${name}: got ${got}`); } };
+  ok('a German "DE" row stored as us has drifted', bucketDrifted({ location: 'Neuenstein, DE', title: 'Engineer', url: '', location_bucket: 'us' }), true);
+  ok('a row stored as the current reading has not', bucketDrifted({ location: 'Wilmington, DE', title: 'Engineer', url: '', location_bucket: 'us' }), false);
+  ok('a row with no stored bucket has drifted', bucketDrifted({ location: 'Austin, TX', title: 'Engineer', url: '', location_bucket: null }), true);
+}
+// A state code before the end of the string counts only in capitals:
+// "La Piedad" (Bosch, Mexico) is no Louisiana, "Mi Perú, Callao" no Michigan.
+eq('La Piedad, Qro., Mexico', 'non-us');
+eq('Mi Perú, Callao, Peru', 'non-us');
+eq('La Piedad', 'unknown');
+for (const t of ['LA - Baton Rouge', 'Baton Rouge, La', 'La Palma, CA']) eq(t, 'us');
+
+console.log('🧪 geo: F-764 — foreign cities with no country');
+// PwC "Cairo - ETIC", PwC "Warszawa", BlackRock "Edinburgh" sat in the deck
+// among US postings because a city with no country read as unknown.
+for (const t of ['Cairo - ETIC', 'Cairo', 'Warszawa', 'Edinburgh', 'Glasgow', 'Belfast',
+                 'Leeds', 'Crawley', 'Rugby', 'Perth', 'Santiago', 'Juarez', 'Goettingen',
+                 'Vélizy-Villacoublay', 'Gennevilliers', 'Bucuresti', 'Moskva', 'Sanchong',
+                 'Kaiseraugst', 'Selangor', 'Kanagawa', 'Maharashtra', 'Queensland']) {
+  eq(t, 'non-us', 'a foreign city standing alone');
+}
+// Gazetteer entries written with a hyphen never matched flattened input.
+eq('Vitry-sur-Seine', 'non-us');
+eq('Issy Les Moulineaux', 'non-us');
+eq('Saint-Étienne', 'non-us');
+eq('Wilkes-Barre', 'us', 'the US gazetteer had the same hole');
+// "XX - City" with a country code, spaced.
+eq('PL - Warszawa', 'non-us');
+eq('CH - Visp', 'non-us');
+eq('NL - Geleen', 'non-us');
+eq('SA - San Antonio', 'us', 'a US city on the line wins');
+eqT('IT — Service Desk Analyst', 'unknown', 'IT is a department here, not Italy');
+eqT('GN - SONG - MT - Hyperpersonalization - Analyst', 'us', 'an Accenture unit code, not Guinea');
+// Canadian province codes and names.
+for (const t of ['Ottawa, ON', 'Mount Royal, QC', 'Saint-Bruno, QC, CA', 'CA - Woodbridge, ON',
+                 'Cambridge, ON, CA', 'Iqaluit, NU, CA', 'Vancouver, British Columbia',
+                 'Alliston, Ontario', 'Kirkland, Quebec', 'Moncton, New Brunswick',
+                 'Reading, Berkshire', 'Chennai, Tamil Nadu', 'Rijssen, Overijssel, Nederland']) {
+  eq(t, 'non-us');
+}
+eq('Ontario', 'unknown', 'Ontario, CA and Ontario, OR are cities: a leading region name proves nothing');
+eq('Ontario, California', 'us');
+eq('Renal Center of Nederland', 'unknown', 'Nederland, TX — the name counts only after a comma');
+// Trailing foreign postcodes hid the country code before them.
+for (const t of ['Leeds, GB, LS19 6JY', 'Swindon, Wiltshire, GB, SN5 6PB',
+                 'Amsterdam, NH, NL, 1082 VA', 'Ballina, MY, IE, F26 F3X5',
+                 'Coquitlam, British Columbia, CA, V3K 5X6']) {
+  eq(t, 'non-us', 'the postcode is dropped before the country is read');
+}
+// Names with a US twin written bare stay unknown — unknown means shown.
+for (const t of ['Liverpool', 'Rome', 'Parma', 'Lima', 'Valencia', 'Victoria', 'Warwick',
+                 'Bristol', 'Derby', 'Reading', 'Cali', 'Baden', 'Birmingham', 'Cambridge',
+                 'Manchester', 'Dublin', 'Athens', 'Perth Amboy', 'Sheffield Village']) {
+  eq(t, 'unknown', 'US twin: shown, not hidden');
+}
+// F-1042. After a plain town name the comma part is its region, not a second
+// city: "Thetford, Norfolk" (Multimatic, England, 37 rows) was Virginia.
+eq('Thetford, Norfolk', 'unknown', 'Norfolk is the county here, not the Virginia city');
+eq('Carrick-on-Shannon, Co. Leitrim', 'unknown');
+eq('Norfolk', 'us', 'a US city standing alone still reads as one');
+eq('Norfolk, VA', 'us');
+eq('Chelmsford, Essex', 'us', 'Chelmsford is itself a US city: only the posting text can settle it');
+// …and a non-town first part still lets a US city later in the line count.
+for (const t of ['GLOBAL CUSTOM COMMERCE/BLINDS OFFICE, HOUSTON - 2140', '379 Interpace Pkwy, Parsippany, 07054',
+                 'Seattle, San Francisco', 'Los Angeles, San Francisco', 'Pittsburgh, San Mateo',
+                 'Chicago, Minneapolis, or Milwaukee', 'Seattle,Tacoma, Federal Way', 'Pittsburgh, San Mateo, Bengaluru',
+                 'Silicon Valley, Cupertino, Palo Alto, San Jose, East Bay', 'Chicago, Toronto']) {
+  eq(t, 'us', 'a US site on the line');
+}
+// A US metro after a town is its metro (review, 2026-11-12).
+for (const t of ['Bothell, Seattle', 'Kent, Seattle area', 'Springfield, Chicago area', 'Lancaster, Los Angeles', 'Oakland, Chicago', 'Paris, TX', 'Ukiah, CA']) {
+  eq(t, 'us', 'a US metro or state after the town');
+}
+eq('Durham, DUKE', 'unknown', '"UK" inside a word is no country');
+// A province code followed by the site, the way Air Liquide Canada writes it.
+for (const t of ['Bonnyville, AB - 50 Ave (Lakeland) - Respiratory therapy', 'Laval, QC - boul. Curé-Labelle (263) - Respiratory therapy',
+                 'Maitland, ON (N2O) (I) - N2O primary production', 'Mississauga, ON - Creditview Rd (VA HO)', 'Gander, NL (540) - Respiratory therapy']) {
+  eq(t, 'non-us', 'province code then the site');
+}
+eq('Mount Pleasant, PA', 'us');
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

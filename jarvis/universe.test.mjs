@@ -8,7 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   nameTokens, keyOf, plainName, aliasesOf, trackedIndex, matchTracked, openUniverse,
-  ingest, sync, due, record, coverage, coverageLine, replayLeftovers, lookupSite, linkedinSweep, setMeta,
+  ingest, sync, due, record, coverage, coverageLine, replayLeftovers, lookupSite, linkedinSweep, setMeta, splitShared,
 } from './universe.mjs';
 import { baseDomain, careerOrigins, orcLinksIn, pageUpLinksIn, platformOf } from './branded-boards.mjs';
 import { ukgBase, ukgBoardsIn, parseUkgResponse } from '../providers/ukg.mjs';
@@ -75,6 +75,23 @@ try {
     check('hardware employers come first, then by evidence', due(db).map((r) => r.name), ['Garmin International', 'Hartwell Civil Partners']);
   }
 
+  console.log('\n🧪 universe: a name from a curated hiring list matches exactly (F-947)');
+  {
+    const idx = trackedIndex([{ name: 'Cambium Networks' }, { name: 'Intuitive Surgical' }]);
+    check('LinkedIn\'s one-word name still finds its longer tracked form', matchTracked('Intuitive', idx)?.name, 'Intuitive Surgical');
+    check('…but a curated list\'s name does not', matchTracked('Cambium', idx, { exact: true }), null);
+    check('…and its exact spelling still does', matchTracked('Cambium Networks', idx, { exact: true })?.name, 'Cambium Networks');
+    // Its own ledger, so the blocks below see the rows they expect.
+    const db2 = openUniverse(path.join(dir, 'u-f947.db'));
+    ingest(db2, [{ name: 'Cambium', titles: ['Materials Engineer'], count: 1 }], 'radar');
+    ingest(db2, [{ name: 'Intuitive', titles: ['Mechanical Engineer'], count: 4 }], 'linkedin');
+    sync(db2, [{ name: 'Cambium Networks' }, { name: 'Intuitive Surgical' }]);
+    const st = (n) => db2.prepare('SELECT state, tracked_as FROM employers WHERE key = ?').get(keyOf(n));
+    check('Grace Gong\'s Cambium is left to be looked for, not called tracked', st('Cambium').state, 'pending');
+    check('LinkedIn\'s Intuitive is tracked as Intuitive Surgical', [st('Intuitive').state, st('Intuitive').tracked_as], ['tracked', 'Intuitive Surgical']);
+    db2.close();
+  }
+
   console.log('\n🧪 universe: recording what the resolver settled');
   {
     const now = new Date('2026-10-03T00:00:00Z');
@@ -89,6 +106,83 @@ try {
     check('…and it is due after', due(db, { now: '2026-11-03T00:00:00Z' }).map((r) => r.name), ['Hartwell Civil Partners']);
     record(db, [{ name: 'Hartwell Civil Partners', outcome: 'miss' }], { refused: true, now });
     check('a miss while a shared ATS refused comes back in 3 days', db.prepare('SELECT next_attempt FROM employers WHERE key = ?').get(keyOf('Hartwell Civil Partners')).next_attempt.slice(0, 10), '2026-10-06');
+    // F-1049: a recheck of a shared-board employer that misses keeps the board it shares.
+    {
+      const db3 = openUniverse(path.join(dir, 'u-f1049.db'));
+      ingest(db3, [{ name: 'Pall', titles: ['Mechanical Engineer'], count: 1 }], 'linkedin');
+      record(db3, [{ name: 'Pall', outcome: 'dupe', url: 'https://danaher.wd1.myworkdayjobs.com/DanaherJobs' }], { now });
+      record(db3, [{ name: 'Pall', outcome: 'miss' }], { now });
+      const pall = db3.prepare('SELECT state, tracked_as, outcome, attempts FROM employers WHERE key = ?').get(keyOf('Pall'));
+      check('a shared-board row that misses on a recheck stays tracked through that board',
+        [pall.state, pall.tracked_as, pall.outcome, pall.attempts],
+        ['tracked', 'board:https://danaher.wd1.myworkdayjobs.com/DanaherJobs', 'same board as a tracked company', 2]);
+      record(db3, [{ name: 'Pall', outcome: 'partial', url: 'https://danaher.wd1.myworkdayjobs.com/DanaherJobs', also: 'taleo' }], { now });
+      check('…while a second board it finds still makes it partial', db3.prepare('SELECT state FROM employers WHERE key = ?').get(keyOf('Pall')).state, 'partial');
+      const rowOf = (n) => db3.prepare('SELECT state, tracked_as, outcome, next_attempt FROM employers WHERE key = ?').get(keyOf(n));
+      const pallPartial = rowOf('Pall');
+      record(db3, [{ name: 'Pall', outcome: 'miss' }], { now });
+      const pallAfter = rowOf('Pall');
+      check('a partial shared-board row that misses later stays partial, its outcome kept, back in 14 days',
+        [pallAfter.state, pallAfter.outcome, pallAfter.next_attempt.slice(0, 10)], ['partial', pallPartial.outcome, '2026-10-17']);
+      // The refused and platform variants of a miss leave a shared row alone too.
+      ingest(db3, [{ name: 'Weir Minerals', titles: ['Mechanical Engineer'], count: 1 }, { name: 'Zalkin', titles: ['Design Engineer'], count: 1 }], 'linkedin');
+      record(db3, [{ name: 'Weir Minerals', outcome: 'dupe', url: 'https://weir.wd3.myworkdayjobs.com/Weir_External_Careers' },
+        { name: 'Zalkin', outcome: 'dupe', url: 'https://promachbuilt.wd108.myworkdayjobs.com/promach' }], { now });
+      record(db3, [{ name: 'Weir Minerals', outcome: 'miss' }], { refused: true, now });
+      record(db3, [{ name: 'Zalkin', outcome: 'miss', platform: 'ADP MyJobs' }], { now });
+      check('a refused miss keeps a shared-board row tracked', [rowOf('Weir Minerals').state, rowOf('Weir Minerals').tracked_as],
+        ['tracked', 'board:https://weir.wd3.myworkdayjobs.com/Weir_External_Careers']);
+      check('a platform miss keeps a shared-board row tracked', [rowOf('Zalkin').state, rowOf('Zalkin').tracked_as],
+        ['tracked', 'board:https://promachbuilt.wd108.myworkdayjobs.com/promach']);
+      // A different board found under the name replaces nothing; it becomes a proposal.
+      ingest(db3, [{ name: 'Statco-DSI', titles: ['Mechanical Engineer'], count: 1 }, { name: 'Sentry', titles: ['Controls Engineer'], count: 1 }], 'linkedin');
+      record(db3, [{ name: 'Statco-DSI', outcome: 'dupe', url: 'https://promachbuilt.wd108.myworkdayjobs.com/promach' },
+        { name: 'Sentry', outcome: 'dupe', url: 'https://promachbuilt.wd108.myworkdayjobs.com/promach' }], { now });
+      const proposed = [];
+      const c = record(db3, [{ name: 'Statco-DSI', outcome: 'tracked', url: 'https://job-boards.greenhouse.io/statco', provider: 'greenhouse', count: 40 },
+        { name: 'Sentry', outcome: 'found', url: 'https://jobs.ashbyhq.com/sentry', provider: 'ashby', count: 120 },
+        { name: 'Zalkin', outcome: 'dupe', url: 'https://jobs.smartrecruiters.com/uber' }], { now, propose: (p) => proposed.push(p) });
+      check('a recheck that finds a different board under the name keeps the shared one',
+        [rowOf('Statco-DSI').tracked_as, rowOf('Sentry').tracked_as, rowOf('Zalkin').tracked_as],
+        ['board:https://promachbuilt.wd108.myworkdayjobs.com/promach', 'board:https://promachbuilt.wd108.myworkdayjobs.com/promach', 'board:https://promachbuilt.wd108.myworkdayjobs.com/promach']);
+      check('…and writes each one down as a proposal', [c.proposed, proposed.map((p) => `${p.name} ${p.found}`)],
+        [3, ['Statco-DSI https://job-boards.greenhouse.io/statco', 'Sentry https://jobs.ashbyhq.com/sentry', 'Zalkin https://jobs.smartrecruiters.com/uber']]);
+      check('the same shared board found again (dupe, trailing slash) is no proposal',
+        record(db3, [{ name: 'Statco-DSI', outcome: 'dupe', url: 'https://promachbuilt.wd108.myworkdayjobs.com/promach/' }], { now, propose: (p) => proposed.push(p) }).proposed, undefined);
+      // A row NOT tracked through a shared board still goes to no-board on a miss.
+      ingest(db3, [{ name: 'Hartwell Fabrication', titles: ['Mechanical Engineer'], count: 1 }], 'linkedin');
+      record(db3, [{ name: 'Hartwell Fabrication', outcome: 'tracked', url: 'https://jobs.lever.co/hartwell' }], { now });
+      record(db3, [{ name: 'Hartwell Fabrication', outcome: 'miss' }], { now });
+      check('a row tracked on its own board that misses goes to no-board', rowOf('Hartwell Fabrication').state, 'no-board');
+      const split = splitShared(db3, [{ name: 'Statco-DSI' }, { name: 'Pall' }, { name: 'Hartwell Fabrication' }, { name: 'Nobody Known' }]);
+      check('shared-board names (tracked or partial) are asked without --write; the rest with it',
+        [split.shared.map((x) => x.name), split.rest.map((x) => x.name)], [['Statco-DSI', 'Pall'], ['Hartwell Fabrication', 'Nobody Known']]);
+      db3.close();
+    }
+    // F-946: one Workable name held back marked every miss in the run as unreal.
+    record(db, [
+      { name: 'Hartwell Civil Partners', outcome: 'miss' },
+      { name: 'Garmin International', outcome: 'miss' },
+      { name: 'Garmin International', outcome: 'unchecked' },
+    ], { refused: true, now });
+    const nextOf = (n) => db.prepare('SELECT next_attempt FROM employers WHERE key = ?').get(keyOf(n)).next_attempt.slice(0, 10);
+    check('only the name never checked comes back in 3 days', nextOf('Garmin International'), '2026-10-06');
+    check('…a checked miss in the same run waits the full 30', nextOf('Hartwell Civil Partners'), '2026-11-02');
+    // A run that says it named its unchecked names, and named none: every miss is real.
+    record(db, [{ name: '', outcome: 'unchecked-listed' }, { name: 'Hartwell Civil Partners', outcome: 'miss' }], { refused: true, now });
+    check('a run that lists no unchecked names: its misses wait 30 days even under the warning', nextOf('Hartwell Civil Partners'), '2026-11-02');
+    // 2026-11-03: refused again waits twice as long, up to 24 days, never given up.
+    const waits = [];
+    let t = now;
+    for (let i = 0; i < 5; i++) {
+      record(db, [{ name: 'Garmin International', outcome: 'unchecked' }, { name: 'Garmin International', outcome: 'miss' }], { refused: true, now: t });
+      const r = db.prepare('SELECT next_attempt, state FROM employers WHERE key = ?').get(keyOf('Garmin International'));
+      waits.push(Math.round((Date.parse(r.next_attempt) - t.getTime()) / 86_400_000));
+      t = new Date(r.next_attempt);
+    }
+    // Garmin was already refused once above (3 days), so the next wait is 6.
+    check('a name refused again waits 6, 12, 24, 24, 24 days', waits, [6, 12, 24, 24, 24]);
+    record(db, [{ name: 'Garmin International', outcome: 'tracked', url: 'https://careers.garmin.com' }], { now });
     check('a board found under a new name stays tracked through sync', (sync(db, [{ name: 'Rivian' }]), db.prepare('SELECT state FROM employers WHERE key = ?').get(keyOf('Garmin International')).state), 'tracked');
   }
 
@@ -178,6 +272,11 @@ console.log('\n🧪 ukg: the board, its search, and the posting page (F-705)');
   check('…from a posting URL', ukgBase(`${BASE}/OpportunityDetail?opportunityId=86eae31c-aaea-490e-abc8-5a9c4bf97eb9`), BASE);
   check('another host is never a UKG board', ukgBase('https://evil.example.com/ULT1005UCH/JobBoard/93be8725-1d6c-4162-aba5-e796cf8ea1b5'), null);
   check('boards are read from a careers page', ukgBoardsIn(`<a href="${BASE}/?q=&amp;o=postedDateDesc">Jobs</a>`), [BASE]);
+  // F-792: UKG's newer host serves the same board and search (Convergix, 2026-10-22).
+  const NEW = 'https://convergix.rec.pro.ukg.net/CON1096CVAU/JobBoard/52250257-f25d-4ad3-b69e-53bc735d981a';
+  check('the newer rec.pro.ukg.net host is a UKG board', ukgBase(`${NEW}/OpportunityApply?opportunityId=6f41c0f1-f013-445a-a361-db72efd4e989`), NEW);
+  check('…and is read from a careers page', ukgBoardsIn(`<a href="${NEW}/?q=">Careers</a>`), [NEW]);
+  check('…but a look-alike host is not', ukgBase('https://convergix.rec.pro.ukg.net.evil.com/CON1096CVAU/JobBoard/52250257-f25d-4ad3-b69e-53bc735d981a'), null);
   const page = parseUkgResponse({
     totalCount: 390,
     opportunities: [{ Id: '86eae31c-aaea-490e-abc8-5a9c4bf97eb9', Title: ' Technical Program Manager ', PostedDate: '2026-10-02T20:54:25.412Z',

@@ -1,4 +1,45 @@
 import { HOW_HEARD_LADDER } from './_workday-keys.mjs';
+import { employedAtApplyingTo, appliedHere } from './_history.mjs';
+
+/**
+ * A question that ASKS whether he applied before ("Have you ever applied or
+ * worked for…", "worked for or applied to…", "…or have you previously
+ * applied?"), not one that only says the word ("…will not affect your
+ * application", "If you have applied before…"). Code review #1, 2026-11-13.
+ */
+/**
+ * …ASKED IN THE QUESTION ITSELF (week-fixes J6, then K1). Only the label's
+ * question sentences decide — the ones ending in "?", or its first sentence
+ * when none does. An instruction beside it ("If you’ve previously applied,
+ * give the date.", "(Do not answer Yes if you already applied.)",
+ * "Previously applied candidates need not answer…") never makes the
+ * employment question an applying one, and an if/when clause (or a
+ * parenthetical holding one) inside the sentence read is dropped unless it
+ * names working there too, on both paths (K3). Curly quotes are
+ * read as straight ones first. Unsure means the employment-only answer.
+ */
+// The clause runs to the next , ; : ? or ) — plus a ", or worked here" right after it, so a clause naming
+// working there beside applying is kept (week-fixes K3).
+const IF_APPLIED_CLAUSE_SRC = String.raw`\b(if|when|unless)\s+you(\s+(have|had|did)|'ve|'d)?\s+(previously\s+|ever\s+|already\s+)?(appl(y|ied)|submit(ted)?\s+an?\s+application)\b[^,;:?)]*(,\s*(or|and)\b[^,;:?)]*)?`;
+const IF_APPLIED_CLAUSE_RE = new RegExp(IF_APPLIED_CLAUSE_SRC, 'gi');
+const HAS_IF_APPLIED_RE = new RegExp(IF_APPLIED_CLAUSE_SRC, 'i');
+const NAMES_WORK_RE = /\b(worked|employed|interned|employee|contractor|intern)\b/i;
+// The same drop on every sentence that is read (K3: the first-sentence path read it raw): a parenthetical
+// holding an if/when/unless-applied clause goes whole, then any such clause left, unless it names working there.
+function dropAppliedAsides(x) {
+  return x
+    .replace(/\([^()]*\)/g, (p) => (HAS_IF_APPLIED_RE.test(p) && !NAMES_WORK_RE.test(p) ? ' ' : p))
+    .replace(IF_APPLIED_CLAUSE_RE, (c) => (NAMES_WORK_RE.test(c) ? c : ' '));
+}
+export function asksApplied(text) {
+  const s = String(text || '').replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' ').trim();
+  // A sentence ends at . ? ! (or one closing a parenthesis) followed by a capital or an opening mark.
+  const sentences = s.split(/(?<=[.?!][)"']?)\s+(?=[("'A-Z0-9])/).filter(Boolean);
+  const questions = sentences.filter((x) => /\?[)"']*$/.test(x));
+  const read = (questions.length ? questions : sentences.slice(0, 1)).map(dropAppliedAsides);
+  return read.some((q) => ASKS_APPLIED_RE.test(q));
+}
+export const ASKS_APPLIED_RE =/\b(have|has)\s+you\s+(ever\s+|previously\s+|already\s+)?(applied|submitted\s+an?\s+application)\b|\bapplied\s+(or|and|\/)\s+(worked|been\s+employed|interned)\b|\bapplied\s+(to|for|at|with)\b[^?]{0,60}?\b(or|and|\/)\s+(have\s+you\s+)?(ever\s+|previously\s+)?(worked|been\s+employed|interned)\b|\b(worked|employed|interned)\s+(for|by|at|with)\b[^?]{0,100}\b(or|and)\s+(have\s+you\s+)?(previously\s+|ever\s+)?(applied|submitted\s+an?\s+application)\b|\b(previously|ever|already)\s+applied\b|\b(prior|previous|earlier)\s+applications?\s+(to|with|at|for)\b/i;
 
 /**
  * The profile says, in so many words, that this person is a U.S. citizen or a
@@ -166,26 +207,9 @@ function citizenshipCountry(p) {
   return alts ? [c, ...alts] : c;
 }
 
-function nameKey(s) {
-  return String(s || '').toLowerCase()
-    .replace(/[.,]/g, ' ')
-    .replace(/\b(inc|llc|ltd|corp|corporation|company|co|plc|gmbh|holdings|group|technologies|technology)\b/g, ' ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-export function employedAtApplyingTo(profile) {
-  const who = nameKey(profile?.applyingTo);
-  if (!who) return null;
-  const mine = (Array.isArray(profile?.work_experience) ? profile.work_experience : [])
-    .map((e) => nameKey(e?.company)).filter(Boolean);
-  if (!mine.length) return null;
-  // Either name containing the other: "Applied Materials" answers a posting at
-  // "Applied Materials Inc", and a tenant that writes "Amat" does not.
-  const hit = mine.some((m) => m === who
-    || (m.length >= 5 && who.startsWith(`${m} `))
-    || (who.length >= 5 && m.startsWith(`${who} `)));
-  return hit ? 'Yes' : null;
-}
+// His history with this employer lives in _history.mjs (F-1036), shared with
+// Workday's key table.
+export { employedAtApplyingTo };
 
 /**
  * More spellings of a bachelor's degree, tried after his own words. HP's menu
@@ -195,7 +219,12 @@ export function employedAtApplyingTo(profile) {
  */
 function bachelorSpellings(p) {
   // "BACH" is JPL's Workday code for it (2026-10-02: Degree required, he picked BACH).
-  return /bachelor/i.test(`${p?.education?.degree_level || ''} ${p?.education?.degree || ''}`) ? ['Bachelors', "Bachelor's Degree", 'Bachelor', 'BACH'] : [];
+  if (!/bachelor/i.test(`${p?.education?.degree_level || ''} ${p?.education?.degree || ''}`)) return [];
+  // KION's Workday list abbreviates: "B. A. | B. Eng. | B. Sc. | LL. B." and
+  // nothing matched "Bachelor of Science" (2026-10-16). The abbreviations of
+  // HIS degree only — a Bachelor of Science is never offered as "B. Eng.".
+  const sci = /science/i.test(String(p?.education?.degree || '')) ? ['B. Sc.', 'B.Sc.', 'BSc', 'B.S.', 'BS'] : [];
+  return ['Bachelors', "Bachelor's Degree", 'Bachelor', 'BACH', ...sci];
 }
 
 /** The top of every language ladder met so far, most specific first. */
@@ -225,6 +254,190 @@ export const LINKS_BOX_RE = new RegExp(
   + '|\\b(link|url)s?\\b[^?.;]{0,50}\\b(github|portfolio|website|publication|project|repo)\\b[^?.;]{0,30}(,|\\bor\\b)[^?.;]{0,40}'
   + '\\b(github|portfolio|website|publication|project|repo|hardware|personal)\\b',
   'i');
+
+/** US state name (lower case) → its postal code, for a form that asks the code (F-814). */
+const US_STATE_CODES = Object.fromEntries(Object.entries({
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado', CT: 'Connecticut',
+  DE: 'Delaware', DC: 'District of Columbia', FL: 'Florida', GA: 'Georgia', HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois',
+  IN: 'Indiana', IA: 'Iowa', KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+  MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri', MT: 'Montana',
+  NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey', NM: 'New Mexico', NY: 'New York',
+  NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio', OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania',
+  RI: 'Rhode Island', SC: 'South Carolina', SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah',
+  VT: 'Vermont', VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+  PR: 'Puerto Rico',
+}).map(([code, name]) => [name.toLowerCase(), code]));
+
+/**
+ * HIS SPONSORSHIP NEED, AS A YES/NO AND AS THE STATEMENT IT MAKES TRUE (F-850).
+ * Rippling's VulcanForms question (2026-10-16) offered sentences, not Yes/No:
+ * "I will not need sponsorship now or at any point in the future." / "I will
+ * need sponsorship in the future but am currently authorized to work in the
+ * US" / "I will need sponsorship and am not currently authorized…" / Other —
+ * and was left for him as "no option matches Yes". Authorized now (OPT) and
+ * needing sponsorship later is the middle one. A Yes/No list still takes
+ * "Yes" first; a text box gets "Yes".
+ */
+/**
+ * A LIST OF COUNTRIES THAT NAMES HIS (2026-10-26). His standing answer to
+ * "citizen of Cuba, Iran, North Korea, Syria…?" is No — and stays No only
+ * while the list leaves his country out. The longer export lists name
+ * Vietnam ("Armenia, Azerbaijan, … Venezuela, Vietnam"); he answered YES by
+ * hand on one (2026-09-26), and the rule would have said No: a false
+ * statement on an export-control question.
+ */
+const countryListAnswer = (p, q) => {
+  const mine = String(p.answers?.citizenship_country || '').trim();
+  // Only a question about BEING A CITIZEN of a listed country: "…from
+  // countries OTHER THAN the listed…", "have you resided in / are you located
+  // in…" ask something else.
+  const asksCitizen = /\bcitizen|\bpassport|\bnational\s+of\b/i.test(String(q || ''))
+    && !/\bother\s+than\b|\b(reside|resided|residing)\b|\blocated\b|\bliving\s+in\b|\btravel/i.test(String(q || ''));
+  if (mine) {
+    const names = /^viet\s*nam$/i.test(mine) ? ['viet\\s*nam'] : [mine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*')];
+    const listsMine = new RegExp(`\\b(${names.join('|')})\\b`, 'i').test(String(q || ''));
+    if (listsMine && asksCitizen) return 'Yes';
+    // Residence or presence in a list that names his country: his files do
+    // not say where he lived before Lakeside, so it is his to answer.
+    if (listsMine && /\b(reside|resided|residing)\b|\blocated\b|\bliving\s+in\b|\btravel/i.test(String(q || ''))) return undefined;
+  }
+  return p.answers?.restricted_country_citizen;
+};
+
+/**
+ * A QUESTION ONLY ABOUT TODAY (2026-10-23, 2026-10-26), one rule for both
+ * sponsorship answers below. Anything that reaches past today keeps his full
+ * answer (he will need H-1B), and the list errs wide (F-951): "Do you
+ * currently, or do you anticipate, requiring sponsorship?" and "…currently
+ * require sponsorship or expect to?" read as present-only and got "No". A
+ * question wrongly read as reaching ahead only costs the longer, true answer.
+ */
+export const NOW_WORDS = /\b(now|currently|presently|at\s+present|at\s+(this|the\s+present)\s+time|today)\b/i;
+export const PAST_TODAY = /\bfuture\b|\blater\b|\bat\s+any\s+(point|time)\b|\bever\b|\bwill\b|\bwould\b|\bshall\b|\bgoing\s+forward\b|\bmaintain\w*|\bcontinu\w*|\bremain\w*|\bextend\w*|\bextension\b|\btransfer\w*|\bnow\s+or\b|\bor\s+(?:in|at)\s+(?:the\s+)?(?:future|any)|\banticipat\w*|\bexpect\w*|\bforesee\w*|\bplan(?:s|ning)?\s+to\b|\bintend\w*|\beventual\w*|\bupcoming\b|\bsubsequent\w*|\blong[\s-]term\b|\bduration\b|\bthroughout\b|\bfor\s+the\s+(?:length|course)\b/i;
+export const presentOnly = (q) => NOW_WORDS.test(String(q || '')) && !PAST_TODAY.test(String(q || ''));
+
+/**
+ * "Do you possess a cumulative GPA that is 2.5 or higher?" → Yes/No from his
+ * GPA (F-943). Only a stated FLOOR is compared: "N or higher/above/greater/
+ * better", "N+", "N and above", "at least N", "minimum (of) N", "no less than
+ * N". A ceiling ("below", "less than", "under") or a question with no number
+ * on a 4-point scale stays unanswered (null), and so does a missing GPA.
+ */
+export function gpaThreshold(p, q) {
+  const gpa = parseFloat(String(p?.education?.gpa ?? ''));
+  const text = String(q || '');
+  if (!Number.isFinite(gpa)) return null;
+  if (/\b(below|under)\b/i.test(text) || (/\b(less|lower)\s+than\b/i.test(text) && !/\bno\s+(less|lower)\s+than\b/i.test(text))) return null;
+  // The number must sit beside the GPA words (review 2026-11-06): "a 3.0 GPA
+  // and 2+ years of experience" is not a 2.0 floor, and "GPA 84 or higher"
+  // (a 100-point scale) is not a 4.0 one. A range is his to answer.
+  const at = text.search(/\b(gpas?|grade\s*point)\b/i);
+  if (at < 0) return null;
+  const near = text.slice(Math.max(0, at - 40), at + 60);
+  if (/\bbetween\b|\d\s*[-–]\s*\d/i.test(near)) return null;
+  const NUM = '(?<![\\d.])([0-4](?:\\.\\d{1,2})?)(?![\\d.])';
+  const floor = near.match(new RegExp(`${NUM}\\s*(?:\\/\\s*4(?:\\.0+)?\\s*)?(?:or\\s+(?:higher|above|greater|better|more)|\\+(?!\\s*(?:years?|yrs?)\\b)|and\\s+(?:above|higher|up))`, 'i'))
+    || near.match(new RegExp(`\\b(?:at\\s+least|minimum(?:\\s+of)?|no\\s+(?:less|lower)\\s+than|greater\\s+than\\s+or\\s+equal\\s+to)\\s+(?:an?\\s+)?(?:(?:cumulative|overall|gpa|of)\\s+)*${NUM}`, 'i'));
+  if (!floor) return null;
+  const t = parseFloat(floor[1]);
+  if (!Number.isFinite(t) || t <= 0 || t > 4.0) return null;
+  return gpa >= t ? 'Yes' : 'No';
+}
+
+const sponsorshipAnswer = (p, q) => {
+  const needs = String(p.answers?.require_sponsorship || '');
+  if (!/^yes$/i.test(needs)) return p.answers?.require_sponsorship;
+  // NOW IS NOT THE FUTURE, asked the other way round (2026-10-26). Terex's
+  // Workday asks "Do you CURRENTLY require sponsorship…?" and "Will you IN THE
+  // FUTURE…?" as two questions; Jarvis said Yes to both and he changed the
+  // first to No by hand. Same rule as his 2026-10-23 "without sponsorship
+  // now? → Yes": he can work today on F-1/OPT, it is later that needs H-1B.
+  const s = String(q || '');
+  if (s && /^yes$/i.test(String(p.answers?.authorized_to_work_us || '')) && presentOnly(s)) return 'No';
+  if (!/^yes$/i.test(String(p.answers?.authorized_to_work_us || ''))) return needs;
+  // HIS ANSWER, 2026-11-04 (F-995): where a list offers "Yes, but not until the
+  // future", that is his row (authorized now on F-1/OPT, H-1B later). Named
+  // first and matched as its own row (chooseOption's exact step), so a bare
+  // "Yes" is never what picks a qualified row. These rows are matched word for
+  // word only (chooseOption's EXACT_ONLY_ANSWERS, review 2026-11-04): tried on
+  // a list without them they would take the first Yes row, often "Yes, now".
+  // …AND HIS YES IS "NOT NOW" (re-review, 2026-11-04): on [Yes, now | No] a
+  // plain Yes took "Yes, now", false for him. YES_NOT_NOW is a Yes that never
+  // takes a row speaking only of now; a plain Yes/No list still gets Yes, and
+  // a text box is typed "Yes".
+  const [mine, ...shortFuture] = FUTURE_SPONSORSHIP_ROWS;
+  return [mine, YES_NOT_NOW, 'I will need sponsorship in the future but am currently authorized to work',
+    'will need sponsorship in the future but am currently authorized',
+    'currently authorized to work in the US but will require sponsorship in the future',
+    'will require sponsorship in the future', ...shortFuture];
+};
+
+/** His sponsorship row first, then the short "future" rows lists use; each matched word for word only. */
+export const FUTURE_SPONSORSHIP_ROWS = ['Yes, but not until the future', 'Yes, in the future', 'Yes - in the future', 'Yes, in future', 'Yes (in the future)', 'In the future', 'Yes, later', 'Yes - later'];
+/** A Yes to sponsorship that is never "now" (chooseOption refuses a now-only row for it; typed as "Yes"). */
+export const YES_NOT_NOW = 'Yes, not now';
+/** A row that speaks only of now: "Yes, now", "Yes, I currently require…", "Yes - immediately". */
+export const NOW_ONLY_ROW = (t) => /\b(now|currently|immediately|at\s+(this|the\s+present)\s+time|today|presently)\b/i.test(String(t || ''))
+  && !/\bfuture\b|\blater\b|\bwill\b|\beventual/i.test(String(t || ''));
+
+/**
+ * Employers in his work history that are U.S. federal contractors, with the
+ * evidence (2026-11-04): Applied Materials — Navy, DARPA and Army awards;
+ * VEVRAA and Section 503 affirmative-action plans. Add one only with evidence.
+ */
+export const FEDERAL_CONTRACTORS = /\bapplied\s+materials\b/i;
+
+/** "Have you been employed by … a contractor that performed work for the U.S. Federal Government…?" */
+// "Parents" and "affiliates" are also COMPANIES ("a contractor (including
+// subsidiaries, parents, and affiliates)", Ginkgo): a parent is a person only
+// as "your / a / any parent".
+export const FEDERAL_NOT_HIM = /\b(relatives?|family|spouse|siblings?|household|in-?laws?)\b|\b(your|a|any)\s+(parents?|partner|child|children)\b|\bwill\s+you\b|\bwould\s+you\b|\bthis\s+(role|position|job|opportunity)\b|\bprogram\b/i;
+/** The row a list names for "worked at a federal contractor" (Ginkgo's five-row list), matched word for word only. */
+export const FEDERAL_CONTRACTOR_ROWS = ['Yes, Performed work for the U.S. Federal Government', 'Yes, Federal contractor', 'Yes - Federal contractor', 'Yes, contractor'];
+/** First-person employment, past or present: "have you (ever) been employed by", "have you worked for", "including your current position". */
+export const FEDERAL_FIRST_PERSON = /\b(have|had|were|are)\s+you\b[^?]{0,40}?\b(ever\s+)?(been\s+)?(employed|worked|working|work)\b|\bincluding\s+your\s+(current|present)\s+(position|job|role)\b/i;
+
+export const federalContractorAnswer = (p, q) => {
+  const s = String(q || '');
+  if (!/\bcontractors?\b/i.test(s)) return undefined;      // government or military service alone: his
+  if (FEDERAL_NOT_HIM.test(s) || !FEDERAL_FIRST_PERSON.test(s)) return undefined;   // not his own employment
+  if (presentOnly(s)) return undefined;                     // "are you currently…": not since the internship ended
+  const worked = (Array.isArray(p?.work_experience) ? p.work_experience : []).some((w) => FEDERAL_CONTRACTORS.test(String(w?.company || '')));
+  // A plain Yes first; on a list of several "Yes, …" rows a bare Yes refuses,
+  // and the contractor row is named word for word.
+  return worked ? ['Yes', ...FEDERAL_CONTRACTOR_ROWS] : undefined;
+};
+
+/**
+ * HIS START DATE, AND THE RELATIVE CHOICES IT MAKES TRUE (F-854). Micron's
+ * Eightfold "When would you be available if an offer was accepted?" lists
+ * "Immediately … 1-2 months after offer acceptance / More than 2 months after
+ * offer acceptance"; "June 2027" matched none and he picked the last by hand
+ * (2026-09-25). "More than N months" is offered only with two months' margin
+ * before his start, since an offer comes after today; "N+ months" is never
+ * offered — the matcher reads it as "Less than N months".
+ */
+const startAnswer = (p, now = new Date()) => {
+  const start = p.answers?.earliest_start;
+  const s = String(start || '');
+  const m = s.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})\b/i);
+  if (!m) return start;
+  const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(m[1].toLowerCase().slice(0, 3));
+  const months = (Number(m[2]) - now.getFullYear()) * 12 + (month - now.getMonth()) - 2;
+  const out = [start];
+  for (const n of [6, 5, 4, 3, 2, 1]) if (n < months) out.push(`More than ${n} months after offer acceptance`, `More than ${n} months`);
+  return out.length > 1 ? out : start;
+};
+
+// K5 (2026-11-13): the "applied before" history rule read the whole label raw, so
+// "Employed by Acme before (leave blank if you applied before; …)" was answered Yes
+// from an earlier application — a false claim of past employment. The rule now
+// matches only when its phrase survives dropAppliedAsides (the same if/when/unless
+// clause and parenthetical drop asksApplied uses; a clause naming working there stays).
+const APPLIED_BEFORE_RE = /applied\s+on\s+any\s+previous|previously\s+applied|applied\s+before|\bever\s+applied\b[^?]{0,60}\bbefore\b|(?:ever|previously)\s+interviewed\s+(?:at|with|for|here)|interviewed\s+(?:at|with)\s+.{1,40}\s+before|\bhave\s+you\s+(?:ever\s+|previously\s+)?applied\s+(?:to|at|with)\s+(?!(?:a|an|any)\b)[^?]{1,60}?\b(?:before|previously|in\s+the\s+past|(?:within|in|during|over)\s+the\s+(?:past|last|previous|prior)\b)|\bhave\s+you\s+(?:ever\s+|previously\s+)?applied\s+for\s+(?:a\s+|any\s+)?(?:position|job|role|employment|opportunit\w+)\s+(?:at|with)\b/i;
+const APPLIED_ONLY_IN_ASIDE = {
+  test: (t) => !APPLIED_BEFORE_RE.test(dropAppliedAsides(String(t || '').replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' '))),
+};
 
 const RULES = [
   // "Do you hold Citizenship or Permanent Residency status from any of the
@@ -257,11 +470,23 @@ const RULES = [
     get: (p) => String(p.answers?.visa_status_note || '').replace(/\s+/g, ' ').trim() || undefined, review: true },
   // "Are you currently in F-1 Visa status?" is a yes/no, not a request for
   // the note (it went out as the note and matched neither option).
-  { re: /^\s*(are|is)\s+you\s+(currently\s+|presently\s+)?(in|on|holding|under)\s+(an?\s+)?f-?1\b/i,
+  // A list bullet ahead of it ("o Are you currently in F-1 Visa status?",
+  // John Deere) is not part of the question (2026-10-26 audit).
+  { re: /^[\s\W]*(?:o\s+)?(are|is)\s+you\s+(currently\s+|presently\s+)?(in|on|holding|under)\s+(an?\s+)?f-?1\b/i,
+    get: (p) => (/\bf-?1\b/i.test(`${p.answers?.visa_status_note || ''} ${p.answers?.citizenship_status || ''}`) ? 'Yes' : undefined) },
+  // TI's "Do you currently hold an H, L, E, J, or F nonimmigrant visa (…F-1,
+  // etc.)?" — required, and left blank on 2026-10-24 (F-909). Yes when he is
+  // on F-1 and the question names F among the visas.
+  { re: /\b(hold|have)\s+(an?\s+)?[^?]{0,40}\bnonimmigrant\s+visa\b(?=[^]*\b(F-?1|or\s+F)\b)/i,
     get: (p) => (/\bf-?1\b/i.test(`${p.answers?.visa_status_note || ''} ${p.answers?.citizenship_status || ''}`) ? 'Yes' : undefined) },
   // DACA: he is on F-1, not deferred action. A citizen or a permanent resident
   // is not either; anyone else's status is theirs to state.
+  // NOT A SPONSORSHIP QUESTION THAT LISTS DACA IN ITS HELP TEXT (2026-10-26).
+  // Honda's "Will you now, or at any time in the future, require visa
+  // sponsorship by Honda…? You can answer 'No' if you are … (DACA) …" was
+  // taken by this rule and answered NO on a real application (2026-10-23).
   { re: /\bdeferred\s+action\s+for\s+childhood\s+arrivals\b|\bdaca\b/i,
+    not: /\b(requir|need)\w*\b[^?]{0,80}\bsponsor/i,
     get: (p) => (/\bf-?1\b/i.test(String(p.answers?.visa_status_note || '')) || statusIsCitizenOrResident(p) ? 'No' : undefined) },
   // "…worked for a company that has supplied contingent workers to John
   // Deere?" — he has not; he wrote "N/A" (third-party / staffing → no).
@@ -305,6 +530,17 @@ const RULES = [
       if (grad > Date.now()) return 'No';
       return Number.isFinite(grad) && /\b(immediate(ly)?|asap|now|any\s*time)\b/i.test(String(p.answers?.earliest_start || '')) ? 'Yes' : undefined;
     } },
+  // AN AUDIT FIRM HE NEVER WORKED FOR (F-892). TI: "To comply with auditor
+  // independence requirements, please indicate whether you currently work for,
+  // or have worked within the past 5 years for, Ernst & Young…" — left for him.
+  // His work history names every employer; none is an audit firm, so No — and
+  // nothing when the named firm IS in his history.
+  { re: /auditor\s+independence|\b(currently\s+work|have\s+worked|worked\s+within)\b[^?]{0,80}\b(ernst\s*&?\s*young|\bey\b|deloitte|pwc|pricewaterhouse|kpmg)\b/i,
+    get: (p, q) => {
+      const firm = (String(q || '').match(/ernst\s*&?\s*young|deloitte|pwc|pricewaterhouse\w*|kpmg/i) || [''])[0].toLowerCase().replace(/[^a-z]/g, '');
+      const mine = (Array.isArray(p?.work_experience) ? p.work_experience : []).map((e) => String(e?.company || '').toLowerCase().replace(/[^a-z]/g, ''));
+      return firm && mine.some((m) => m.includes(firm)) ? undefined : 'No';
+    }, review: true },
   // "Do you currently work for another Samsung Subsidiary…?" (Samsung): his history.
   { re: /\b(currently\s+)?work\s+for\s+(another|any)\s+[\w&.' -]{2,40}?\s+(subsidiary|affiliate)\b/i,
     get: (p) => (employedAtApplyingTo(p) === 'Yes' ? undefined : 'No') },
@@ -320,6 +556,14 @@ const RULES = [
   // authorization" sent it to the Yes/No rule, and "Yes" was typed into it.
   { re: /\b(provide|give|share|tell\s+us|describe|list|include)\b[^?]{0,60}\b(current\s+)?(immigration|visa)\s+(status|type|category)|\btype\s+of\s+visa\b[^?]{0,80}\b(remaining|left|expir)/i,
     get: (p) => String(p.answers?.visa_status_note || '').replace(/\s+/g, ' ').trim() || undefined, review: true },
+  // HIS ANSWERS, 2026-10-23 (F-895): "Are you authorized to work for any
+  // employer in the U.S. or only your current employer?" (Veeco) → Any
+  // Employer; "Do you currently have an EAD / work permit card?" asked as a
+  // fact → No, OPT after May 2027 graduation (`currently_on_opt`).
+  { re: /\bauthori[sz]ed\s+to\s+work\s+for\s+any\s+employer\b|\bany\s+employer\b[^?]{0,60}\bcurrent\s+employer\s+only\b|\bonly\s+(for\s+)?your\s+current\s+employer\b/i,
+    get: () => ['Any Employer', 'Any employer', 'Any', 'Yes'], review: true },
+  { re: /\b(do|does)\s+you\s+(currently\s+)?(have|hold|possess)\s+(an?\s+)?(valid\s+)?(EAD|employment\s+authori[sz]ation\s+(document|card)|work\s+permit\s+card)\b(?![^?]{0,160}\bOPT\b[^?]{0,40}\beligib)/i,
+    get: (p) => (/^no$/i.test(String(p.answers?.currently_on_opt || '')) ? 'No' : undefined), review: true },
   // "If you have an Employment Authorization Document (EAD) under the F-1
   // student OPT program, are you eligible for a 24-month OPT extension…?"
   // (Honda, 2026-10-02: Yes / No / I do not have OPT). The question is
@@ -353,6 +597,18 @@ const RULES = [
   // on a full-time or part-time basis)?" is a history question.
   { re: /\b(interested\s+in|looking\s+for|seeking|prefer\w*|desired?|want)\b[^?]{0,20}\b(a\s+)?(full[\s-]?time\s+or\s+part[\s-]?time|part[\s-]?time\s+or\s+full[\s-]?time)\b/i,
     get: () => ['Full-time', 'Full Time', 'Full-Time', 'Fulltime'] },
+  // …and asked as a list: ITW's "Type of Employment Desired" (Full- Time |
+  // Part-Time | Seasonal | Temporary), required, left for him 2026-10-16 (F-802).
+  // The qualifier is required: a bare "Type of Employment" in a past-job
+  // entry is history, not what he wants next.
+  { re: /^\s*(type\s+of\s+(employment|position|job)|employment\s+type|position\s+type|job\s+type)\s+(desired|sought|preferred|wanted)\s*\??\s*\*?\s*$|^\s*(desired|preferred)\s+(type\s+of\s+employment|(employment|position|job)\s+type)\s*\??\s*\*?\s*$/i,
+    get: () => ['Full-time', 'Full Time', 'Full- Time', 'Full-Time', 'Fulltime', 'Regular Full-Time', 'Regular'] },
+  // …and asked as a question (F-993): Maven's Greenhouse "What type of
+  // employment are you seeking?" (Full-time | Internship), required, had no
+  // rule. Only "are you seeking / looking for / interested in": a past job's
+  // "type of employment" is still history.
+  { re: /^\s*what\s+(type|kind)\s+of\s+(employment|position|role|job|work)\s+(are\s+you|do\s+you)\s+(seeking|looking\s+for|interested\s+in|want|prefer)\b/i,
+    get: () => ['Full-time', 'Full Time', 'Full- Time', 'Full-Time', 'Fulltime', 'Regular Full-Time', 'Regular'] },
   // "Preference will be given to qualified candidates who do not reside, or
   // plan to reside, in Alabama, Arkansas, … or Tennessee. If you live in one
   // of these states, would you consider relocation?" He lives in Washington;
@@ -402,11 +658,30 @@ const RULES = [
   //                    planned "No" on three passes
   // "…WITHOUT requiring sponsorship" is the opposite question and goes on to
   // its own rule further down.
-  { re: /\b(will|would|do|does|are|now\s+or\s+in\s+the\s+future)\b[^?]{0,80}\b(requir|need)\w*\b[^?]{0,80}\bsponsor|\b(requir|need)\w*\s+(?:\w+\s+){0,5}sponsor(ship)?\b/i,
+  // …and VISA ASSISTANCE is the same need in other words (F-796): Coherent's
+  // Oracle form, "Will you require visa assistance now or in the future from
+  // our company?", required, was left blank as "nothing in your profile".
+  // A REQUEST TO DESCRIBE HIS STATUS is not a yes/no (2026-10-26): Cummins'
+  // "please provide us information on your current immigration status,
+  // including type of visa and … remaining work authorization" went out as
+  // "Yes" (2026-10-02), and "If visa sponsorship is required in US: What is
+  // the immigration status you currently hold? When does that work
+  // authorization expire?" was planned "Yes" (2026-10-23). His visa note
+  // answers both; a list of statuses gets F-1.
+  // …and "what type of visa do you currently hold (if any)?" (Vertex,
+  // 2026-10-02), which the authorization rule would answer "Yes".
+  { re: /\b(what\s+is|what's|provide|describe|explain|tell\s+us|details?\s+(of|on|about)|information\s+(on|about))\b[^?]{0,60}\b(immigration|visa|work\s+authori[sz]ation)\s+status\b|\b(immigration|visa)\s+status\s+(that\s+)?you\s+(currently\s+)?(hold|have)\b|\bwhat\s+(type|kind)\s+of\s+(visa|immigration\s+status|work\s+(visa|permit))\b[^?]{0,40}\b(hold|have)\b/i,
+    not: /^[\s\W]*(?:o\s+)?(are|is|do|does|will|would|have|has|can)\s+you\b/i,
+    get: p => {
+      const note = String(p.answers?.visa_status_note || '').replace(/\s+/g, ' ').trim();
+      if (!note) return undefined;
+      return /\bf-?1\b/i.test(note) ? [note, 'F-1', 'F-1 Student', 'F1', 'Student Visa (F-1)'] : note;
+    }, review: true },
+  { re: /\b(will|would|do|does|are|now\s+or\s+in\s+the\s+future)\b[^?]{0,80}\b(requir|need)\w*\b[^?]{0,80}\bsponsor|\b(requir|need)\w*\s+(?:\w+\s+){0,5}sponsor(ship)?\b|\b(requir|need)\w*\s+(?:\w+\s+){0,3}(visa|immigration|work\s+permit)\s+(assistance|support|help|processing)\b/i,
     // …nor "indicate all locations or countries for which you … require
     // sponsorship" (HPE), which asks for a place — its own rule answers it.
     not: /\bwithout\b|\bnot\s+(requir|need)|\bno\s+longer\b|\bpreviously\b|\bever\s+(been\s+)?sponsor|\b(indicate|list|name|specify)\b[^?]{0,30}\b(locations?|countr(y|ies))\b[^?]{0,80}\bsponsor/i,
-    get: p => p.answers?.require_sponsorship, review: true },
+    get: (p, q) => sponsorshipAnswer(p, q), review: true },
   // …and "HAVE YOU EVER BEEN SPONSORED?" is history, not need: the general
   // sponsorship rule below answered it with his future need, "Yes".
   { re: /\b(ever|previously)\s+(been\s+)?sponsored\b|\bhave\s+you\s+been\s+sponsored\b|\bsponsored\s+(you\s+)?(before|previously|in\s+the\s+past)\b/i,
@@ -430,7 +705,9 @@ const RULES = [
   // A preferred FIRST name is the first word of what he goes by, not of his
   // legal name — the name he uses, not his legal given names. Must sit above the plain first-name
   // rule, which would otherwise claim it.
-  { re: /preferred\s*(first|given)\s*name|(first|given)\s*name\s*\(preferred\)|goes\s+by/i,
+  // …and an "ENGLISH first name" is the same ask (F-853): Applied Materials'
+  // Eightfold form, 2026-10-04 — Jarvis gave his legal given names, he sent "Alex".
+  { re: /preferred\s*(first|given)\s*name|(first|given)\s*name\s*\(preferred\)|goes\s+by|\benglish\s+(first|given)\s*name\b|\b(nick)\s*name\b/i,
     get: p => (p.identity?.preferred_full_name || '').trim().split(/\s+/)[0] || p.identity?.first_name },
   // HE HAS NO MIDDLE NAME, and that is an answer rather than a gap.
   //
@@ -476,8 +753,23 @@ const RULES = [
   // and Last Name" took "Rivera" from the last-name one (F-623).
   { re: /^\s*(first|given)\s*(name)?\s*(and|&|\/|,|\+)?\s*(last|family|sur)\s*name\s*:?\s*$|^\s*name\s*\(\s*first\s*(and\s+|&\s*|\/\s*)?last\s*\)\s*:?\s*$/i,
     get: p => p.identity?.full_name },
-  { re: /first\s*name|^\s*given\s*name\s*\*?\s*$/i, get: p => p.identity?.first_name },
-  { re: /last\s*name|family\s*name|surname/i, get: p => p.identity?.last_name },
+  // SOMEONE ELSE'S NAME IS NOT HIS (F-831). EnerSys's SuccessFactors "If you
+  // selected EnerSys Employee Referral, please indicate who referred you by
+  // providing the individual's LEGAL FIRST and LAST NAME." was typed "Rivera".
+  // A name asked of a referrer, relative, reference, emergency contact or
+  // manager falls through to the rules written for those.
+  // ALEX, UNLESS THE BOX SAYS LEGAL (his answer, 2026-10-23). He changed "Le
+  // Gia Alex" to "Alex" on Micron ×2, Lam and two Oracle forms; a box that
+  // says it wants the legal name — "Legal First Name", Workday's Legal Name
+  // section (key legalName) — keeps the legal given names.
+  { re: /first\s*name|^\s*given\s*name\s*\*?\s*$/i,
+    get: (p, q) => (/\blegal\b/i.test(String(q || '')) ? p.identity?.first_name
+      : (p.identity?.preferred_first_name || String(p.identity?.preferred_full_name || '').trim().split(/\s+/)[0] || p.identity?.first_name)),
+    not: /\breferr|\brelative|\breference|\bemergency|\bnext\s+of\s+kin|\bsupervisor|\bmanager|\bspouse|\brecruiter/i },
+  // A PREVIOUS / FORMER / MAIDEN last name is not his current one (onsemi's
+  // Oracle form, 2026-10-24, F-913): he has none, so the box stays empty.
+  { re: /last\s*name|family\s*name|surname/i, get: p => p.identity?.last_name,
+    not: /\breferr|\brelative|\breference|\bemergency|\bnext\s+of\s+kin|\bsupervisor|\bmanager|\bspouse|\brecruiter|\b(previous|former|prior|maiden|birth|other)\s+(last\s*name|family\s*name|surname)/i },
   // "Salutation" as a name prefix. `Mr.` agrees with the male selection already
   // in his EEO block, so a form cannot contradict itself.
   //
@@ -518,7 +810,9 @@ const RULES = [
   // filled with his legal name and he changed it to the one he goes by. A box that says
   // LEGAL, or "full legal", still gets the legal name.
   { re: /^\s*(your\s+)?name\s*\*?:?\s*$/i, get: p => p.identity?.preferred_full_name || p.identity?.full_name },
-  { re: /full\s*name|legal\s*name/i, get: p => p.identity?.full_name },
+  // …and never a relative's, referrer's or anyone's "their full name" (F-898).
+  { re: /full\s*name|legal\s*name/i, get: p => p.identity?.full_name,
+    not: /\breferr|\brelative|\breference|\bemergency|\bnext\s+of\s+kin|\bsupervisor|\bmanager|\bspouse|\brecruiter|\btheir\b|\bhis\s+or\s+her\b|\bhis\/her\b/i },
   // "Are you BONDED BY your current company/scholarship?" is a yes/no about a
   // legal obligation, not a request for the employer's name — but it contains
   // "current company", so this rule answered it **"Lakeside University —
@@ -529,6 +823,25 @@ const RULES = [
   // "Lakeside University — Manufacturing Lead (student)" — an employer where a
   // title belongs. His answer, 2026-09-20: the title alone.
   // …and "Current / Most Recent Title" (Flexport, 2026-09-26).
+  // A FEDERAL-EMPLOYMENT HISTORY QUESTION IS NOT HIS JOB TITLE (F-988).
+  // Ginkgo: "Including your current position, have you ever been employed by
+  // the U.S. Federal Government, a contractor … that performed work for the
+  // U.S. Federal Government, served in the Military, and/or were a Political
+  // Appointee?" took the title rule below through "current position" and was
+  // planned "Manufacturing Lead". `government_employee` covers government
+  // employment, not his employers' federal contracts.
+  // HIS ANSWER, 2026-11-04 (F-997 follow-up): YES where the question counts a
+  // federal CONTRACTOR — Applied Materials holds Navy, DARPA and Army awards
+  // and keeps VEVRAA / Section 503 plans (his "maybe, go research", and the
+  // research). Only when his work history names such an employer, only when
+  // the question names a contractor (government service or the military
+  // alone stays his), and never a present-only "are you currently…" (the
+  // internship has ended).
+  { re: /\bfederal\s+government\b[^?]{0,200}\b(contractor|political\s+appointee|military)\b|\b(contractor|political\s+appointee)\b[^?]{0,200}\bfederal\s+government\b|\bfederal\s+contractors?\b|\bcontractors?\s+(to|for|of)\s+the\s+(u\.?\s?s\.?\s+)?federal\b/i,
+    // Not a question about HIM (review, 2026-11-04): a relative's job, the
+    // future, or this role's own program are other rules' or his.
+    not: FEDERAL_NOT_HIM,
+    get: (p, q) => federalContractorAnswer(p, q), review: true },
   { re: /current\s+(job\s*)?title|present\s+(job\s*)?title|current\s+position\s*(title)?|your\s+title\s+(at|with)\b|(current\s*(\/|or)\s*)?most\s+recent\s+(job\s+|position\s+)?title/i,
     not: /\bbonded\b|restrict|non-?compete|\bobligat/i,
     get: p => p.answers?.current_title },
@@ -546,7 +859,9 @@ const RULES = [
     // profile does not say, so it is his.
     // …nor is Novanta's "required NOTICE PERIOD with your current employer"
     // (2026-09-24), which got his employer's name; the notice rule owns it.
-    not: /\bbonded\b|\bagreement\b|\bnotice\s+period\b|restrict|non-?compete|\bobligat|\bhow\s+(many|large|big)\b|number\s+of\s+(employees|people|staff)|headcount|\bsize\s+of\b|revenue|industry|\bwhy\b|how\s+long|\b(may|can|could)\s+we\s+(contact|reach|call)|\bcontact(ing)?\s+(your|the)\s+(current|present)/i },
+    // …nor Terex's "How much NOTICE do you need to leave your current
+    // employer?" (2026-10-22, F-790): any notice wording is the notice rule's.
+    not: /\bbonded\b|\bagreement\b|\bnotice\b|restrict|non-?compete|\bobligat|\bhow\s+(many|large|big)\b|number\s+of\s+(employees|people|staff)|headcount|\bsize\s+of\b|revenue|industry|\bwhy\b|how\s+long|\b(may|can|could)\s+we\s+(contact|reach|call)|\bcontact(ing)?\s+(your|the)\s+(current|present)/i },
   // A COMMUNICATION-PREFERENCE QUESTION IS NOT A REQUEST FOR HIS ADDRESS.
   //
   // Xaira's Greenhouse form (live 2026-09-20, three separate plans of the same
@@ -630,8 +945,22 @@ const RULES = [
   // "emergency contact number", which is somebody else's (F-285).
   // …and "Phonetic pronunciation of your name", which got his phone number on
   // the word "Phone" (audit of logged questions, 2026-09-26).
-  { re: /phone|mobile|contact\s*number/i, get: p => p.identity?.phone,
-    not: /emergency|next\s+of\s+kin|guardian|\breferr|\brelative|\breference|\bsupervisor|phonetic|pronunci/i },
+  // …nor a past EMPLOYER's number (F-851): Paylocity's work-history "Company
+  // Phone Number" went out as his own mobile on all four Optomec runs.
+  // A NUMBER IN THE BOX'S OWN FORMAT (F-924, Denso 2026-10-25): "Please enter
+  // your full 10-digit phone number (e.g., 123-456-7890)" got his number as
+  // "+1 (ddd) ddd-dddd" — "Enter a maximum of 15 characters", Submit bounced. A box
+  // that asks for ten digits or shows a ddd-ddd-dddd example gets that shape.
+  { re: /phone|mobile|contact\s*number/i, get: (p, q) => {
+      const raw = String(p.identity?.phone || '');
+      const d = raw.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      const s = String(q || '');
+      if (d.length === 10 && (/\b10[\s-]*digit/i.test(s) || /\b\d{3}-\d{3}-\d{4}\b/.test(s))) return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+      if (d.length === 10 && /\(\d{3}\)\s*\d{3}-\d{4}/.test(s)) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+      if (d.length === 10 && /\b\d{10}\b|digits\s+only|numbers\s+only|no\s+(dashes|spaces)/i.test(s)) return d;
+      return p.identity?.phone;
+    },
+    not: /emergency|next\s+of\s+kin|guardian|\breferr|\brelative|\breference|\bsupervisor|phonetic|pronunci|\b(company|employer|employer'?s|organi[sz]ation|business|office|manager|school|university|college)\s+(phone|telephone|tel\b|contact\s*number)/i },
   // A time zone is a fact about where he lives, not a preference. Measured on
   // a live Veeva form: a REQUIRED radio group [AST, EST, CST, MST, PST, Other]
   // went unanswered although his state settles it.
@@ -657,7 +986,7 @@ const RULES = [
   // These stay blanks rather than answers because writing "N/A" into a referral
   // field reads as a claim that something was considered; nothing is truer than
   // an empty box here.
-  { re: /(name|e-?mail(\s+address)?|phone|contact)\s+of\s+(the\s+)?referr(er|al|ing)|referr(er|ing)('?s)?\s+(employee\s+)?(name|person|e-?mail|phone|contact)|who\s+referred\s+you/i,
+  { re: /(name|e-?mail(\s+address)?|phone|contact)\s+of\s+(the\s+)?referr(er|al|ing)|referr(er|ing)('?s)?\s+(employee\s+)?((first|last|full|legal)\s+)?(name|person|e-?mail|phone|contact)|who\s+referred\s+you/i,
     blank: true, why: 'no referral for this posting — nobody referred him, so there is no name to give' },
   // …UNLESS THE FORM SAYS WHAT TO WRITE. "If you were referred by a Cornelis
   // Network's employee, input the employee's name here. If not, put N/A."
@@ -757,7 +1086,14 @@ const RULES = [
   // his answer on ASML's form, 2026-09-25.
   { re: /\bcitizenship\b.{0,60}\byear\b|\byear\b.{0,40}\b(granted|obtained)\b.{0,40}\bcitizenship\b/i, get: p => p.answers?.citizenship_with_year },
   { re: /^\s*county\s*\*?\s*$/i, get: p => p.identity?.county || p.answers?.county },
-  { re: /agreement\s+between\s+you\s+and\s+(your\s+)?(any\s+)?(current|former|previous|other)|non-?compete|restrictive\s+covenant|\bbonded\s+by\b|signed\s+an?\s+agreement\s+with\s+any\s+(current\s+|former\s+)?employer|engage\s+in\s+competition|patent\s+obligations|party\s+to\s+any\s+(employment|consulting|personal\s+services|non-?solicit)[^?]{0,80}\bagreement/i,
+  { re: /agreement\s+between\s+you\s+and\s+(your\s+)?(any\s+)?(current|former|previous|other)|non-?compete|restrictive\s+covenant|\bbonded\s+by\b|signed\s+an?\s+agreement\s+with\s+any\s+(current\s+|former\s+)?employer|engage\s+in\s+competition|patent\s+obligations|party\s+to\s+any\s+(employment|consulting|personal\s+services|non-?solicit)[^?]{0,80}\bagreement|\b(confidentiality|contractual)\s+obligations?\b[^?]{0,40}\b(current|former|previous|prior)\s+(or\s+(current|former|previous|prior)\s+)?employers?\b|\b(under|subject\s+to)\s+any\s+(ongoing\s+)?(contract(ual)?|employment|legal)\b[^?]{0,40}\brestrictions?\b/i,
+    // …and "Are you under any contract or employment restriction with a
+    // current or previous employer?" (Lincoln Electric, F-893), "Are you
+    // subject to any ongoing contractual or other legal restrictions which may
+    // limit the scope of work you can perform?" (Oceaneering).
+    // KION/Dematic, 2026-10-16: "Do you have a confidentiality obligation with
+    // your current or former employer…" and "…any other contractual
+    // obligations to current or former employers…" were left for him (F-802).
     get: p => p.answers?.employer_agreement, review: true },
   // ABB's Workday questionnaire, 2026-09-24 — all left for him that night, and
   // answered by him on the form; those answers are now in his profile.
@@ -766,13 +1102,24 @@ const RULES = [
   { re: /perform\s+(all\s+)?(of\s+)?the\s+essential\s+(job\s+)?functions/i, get: p => p.answers?.essential_functions },
   { re: /(contacted|contact\s+you|hear\s+from\s+us)\b.{0,40}\bfuture\s+(job\s+)?(opportunit|openings|roles|positions)|future\s+(job\s+)?opportunit.{0,40}\b(contact|reach)/i,
     get: p => p.answers?.future_contact },
-  { re: /\bnotice\s+period\b/i, get: p => p.answers?.notice_period },
+  // A notice period asked without the words "notice period": "How much notice
+  // do you need to leave your current employer?" (Terex, 2026-10-22, F-790).
+  // …but a START DATE that mentions notice asks for the date (F-812): Legrand's
+  // Oracle form, "What is your earliest possible start date, including any
+  // notice period required?" as Month / Day / Year lists, got the notice
+  // sentence in all three; he chose June / 1 / 2027.
+  { re: /\bnotice\s+period\b|\bhow\s+much\s+notice\b|\b(how\s+long|what)\s+(of\s+a\s+)?notice\b|\bnotice\s+(do\s+you\s+|would\s+you\s+)?(need|require|have\s+to\s+give|must\s+you\s+give)\b|\b(weeks?|days?|months?)\s+of\s+notice\b/i,
+    not: /\bstart(ing)?\s+date\b|\bearliest\b[^?]{0,40}\b(start|available|availability)\b|\bdate\s+(you\s+are\s+|you're\s+)?available\b/i,
+    get: p => p.answers?.notice_period },
   // The conditional opening ("If you are under 18 years of age, …") is trimmed
   // before rules run, so the bare "do you have a work permit" must match too.
   // "Do you possess a valid work permit / residency permit in the country for
   // which the position resides?" (HPE, Workday, 2026-09-26): he typed Yes to
   // both himself. Ahead of the under-18 working-papers rule below (F-623).
-  { re: /\b(possess|hold|have)\s+(a\s+)?valid\s+work\s+permit\b[^?]{0,80}\bcountry\b/i,
+  // …and without "valid": Schindler's SuccessFactors "Do you possess a work
+  // permit that legally entitles you to work in the country you are applying
+  // for?" (2026-10-23, F-891) — his answer is his authorization today.
+  { re: /\b(possess|hold|have)\s+(a\s+)?(valid\s+)?work\s+permit\b[^?]{0,80}\bcountry\b/i,
     get: p => p.answers?.work_permit ?? p.answers?.authorized_to_work_us, review: true },
   { re: /\b(possess|hold|have)\s+(a\s+)?valid\s+residen(ce|cy)\s+permit\b/i,
     get: p => p.answers?.residency_permit, ask: 'answers.residency_permit', review: true },
@@ -982,6 +1329,15 @@ const RULES = [
   // "region you prefer" question is somewhere else entirely.
   // "What is your State or Province?" (a live form, left for him; Haiku named
   // it, 2026-09-24) — the question form of the same field.
+  // A STATE ASKED AS ITS CODE (F-814): Oracle's "State/Province Code" (Nokia,
+  // 2026-10-16, he typed WA over "Washington") and "State Abbreviation"
+  // (Ralliant). The two-letter code first, the name as a second spelling.
+  { re: /^(state|province)(\s*\/\s*(state|province))?\s+(code|abbreviation|abbrev\.?)\s*\*?$/i,
+    get: (p) => {
+      const s = String(p.identity?.state || '').trim();
+      const code = /^[A-Za-z]{2}$/.test(s) ? s.toUpperCase() : US_STATE_CODES[s.toLowerCase()];
+      return code ? (s.length > 2 ? [code, s] : code) : (s || undefined);
+    } },
   { re: /^(state|province)\b.{0,24}$|^state\s*\/\s*province\b|^\s*region\s*\*?:?\s*$|^\s*what\s+is\s+your\s+(state|province)(\s+or\s+(state|province))?\s*\??\s*\*?$/i, get: p => p.identity?.state },
 
   // education
@@ -1003,6 +1359,15 @@ const RULES = [
   // `gpas?` — TSMC's radio group is labelled "The GPAs of all my degree are
   // between 3.3- 4.0", and `\bgpa\b` does not match the plural, so a required
   // field resolved to nothing.
+  // A GPA THRESHOLD IS A YES/NO ABOUT THE NUMBER HE HAS (F-943, Cummins on
+  // Oracle 2026-10-29): "Do you possess a cumulative GPA that is 2.5 or
+  // higher?" fell to the WHETHER guard below and was left blank, though his GPA
+  // is in the profile. A question that states a floor ("2.5 or higher", "at
+  // least 3.0", "3.0+", "minimum of 3.0") is answered by comparing; "below" or
+  // "less than" forms and anything without a number stay unanswered.
+  { re: /^\s*(do|does|is|are|have|has|will|would)\b[^?]*\b(gpas?|grade\s*point)\b/i,
+    not: /\b(verify|verification|consent|transcript)\b/i,
+    get: (p, q) => gpaThreshold(p, q) },
   { re: /\bgpas?\b|grade\s*point/i,
     not: /^\s*(are|do|did|does|will|would|have|has|is|was|may|can|would)\s+(you|we|your)\b|\b(verify|verification|consent|transcript\s+(upload|attach))\b/i,
     get: p => p.education?.gpa },
@@ -1027,8 +1392,14 @@ const RULES = [
     get: p => [...new Set([p.education?.school, schoolShortName(p.education?.school), 'Other'].filter(Boolean))], review: true },
   // THE KIND OF SCHOOL, not its name (Paylocity, Optomec F-691): "School
   // Type" offered High School … College / University, and got "Lakeside University".
+  // …and when the list is DEGREE LEVELS (Lincoln Electric's SuccessFactors
+  // "Education Type": High School or GED | … | Bachelor's Degree Program (or
+  // equivalent) | …, F-893), the level of his degree comes first; a list of
+  // institution kinds matches none of those and falls to the kinds.
   { re: /^\s*(school|institution|education)\s+type\s*\*?$|^\s*type\s+of\s+(school|institution)\s*\*?$/i,
-    get: () => ['College / University', 'University', 'College', '4 Year College', 'Four Year College'] },
+    get: (p) => [...(/bachelor/i.test(String(p.education?.degree_level || p.education?.degree || ''))
+      ? ["Bachelor's Degree Program (or equivalent)", "Bachelor's Degree Program", "Bachelor's Degree", 'Bachelors Degree'] : []),
+    'College / University', 'University', 'College', '4 Year College', 'Four Year College'] },
   { re: /school|university|college|institution|where\s+(did|do)\s+you\s+study/i,
     // `would` was the missing auxiliary, and it cost a real answer on Amazon's
     // form: "…would you require CPT authorization FROM YOUR SCHOOL…" was
@@ -1045,7 +1416,12 @@ const RULES = [
     // institutions and references" (2026-09-25) was planned "Lakeside
     // University" on a Yes-only list.
     not: /^\s*i\s+(hereby|understand|agree|acknowledge|certify|consent|authori[sz]e)\b|\bauthori[sz]e\b|\brelease\s+from\s+liability\b|\bgovernment\b|\bpublic\s+institution\b|\bemployment\s+experience\b|^\s*i\s+have\b|^\s*are\s+you\b|^\s*(do|did|will|would|should|could|can|have|is|was)\s+you|^\s*which\b|\bfrom\s+(your|the)\s+school\b|\bstill\s+(in|attending)\b|\bcurrently\s+(enrolled|attending|a\s+student)\b|\b(status|term|semester|quarter|year)\b|\bgraduat|\b(share|describe|explain|discuss|tell\s+us)\b|\byour\s+experience\s+(in|with|of)\b/i,
-    get: p => p.education?.school },
+    // THE BOARD'S OWN SPELLING FIRST (P3): `boardSchool` is set by the server
+    // only when a Greenhouse board's school list names the same school
+    // (greenhouse-schools.mjs). It is the FIRST value, because a combobox's
+    // search is typed from the first value only; his own spelling follows.
+    get: p => (p.boardSchool && p.education?.school && p.boardSchool !== p.education.school
+      ? [p.boardSchool, p.education.school] : p.education?.school) },
   // …and the degree itself after the level, for a menu that lists degrees:
   // Western Digital offers "Bachelors of Science" and no "Bachelor's"
   // (2026-09-24). A free-text box still gets the level.
@@ -1075,6 +1451,27 @@ const RULES = [
   // "Are you located in US?" (HP, 2026-09-26) — where he lives now.
   { re: /^\s*are\s+you\s+(currently\s+)?(located|based|living|residing)\s+in\s+(the\s+)?(us|u\.\s?s\.?|usa|united\s+states(\s+of\s+america)?)\s*\??\s*\*?$/i,
     get: p => (/united\s+states|^usa?$/i.test(String(p.identity?.country || '')) ? 'Yes' : undefined) },
+  // ORACLE'S EDUCATION ENTRY (F-886, Ford 2026-10-23): "Projected Completion
+  // Date" as Month and Year lists — his graduation, May 2027 — and "Highest
+  // Education Level" as a No | Yes question about THIS entry, which is his
+  // highest degree. The levels come first, so a list of levels still gets
+  // the level; a Yes/No list takes the Yes after them.
+  // …and "Anticipated / Date of Completion" in an education block (West
+  // Pharmaceutical, 2026-10-16) — the today rule took it and typed 10/16/2026.
+  { re: /\b(projected|expected|anticipated|estimated|planned)\s+(completion|graduation|grad)\s+date\b|\b(projected|expected|anticipated|estimated|planned)\s*\/\s*(actual\s+)?date\s+of\s+(completion|graduation)\b/i,
+    get: (p, q) => {
+      const m = String(p.education?.graduation || '').match(/\b(jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*)\s+(20\d{2})\b/i);
+      if (!m) return undefined;
+      if (/\bmonth\b/i.test(String(q || ''))) return m[1];
+      if (/\byear\b/i.test(String(q || ''))) return m[2];
+      // A DAY BOX (F-919, Coherent's Oracle, 2026-10-25): "…graduation date?
+      // Day" got "May 2027", stayed empty and Submit refused. His files give
+      // the month only; the 15th is what he set by hand. Review-flagged.
+      if (/\bday\b/i.test(String(q || '')) && !/\bmonth\b|\byear\b/i.test(String(q || ''))) return ['15', '15th'];
+      return `${m[1]} ${m[2]}`;
+    }, review: true },
+  { re: /^\s*highest\s+(education(al)?\s+level|level\s+of\s+education|degree)\s*\*?\s*$/i,
+    get: p => [p.education?.degree_level, p.education?.degree, ...bachelorSpellings(p), 'Yes'].filter(Boolean) },
   { re: /highest.*(level|degree)|education\s+(level|completed)|level\s+of\s+education|what\s+degree\s+(are\s+you\s+)?(pursu|seek|work)/i,
     get: p => [p.education?.degree_level, p.education?.degree, ...bachelorSpellings(p)].filter(Boolean) },
   { re: /degree\s*(type|level)?$|^(diploma\s+or\s+)?degree\s+(obtained|earned|received|pursued)$/i, get: p => [p.education?.degree, p.education?.degree_level, ...bachelorSpellings(p)].filter(Boolean) },
@@ -1089,7 +1486,8 @@ const RULES = [
     // His one school is Lakeside, in Springfield, Washington (education.location).
     get: p => (String(p.education?.location || '').trim() ? 'United States' : undefined) },
   { re: /^(education|school|institution|university|college)\s+city$/i, get: p => String(p.education?.location || '').split(',')[0].trim() || undefined },
-  { re: /^(education|school|institution|university|college)\s+(state|province)$/i, get: p => String(p.education?.location || '').split(',')[1]?.trim() || undefined },
+  // …and "Education State/Province" (Lincoln Electric's SuccessFactors, F-893).
+  { re: /^(education|school|institution|university|college)\s+(state|province)(\s*\/\s*(state|province))?$/i, get: p => String(p.education?.location || '').split(',')[1]?.trim() || undefined },
   // One box for the street, the apartment and the unit: the whole street line.
   { re: /^address\s*\/\s*street|^street\s*\/\s*(apt|apartment|unit)|^(street\s+)?address[^?]{0,20}\b(apt|apartment|unit|suite)\b/i,
     not: /\baddress\s+line\s*(2|two)\b/i,
@@ -1097,7 +1495,14 @@ const RULES = [
   // A currency list beside a salary: his target is in US dollars.
   // HOW THE AMOUNT IS PAID, not the amount (Paylocity's "Desired Salary Type":
   // -- | Hourly | Yearly, given "$90000/year", Optomec F-691). His figure is a year's.
-  { re: /^\s*(desired\s+|expected\s+)?(salary|pay|compensation|wage)\s+(type|basis|frequency|period|unit)\s*\*?$/i,
+  // …and asked as a choice (F-804, Plug Power's Workday: "Is this rate of pay
+  // Hourly or Salary?" was given "$90000/year", which no list holds).
+  { re: /^\s*(desired\s+|expected\s+)?(salary|pay|compensation|wage)\s+(type|basis|frequency|period|unit)\s*\*?$|\b(hourly|salar(y|ied))\s+or\s+(hourly|salar(y|ied)|yearly|annual)\b/i,
+    // …but an AMOUNT asked with its unit in brackets is still the amount
+    // (F-856): Samsung's "What are your compensation expectations (hourly or
+    // salary)?" and Terex's "…provide either a salary or hourly amount" were
+    // answered "Yearly" once the choice wording above was added.
+    not: /\bexpectations?\b|\bamount\b|\bhow\s+much\b|\bprovide\b/i,
     get: () => ['Yearly', 'Annual', 'Annually', 'Per Year', 'Salary', 'Salaried'] },
   { re: /^(salary\s+|pay\s+|compensation\s+)?currency(\s+type)?$/i,
     get: () => ['USD', 'US Dollar', 'USD - US Dollar', 'U.S. Dollar', 'United States Dollar', 'USD ($)'], review: true },
@@ -1112,8 +1517,32 @@ const RULES = [
   // holding the degree, and the discipline rule below took it on the word
   // "discipline" and offered majors. He graduates May 2027: whether he says
   // Yes before then is his call, asked once.
-  { re: /^\s*do\s+you\s+(currently\s+)?(have|hold|possess)\s+(a|an)\s+(bachelor'?s?|b\.?\s?s\.?|undergraduate|4[-\s]year)\b[^?]{0,20}\bdegree\b/i,
+  // …and EnerSys's SuccessFactors "* Do you have AT LEAST a 4 year degree in a
+  // related field OR at least 10 years of work related experience?" (F-830):
+  // the required mark and "at least" kept it from this rule, and the years
+  // comparison answered No on 2 years against 10.
+  { re: /^[\s*]*do\s+you\s+(currently\s+)?(have|hold|possess)\s+(at\s+least\s+|a\s+minimum\s+of\s+)?(a|an)\s+(bachelor'?s?|b\.?\s?s\.?|undergraduate|4[-\s]?year|four[-\s]year)\b[^?]{0,20}\bdegree\b/i,
     get: (p) => p.answers?.has_bachelors_degree, ask: 'answers.has_bachelors_degree', review: true },
+  // "Have you completed, OR WILL YOU COMPLETE before your start date, a BS in
+  // Mechanical Engineering or a closely related engineering discipline?"
+  // (Therm-X, ADP, 2026-10-17) — the discipline rule below took it on the word
+  // "discipline" and offered his major to a Yes/No. He completes his BS in May
+  // 2027, before any start date; Yes when the question names his discipline.
+  { re: /\b(have|will)\s+you\b[^?]{0,40}\b(complet\w*|earn\w*|obtain\w*|finish\w*|receiv\w*)\b[^?]{0,60}\b(bachelor'?s?|b\.?\s?s\.?|b\.?\s?sc\.?|undergraduate)\b/i,
+    get: (p, q) => {
+      const d = String(p.education?.discipline || '').toLowerCase().split(/\s+/)[0];
+      const bachelors = /bachelor/i.test(`${p.education?.degree_level || ''} ${p.education?.degree || ''}`);
+      // His own discipline named — "or a closely related discipline" beside
+      // another one (Electrical) is that other degree's question, and his to answer.
+      const names = !!d && String(q).toLowerCase().includes(d);
+      // "…in one of the fields mentioned above, as listed in the minimum
+      // requirements?" (Collaborative Robotics, Ashby; he sent Yes): the fields
+      // are the posting's, so the posting must name his discipline (F-828).
+      const refersToPosting = /\b(fields?|disciplines?|majors?|areas?)\s+(mentioned|listed|named|specified|described)\b|\blisted\s+in\s+the\s+(minimum\s+|basic\s+)?(requirements|qualifications|posting|job\s+description)/i.test(String(q));
+      const postingNames = refersToPosting && !!d && new RegExp(`\\b${d}(al)?\\s+engineering\\b`, 'i').test(String(p.postingText || ''));
+      return bachelors && (names || postingNames) ? 'Yes' : undefined;
+    },
+    review: true },
   // …and "Mechanical Engineering Technology" was offered here as a fallback
   // (2026-09-25) against this rule's own words: it is a different accredited
   // degree, and a list holding it with no Mechanical Engineering would have
@@ -1122,7 +1551,26 @@ const RULES = [
   // "Electrical Engineering" on a list with no Mechanical — a wrong major is
   // worse than a blank. Such a list is his (Divergent's plain "Engineering",
   // which he picked by hand, included).
-  { re: /discipline|field\s*of\s*study|area\s*of\s*study|course\s*of\s*study|\bmajors?\b(?!\s*life)/i,
+  // ONE BOX ASKING FOR THE DEGREE, THE MAJOR AND THE CLASS YEAR (F-918,
+  // Coherent 2026-10-25): "Type of degree you are currently pursuing, major
+  // and what year you will be in Fall" got only "Mechanical Engineering". He
+  // wrote the whole sentence by hand; this is that sentence from his files.
+  { re: /\bdegree\b[^?]{0,60}(,|\band\b)[^?]{0,20}\b(major|field|discipline)\b|\b(major|field|discipline)\b[^?]{0,20}(,|\band\b)[^?]{0,60}\bdegree\b/i,
+    not: /\b(highest|level)\b|\bstem\b|\bdo\s+you\s+have\b|\bhave\s+you\s+(completed|earned|obtained)\b/i,
+    get: (p, q) => {
+      const e = p.education || {};
+      if (!e.degree || !e.discipline || !e.school) return undefined;
+      let s = `${e.degree} in ${e.discipline}, ${e.school}`;
+      const gy = Number(String(e.graduation_year || e.graduation || '').match(/20\d{2}/)?.[0]);
+      if (/\b(what|which)\s+year\b|\byear\s+(you\s+)?will\s+be\b|\bclass\s+(year|standing)\b/i.test(String(q || '')) && gy) {
+        const fall = /\bfall\b/i.test(String(q || ''));
+        s += fall ? `; I will be a senior in Fall ${gy - 1} (graduating ${e.graduation})` : `; senior, graduating ${e.graduation}`;
+      }
+      return [s, e.discipline, e.degree];
+    }, review: true },
+  // "Major" is also an adjective: "Are you near a major airport hub…?" (Collaborative
+  // Robotics, Ashby) was answered "Mechanical Engineering" (F-824).
+  { re: /discipline|field\s*of\s*study|area\s*of\s*study|course\s*of\s*study|\bmajors?\b(?!\s*(life|airports?|hubs?|cit(y|ies)|metro\w*|markets?|accounts?|customers?|projects?|programs?|milestones?|changes?|issues?|incidents?|companies|company|role|responsibilit\w*|contributions?|players?|brands?|international|domestic|u\.?s\.?))/i,
     get: (p) => {
       const d = String(p.education?.discipline || '').trim();
       return /^mechanical engineering$/i.test(d) ? [d, 'Engineering, Mechanical'] : p.education?.discipline;
@@ -1277,10 +1725,19 @@ const RULES = [
   // answers. Requires sponsorship → No, whatever his authorization today;
   // needs none → his authorization answer. Nothing here is a new claim about
   // him, and it stays review-flagged. Left blank only when neither is known.
+  // …NOW IS NOT THE FUTURE (his answer, 2026-10-23). Zipline asks it twice:
+  // "…without sponsorship now?" and "…in the future?". He changed "now" to
+  // Yes himself: he can work today on F-1 (CPT, then OPT); it is later that
+  // needs H-1B. A question only about the present gets his authorization
+  // today; one that reaches past it ("in the future", "now or in the future",
+  // "at any time", "ever") keeps the No above.
   { re: /\b(without|not\s+(?:require|requiring|need|needing))\b[^?.;]{0,50}?\bsponsor/i,
-    get: p => p.answers?.authorized_without_sponsorship
-      ?? (/^yes$/i.test(String(p.answers?.require_sponsorship || '')) ? 'No'
-        : (/^no$/i.test(String(p.answers?.require_sponsorship || '')) ? p.answers?.authorized_to_work_us : undefined)),
+    get: (p, q) => {
+      if (presentOnly(q) && /^yes$/i.test(String(p.answers?.authorized_to_work_us || ''))) return 'Yes';
+      return p.answers?.authorized_without_sponsorship
+        ?? (/^yes$/i.test(String(p.answers?.require_sponsorship || '')) ? 'No'
+          : (/^no$/i.test(String(p.answers?.require_sponsorship || '')) ? p.answers?.authorized_to_work_us : undefined));
+    },
     review: true },
 
   // A work-authorisation question about ANOTHER COUNTRY is not about the US.
@@ -1332,7 +1789,7 @@ const RULES = [
   // NVIDIA asks this without the word "sponsorship": "Will you require employer
   // support to obtain or maintain authorization to work in that country?"
   { re: /sponsor(ship)?|require\s+employer\s+support|employer\s+support\s+to\s+(obtain|maintain)/i,
-    get: p => p.answers?.require_sponsorship, review: true },
+    get: (p, q) => sponsorshipAnswer(p, q), review: true },
   // "Protected individual" (8 USC 1324b(a)(3)) is the export-control question in
   // Greenhouse's wording, and its answer set is "None of the above" rather than
   // Yes/No. He is an F-1 student, so none of the classifications apply.
@@ -1355,7 +1812,7 @@ const RULES = [
   // citizen of any of those countries; the day the first of those changes, this
   // would have ticked "Cuba".
   { re: /\b(cuba|iran|north\s*korea|syria|crimea|donetsk|luhansk)\b/i,
-    get: p => p.answers?.restricted_country_citizen, review: true },
+    get: (p, q) => countryListAnswer(p, q), review: true },
   // "export REGULATIONS", not just "export control" — Astranis writes it
   // "Astranis complies with U.S. Government space technology export
   // regulations, therefore will you state which of the following applies to
@@ -1381,6 +1838,16 @@ const RULES = [
       if (!c) return undefined;
       return /^(united states|usa|us|u\.s\.)/i.test(c) ? 'Yes' : 'No';
     },
+    review: true },
+  // CITIZEN OR PERMANENT RESIDENT, AND NOTHING ELSE (F-834). Veeco's
+  // SuccessFactors "* Are you a U.S. Citizen or U.S. Permanent Resident (i.e. a
+  // green card holder)?" was left as "a dropdown we have no answer for": the
+  // rule above stops at "permanent resident", and the U.S.-person rule below
+  // wants "citizen OF the U.S." His citizenship_status says which; a list that
+  // also names asylees or refugees stays with the U.S.-person rule.
+  { re: /\bare\s+you\s+(either\s+)?an?\s+(u\.?\s?s\.?|united\s+states|american)\s+citizen\s*,?\s*(or|and\/or)\s+(an?\s+)?(u\.?\s?s\.?\s+|lawful\s+)?permanent\s+resident\b/i,
+    not: /asyl|refugee|protected\s+individual|\bnational\b|can\s+you\s+meet|must\s+be/i,
+    get: (p) => (String(p.answers?.citizenship_status || '').trim() ? (statusIsCitizenOrResident(p) ? 'Yes' : 'No') : undefined),
     review: true },
   { re: /are\s+you\s+a\s+citizen\s+of\s+the\s+country\s+(you['’]?ll|you\s+will|you\s+would|where\s+you)/i,
     get: (p) => {
@@ -1432,7 +1899,11 @@ const RULES = [
   // not currently ON OPT (still pre-graduation), but IS eligible for the STEM
   // extension — so the STEM rule must be tested first or the generic OPT rule
   // would answer both with "No".
-  { re: /stem\b.*\b(extension|opt)|24[\s-]*month/i, not: /\bsponsor/i, get: p => p.answers?.stem_opt_extension_eligible, review: true },
+  // "Is your CURRENT EAD your STEM Extension?" (Amazon, 2026-10-16) is about a
+  // card he does not hold yet; the STEM rule below said Yes.
+  { re: /\b(is|are)\s+your\s+current\s+(ead|employment\s+authori[sz]ation\s+(document|card))\b/i,
+    get: p => (/^no$/i.test(String(p.answers?.currently_on_opt || '')) ? ['No', 'N/A', 'Not applicable'] : undefined), review: true },
+  { re: /stem\b.*\b(extension|opt)|24[\s-]*month/i, not: /\bsponsor|\bcurrent\s+ead\b/i, get: p => p.answers?.stem_opt_extension_eligible, review: true },
   // NEVER match a bare "opt": the AI-screening notice says "you can choose to opt
   // out", and \bopt\b matched it, so that question resolved to the OPT-status
   // answer ("No") and the form got "No, I opt-out" — the opposite of his consent.
@@ -1458,6 +1929,13 @@ const RULES = [
   // Surfaced only after the label fix above started reading these questions
   // correctly. A field we could not read could not be answered wrongly either;
   // reading it properly is what made the wrong answer reachable.
+  // "How many years have you WORKED AS a mechanical design engineer
+  // (internships count at half)?" (Therm-X, ADP, 2026-10-17, a 0-2 / 3-7 / 8+
+  // menu). Not his `years_relevant_experience` — that would claim two years in
+  // the title — but a band true of internships only: under a year. The menu's
+  // own first such band is taken; a list without one is his.
+  { re: /^\s*how\s+many\s+years\s+(have\s+you\s+|of\s+experience\s+do\s+you\s+have\s+)?(worked|been\s+working)\s+(as|in)\b/i,
+    get: () => ['0-2', '0 - 2', '0-1', '0 - 1', 'Less than 1 year', 'Less than 1', 'Under 1 year', '0-3', '0 - 3'], review: true },
   { re: /years\s+of\s+(?:[\w-]+\s+){0,3}experience/i,
     get: p => p.answers?.years_relevant_experience, review: true,
     // AND NOT WHEN THE QUESTION NAMES AN INDUSTRY OR A TECHNOLOGY.
@@ -1490,6 +1968,11 @@ const RULES = [
   // consent.
   { re: /\bai\s+(usage\s+)?policy\b|use\s+of\s+(?:ai|generative\s+ai)\s+(?:in|for|during)\s+(?:the\s+|your\s+|this\s+)?application/i,
     get: p => p.answers?.ai_screening_consent, review: true },
+  // An interview note-taker or recording (Focused Energy's "Do you agree for
+  // Metaview to join and take notes in your interviews?", 2026-10-16, left for
+  // him). A consent like the others — "I always say yes regardless" (2026-10-23).
+  { re: /\b(agree|consent|okay|ok|comfortable)\b[^?]{0,80}\b(join|record|transcrib|take\s+notes|note[\s-]?tak)[^?]{0,60}\binterviews?\b|\binterviews?\b[^?]{0,60}\b(recorded|transcribed|note[\s-]?tak)/i,
+    get: p => p.answers?.ai_screening_consent ?? 'Yes', review: true },
   // An arbitration agreement is a consent box like the others (Alex, 2026-07-29:
   // "consent yes to everything"); `answers.arbitration_agreement` overrides.
   { re: /arbitrat/i, get: p => p.answers?.arbitration_agreement ?? 'Yes', review: true },
@@ -1516,6 +1999,13 @@ const RULES = [
   // accepted, of terms or a policy: a box that declares a fact is not this.
   { re: /\b(declare|confirm|acknowledge|agree|certify)\b[^.?]{0,40}\bhave\s+read\b[^.?]{0,60}\b(accept(ed)?|agree(d)?)\b[^.?]{0,40}\b(terms|policy|notice|statement|conditions)\b/i,
     get: p => p.answers?.data_processing_consent ?? 'Yes', review: true },
+  // AN UNDERTAKING NOT TO BRING ANOTHER EMPLOYER'S SECRETS (F-805). Samsung's
+  // Workday: "By submitting an application, you, the applicant, agree to not
+  // disclose to Samsung, or induce Samsung to use, any confidential or
+  // proprietary information…" as a dropdown, left for him. An agreement about
+  // his own conduct, not a fact about him: his standing yes.
+  { re: /\bagree\s+(to\s+)?not\s+(to\s+)?(disclose|use|share|bring)\b[^?]{0,140}\b(confidential|proprietary|trade\s+secrets?)\b|\bnot\s+(disclose|use|bring)\b[^?]{0,80}\b(confidential|proprietary)\s+information\b[^?]{0,80}\b(former|previous|prior|current|other)\s+employers?\b/i,
+    get: p => (/^no$/i.test(String(p.answers?.data_processing_consent || '')) ? undefined : ['Yes', 'I agree', 'I acknowledge', 'Agree']), review: true, consent: true },
   // "Please review the linked document:" whose only option is "I acknowledge
   // that I have read and understood the terms of the Lyft Candidate Privacy
   // Notice" (Lyft, 2026-09-24): the policy is named only in the option, so the
@@ -1561,7 +2051,9 @@ const RULES = [
     },
     review: true },
   // Third-party / agency / contractor history — standing rule: always No.
-  { re: /(third|3rd)[\s-]*part(y|ies)|through\s+an?\s+(agency|agencies)|temporary\s+employee\s+of\b|staffing\s+agency|contract(or|ing)\s+(company|agency)|temp\s+agency/i,
+  // …and "Are you or have you in the past been a contingent work(er) or
+  // contractor for GLOBAL FOUNDRIES?" (2026-10-16, left for him, F-802).
+  { re: /(third|3rd)[\s-]*part(y|ies)|through\s+an?\s+(agency|agencies)|temporary\s+employee\s+of\b|staffing\s+agency|contract(or|ing)\s+(company|agency)|temp\s+agency|\b(been|are\s+you|were\s+you)\s+(a\s+|an\s+)?(contingent\s+work(er)?|contractor|temporary\s+worker)\b[^?]{0,30}\b(for|at|with)\b/i,
     not: /consumer\s+report|background\s+(check|screen)|public\s+record/i,
     get: p => p.answers?.worked_via_agency },
   // "This position requires a degree from an ABET accredited program. Do you
@@ -1580,6 +2072,13 @@ const RULES = [
   // so it was left for him; he answered yes.
   { re: /\b(can|could|will|would|are)\s+you\s+(be\s+able\s+to\s+)?(work|be|commute)\b[^?]{0,20}\b(from|in|at|to|into)\b[^?]{0,50}\b(office|site|facility|campus|lab)\b|\b\d\s+days\s+(a|per)\s+week\b[^?]{0,40}\b(office|on-?site|in[- ]person)|\b(office|on-?site|in[- ]person)\b[^?]{0,60}\b\d\s+days\s+(a|per)\s+week/i,
     not: /\bremote(ly)?\b[^?]{0,20}\bonly\b|relocat/i,
+    get: p => p.answers?.willing_onsite },
+  // "This role is based out of our San Francisco office 5 days/week. Are you
+  // able to commit to working from this office?" (Eight Sleep, Ashby; he sent
+  // Yes) — "commit", "this office" and "days/week" were in none of the above
+  // (F-823).
+  { re: /\b(able|willing|ready)\s+to\s+commit\s+to\s+(working\s+)?(from|in|at)\s+(this|the|our|that)\s+(office|site|facility|location)\b|\b(office|on-?site|in[- ]person)\b[^?]{0,60}\b\d\s+days\s*\/\s*(wk|week)\b[^?]{0,120}\b(commit|able|willing|can\s+you)\b/i,
+    not: /\bremote(ly)?\b[^?]{0,20}\bonly\b|relocat|\btravel/i,
     get: p => p.answers?.willing_onsite },
   // "DO YOU HAVE A PORTFOLIO…?" is a yes/no, and he does (Lexington,
   // 2026-09-24: left for him, he picked Yes). The address goes in the box that
@@ -1609,6 +2108,23 @@ const RULES = [
   // on the form decide which one is being asked.
   { re: /^\s*ethnicit/i, not: /^\s*ethnicity\s*(\/|and|&)\s*race\b/i, get: p => [p.eeo?.race, p.eeo?.hispanic].filter(Boolean), review: true },
   { re: /hispanic|latino/i, not: /^\s*race\b|\byour\s+race\b|\brace\s*(\/|and|&)\s*ethnicity\b|racial/i, get: p => p.eeo?.hispanic, review: true },
+  // "I CHOOSE NOT TO DISCLOSE MY SEX" IS A YES/NO, NOT THE SEX (F-813).
+  // Oracle (Coherent, 2026-10-22) asks it as a No | Yes list beside the sex
+  // and race questions; it was given "Male" and "Asian", matched nothing, and
+  // went out blank. He discloses: when his files hold the answer itself, No.
+  ...[
+    [/sex|gender/, (p) => p.eeo?.gender],
+    [/ethnicity|race/, (p) => p.eeo?.race],
+    [/veteran/, (p) => p.eeo?.veteran],
+    [/disability/, (p) => p.eeo?.disability],
+  ].map(([subject, held]) => ({
+    re: new RegExp(`^\\s*i\\s+(choose|prefer|wish|decline)\\s+not\\s+to\\s+(disclose|answer|self[-\\s]?identify|provide)\\b[^?]{0,20}\\b(${subject.source})`, 'i'),
+    get: (p) => {
+      const v = String(held(p) ?? '').trim();
+      return v && !/decline|prefer\s+not|not\s+to\s+(say|disclose|answer)|do\s+not\s+wish/i.test(v) ? 'No' : undefined;
+    },
+    review: true,
+  })),
   // Workday asks "Please select your sex:" — not "gender".
   { re: /gender|\bsex\b/i, get: p => p.eeo?.gender, review: true },
   // "racial/ethnic background" matched neither \brace\b nor /ethnicit/.
@@ -1619,20 +2135,56 @@ const RULES = [
   // ticked and every other one stays unticked.
   { re: /^\s*(american\s+indian(\s+or\s+alaska(n)?\s+native)?|asian|black(\s+or\s+african\s+american)?|native\s+hawaiian(\s+or\s+other\s+pacific\s+islander)?|white|two\s+or\s+more\s+races)\s*\*?\s*$/i,
     get: p => p.eeo?.race, review: true },
+  // A DISCHARGE DATE IS A VETERAN'S DATE (F-811). Oracle's "Newly Separated
+  // Veteran Discharge Date Month / Day / Year" lists matched the veteran rule
+  // below and were each given "I am not a Veteran." (Ralliant 2026-10-16,
+  // Coherent 2026-10-22): nothing matched, three lists left "for him". A
+  // person who is not a veteran has no discharge date.
+  { re: /\bdischarge\s+date\b|\bdate\s+of\s+(military\s+)?discharge\b|\bseparation\s+date\b[^?]{0,30}\bveteran|\bveteran\b[^?]{0,40}\bseparation\s+date\b/i,
+    blank: (p) => /\bnot\s+a\s+(protected\s+)?veteran\b|\bno\b|\bnever\s+served\b/i.test(String(p?.eeo?.veteran ?? '')),
+    get: () => undefined,
+    why: 'a discharge date — not a veteran, so there is none to give' },
   // "Have you served in the armed forces?" is the same question as veteran
   // status, worded so that neither /veteran/ nor any EEO rule matched it. Found
   // by auditing this table against the ~55 field types a mature autofill
   // extension names in its own shipped config.
+  // A STATUS OF NATIONAL MILITARY SERVICE (F-891). Schindler's SuccessFactors
+  // list offers "No Selection | Completed | NA | Not Completed"; the veteran
+  // answer matched none. He has no military service (apply-profile.yml), so
+  // the service does not apply to him: NA, then its other spellings.
+  { re: /\b(national|compulsory|mandatory)\s+military\s+service\b|\bmilitary\s+service\s+status\b|\bstatus\s+of\s+(national\s+)?military\s+service\b/i,
+    get: (p) => (/\bnot\s+a\s+(protected\s+)?veteran\b|\bnever\s+served\b|^no$/i.test(String(p?.eeo?.veteran ?? '')) ? ['NA', 'N/A', 'Not applicable', 'Not Applicable'] : p?.eeo?.veteran), review: true },
+  // A DISCHARGE DATE is a date, not his status (Coherent's Oracle, 2026-10-23:
+  // "Newly Separated Veteran Discharge Date Month" was planned "I am not a
+  // Veteran."). He has none; the box stays blank.
+  { re: /\bdischarge\s+date\b|\bdate\s+of\s+(discharge|separation)\b/i, get: () => undefined },
   { re: /veteran|armed\s+forces|military\s+service|served\s+in\s+the\s+(u\.?s\.?\s+)?(armed|military)/i,
     get: p => p.eeo?.veteran, review: true },
-  { re: /disabilit/i, get: p => p.eeo?.disability, review: true },
+  // A SCHEDULE QUESTION THAT NAMES A DISABILITY IS NOT THE DISABILITY QUESTION
+  // (F-992). Kairos: "Other than time off for reasons related to your religion,
+  // a disability, or a medical condition, are there any days or times when you
+  // are unavailable to work?" took the rule below and was planned "No, I do
+  // not have a disability". No file of his states his schedule: left for him.
+  { re: /\b(unavailable|not\s+available)\s+(to|for)\s+work\b|\bdays\s+or\s+times\b[^?]{0,60}\b(unavailable|not\s+available|cannot\s+work|can'?t\s+work)\b/i,
+    get: () => undefined },
+  // …and the root of it (F-992 review): the disability answer is for a
+  // self-identification question, never one that only names a disability
+  // beside a schedule ("Aside from a disability…, are there times you cannot
+  // work?", "scheduling restrictions (religious, disability-related…)").
+  { re: /disabilit/i, get: p => p.eeo?.disability, review: true,
+    not: /\bunavailab|\b(cannot|can['’]?t|unable\s+to|not\s+able\s+to)\s+work\b|\bschedul|\b(days|hours|shifts?)\b|\bavailab|\btimes?\s+(when|you)\b/i },
 
   // logistics
   // "When can you start?" is how half of them word availability, and it matched
   // neither /start date/ nor /available to start/.
   // "Date Available" is BambooHR's house wording (Cornelis Networks, driven
   // 2026-09-24) and matched none of these.
+  // …BUT NOT ORACLE'S JOB/SCHOOL ENTRY DATES (F-917): an open entry editor
+  // labels its boxes "Start Date Month", "Start Date Year", "Start Date Month
+  // Year", and they got "June 2027 (graduating May 2027)" (Coherent, Ford,
+  // Oceaneering, 2026-10-23/25). Those belong to the entry filler.
   { re: /start\s*date|availab\w*.*start|earliest.*(start|available)|notice\s*period|when\s+can\s+you\s+(start|begin)|earliest\s+date|^\s*date\s+available|available\s+(start\s+)?date|date\s+(you\s+are\s+|you're\s+)?available/i,
+    not: /^\s*start\s+date\s+(month|year|day)(\s+(month|year))?\s*\*?\s*$/i,
     get: p => p.answers?.earliest_start },
   // "WHICH locations are you open to relocating to?" is asking for PLACES.
   //
@@ -1675,7 +2227,8 @@ const RULES = [
   // spellings anyone had met.
   // …and "Which of the following best describes how you found out about this
   // opportunity?" (Boom Supersonic, 2026-09-25): no "did".
-  { re: /(how|where)\s+did\s+you\s+(\w+\s+)?(hear|find|learn|discover)|how\s+did\s+you\s+find\s+out|how\s+you\s+(first\s+)?(heard|found\s+out|learned|came\s+across)\s+about\b|referral\s+source|source\b/i,
+  // "How'd you discover Unlimited?" (Ashby, F-827): the contraction too.
+  { re: /(how|where)(\s+did|['’]d)\s+you\s+(\w+\s+)?(hear|find|learn|discover)|how\s+did\s+you\s+find\s+out|how\s+you\s+(first\s+)?(heard|found\s+out|learned|came\s+across)\s+about\b|referral\s+source|source\b/i,
     // BOTH answers, because this question comes in two shapes. Free text wants
     // "LinkedIn"; a fixed list usually offers categories, and his profile has
     // "Job Board or Social Media" for exactly that. `decide` picks whichever
@@ -1685,7 +2238,21 @@ const RULES = [
     // Then the rest of his ladder (2026-09-24): "always just answer LinkedIn …
     // or company site or social media, Instagram, Facebook… whatever pops up
     // first and works." Free text takes the first; a list takes the first it has.
-    get: p => ['LinkedIn', p.answers?.how_heard, ...HOW_HEARD_LADDER, p.answers?.heard_about_us].filter((v, i, all) => v && all.indexOf(v) === i) },
+    // THE COMPANY'S OWN SITE FIRST (his answer, 2026-10-23: "Company website";
+    // LinkedIn when the list has no such row). He had changed LinkedIn to
+    // "Company Career Site", "Corporate Website", "ABB Careers Website" and
+    // "Applied Materials Corporate Website" on his own; lists name it
+    // "Company Website" (12), "<Company> Website", "<Company> Career Site".
+    get: (p) => {
+      const co = String(p.applyingTo || '').replace(/,?\s+(inc\.?|corp\.?|corporation|llc|ltd\.?|co\.?)$/i, '').trim();
+      // …and by its first word too: Ford's list says "Ford Careers Site", the
+      // store says "Ford Motor" (F-885, 2026-10-23).
+      const brand = co.split(/\s+/)[0];
+      const names = [...new Set([co, brand].filter((n) => n && n.length >= 2))];
+      const own = names.flatMap((n) => [`${n} Website`, `${n} Career Site`, `${n} Careers Site`, `${n} Careers Website`, `${n} Corporate Website`, `Browsing ${n} Website`]);
+      return [...own, 'Company Website', 'Company Career Site', 'Company Career Website', 'Company Careers Website', 'Career Website', 'Careers Website', 'Corporate Website', 'Company Site',
+        'LinkedIn', p.answers?.how_heard, ...HOW_HEARD_LADDER, p.answers?.heard_about_us].filter((v, i, all) => v && all.indexOf(v) === i);
+    } },
   // "Desired hourly rate" is the same question as "salary expectations" and
   // matched none of these words — an intern form's most common way of asking.
   // CONFLICT OF INTEREST (HP, 2026-09-26). Question 1 lists "outside
@@ -1696,17 +2263,48 @@ const RULES = [
   // someone close to him is a government official over HP: the same.
   // Question 2 ("Whether you have served… in a government or public body")
   // is his own history and the officials rule further down answers it.
+  // A CONFLICT-OF-INTEREST DISCLOSURE (F-903, Oceaneering's Oracle form
+  // 2026-10-23): "…required to disclose any situation…" with two statements,
+  // "To the best of my knowledge, I have no conflict of interest…" / "I have a
+  // possible conflict of interest…". It matched no rule and was left for him.
+  // KION's Workday box (2026-10-16) asked the same as free text and he wrote
+  // the sentence below. His standing answer is No (apply-profile
+  // conflict_of_interest); the sentence for a text box, No for a list (it
+  // picks the "no conflict" statement). Anything else stays his.
+  { re: /\bdisclose\b[^?]{0,200}\bconflicts?\s*(\(s\))?\s+of\s+interest\b|\b(have|has)\s+no\s+(actual,?\s+|potential,?\s+|or\s+|perceived\s+)*conflicts?\s*(\(s\))?\s+of\s+interest\b/i,
+    not: /\bgovernment\s+(officials?|or\s+public\s+body)\b|\b(details?|describe|explain|list)\s+(of\s+)?(the|your|any)?\s*(potential\s+)?conflict/i,
+    get: p => (/^no$/i.test(String(p.answers?.conflict_of_interest || '').trim())
+      ? ['I do not have any situations that would create a conflict of interest.', 'No'] : undefined),
+    ask: 'answers.conflict_of_interest', review: true },
   { re: /\b(family\s+member|close\s+personal\s+relationship)\b[^?]{0,160}\bgovernment\s+officials?\b/i,
     get: p => p.answers?.family_government_official, ask: 'answers.family_government_official', review: true },
   { re: /\bconflicts?\s*(\(s\))?\s+of\s+interest\b[^]*\b(outside\s+employment|financial\s+interest|conducting\s+business|compensation\s+from)\b/i,
     not: /\bgovernment\s+(officials?|or\s+public\s+body)\b/i,
     get: p => p.answers?.conflict_of_interest, ask: 'answers.conflict_of_interest', review: true },
+  // THE POSTED RANGE, ASKED AS A YES/NO (Therm-X, ADP, 2026-10-17: "The posted
+  // base salary range for this role is $90,000 – $150,000 … Is that range
+  // acceptable to you?"). Yes when the range reaches the salary he asks for;
+  // a range that tops out below it, or one the question does not state, is his.
+  { re: /\b(willing|able|ok|okay|comfortable|agree)\b[^?]{0,20}\b(to\s+)?(accept|with)\b[^?]{0,40}\b(salary|compensation|pay)\s+(range|band)\b|\b(is|does)\s+(that|this|the)\s+(salary\s+|pay\s+)?(range|band)\s+(acceptable|work|okay|ok|suitable)\b/i,
+    get: (p, q) => {
+      const want = Number(String(p.answers?.salary_expectation || '').replace(/[^\d.]/g, '')) || 0;
+      const nums = [...String(q).matchAll(/\$\s*(\d{2,3}(?:,\d{3})+|\d{2,3}(?:\.\d+)?\s*[kK])/g)]
+        .map((m) => (/[kK]/.test(m[1]) ? parseFloat(m[1]) * 1000 : Number(m[1].replace(/,/g, ''))));
+      if (!want || !nums.length) return undefined;
+      return Math.max(...nums) >= want ? 'Yes' : undefined;
+    },
+    review: true },
   { re: /salary|compensation|pay\s+(expectation|range|rate)|(hourly|desired|expected)\s+(rate|wage|pay)|rate\s+of\s+pay/i,
     // …and never where the question is not his EXPECTATION (audit of every
     // logged question, 2026-09-26): "Are you willing to accept this salary
     // range?" is a yes/no, and "Current Salary" asks what he is paid now — he
     // is a student; his target stated as his pay would be false. Both are his.
-    not: /\bconflicts?\s*(\(s\))?\s+of\s+interest\b|\b(receiving|receive|received)\s+compensation\s+from\b|\b(willing|able|ok|okay|comfortable|agree)\b[^?]{0,20}\b(to\s+)?(accept|with)\b[^?]{0,40}\b(salary|compensation|pay)\s+(range|band)\b|\b(current|present|last|previous|most\s+recent)\s+(base\s+)?(salary|compensation|pay|wage)\b/i,
+    // "…salary range for this role is $90,000 – $150,000 … Is that range
+    // acceptable to you?" (Therm-X, ADP, 2026-10-17) is the same yes/no.
+    not: /\bconflicts?\s*(\(s\))?\s+of\s+interest\b|\b(receiving|receive|received)\s+compensation\s+from\b|\b(willing|able|ok|okay|comfortable|agree)\b[^?]{0,20}\b(to\s+)?(accept|with)\b[^?]{0,40}\b(salary|compensation|pay)\s+(range|band)\b|\b(is|does)\s+(that|this|the)\s+(salary\s+|pay\s+)?(range|band)\s+(acceptable|work|okay|ok|suitable)\b|\b(current|present|last|previous|most\s+recent)\s+(base\s+)?(salary|compensation|pay|wage)\b|\b(starting|ending|start|end|final|initial|beginning|leaving)\s+(base\s+)?(salary|compensation|pay|wage|rate)\b/i,
+    // F-852: a past job's "Starting Salary" / "Ending Salary" (Paylocity work
+    // history, Optomec ×4) got his TARGET, $90000/year — a false statement of
+    // what an internship paid. Nothing in his files says; it stays blank.
     get: p => p.answers?.salary_expectation, review: true },
   // "Are you of eligible age in the country to which you are applying?"
   // (Flowserve, 2026-10-03, left for him) is the same question.
@@ -1738,11 +2336,24 @@ const RULES = [
   // …and Oracle-hosted DENSO's "Are you currently or have you been employed by
   // DENSO at any of its locations?" / "…previously been assigned to DENSO … as
   // a temporary or contract worker?" (F-695).
-  { re: /\bare\s+you\s+currently\s+or\s+have\s+you\s+(ever\s+|previously\s+)?been\s+(employed\s+by|assigned\s+to|working\s+(at|for))\s+(?!(?:this|our)\b)|\bhave\s+you\s+ever\s+been\s+an?\s+(?!(?:temporary|contract|agency)\b)(?:[\w.&'-]+\s+){1,4}(employee|contractor|intern)\b|previously\s+(?:been\s+)?(?:directly\s+)?(worked|employed)|former[\s/]+(?:[\w.]+[\s/]+){0,3}(employee|contractor|intern)|worked\s+(at|for).*(before|previously)|worked\s+with\s+us\b.*\b(before|previously)|ever\s+(worked|been\s+employed)\s+(at|for|with|by)(?!\s+(?:this|our)\b)|worked\s+(at|for)\b.*\b(employee|contractor|intern)\b|been\s+(employed|worked)\s+(by|at|for)\s+(?!(?:this|our)\b)[^?]{0,160}\b(in\s+the\s+past|before|previously)\b/i,
+  // …and SuccessFactors' "Have you been employed by EnerSys, or any of its
+  // affiliates?" / "Are you, or have you been employed by Newell Brands during
+  // the last 5 years…" (F-832): no time word at all, or one past 160 chars.
+  // A government ("the federal…") is not an employer name and keeps its rule.
+  { re: /\bhave\s+you\s+(ever\s+)?been\s+employed\s+by\s+(?!(?:this|our|the|a|an|any|federal|government|u\.?\s?s\.?)\b)[A-Z]|\bare\s+you\s+currently\s+or\s+have\s+you\s+(ever\s+|previously\s+)?been\s+(employed\s+by|assigned\s+to|working\s+(at|for))\s+(?!(?:this|our)\b)|\bhave\s+you\s+ever\s+been\s+an?\s+(?!(?:temporary|contract|agency)\b)(?:[\w.&'-]+\s+){1,4}(employee|contractor|intern)\b|previously\s+(?:been\s+)?(?:directly\s+)?(worked|employed)|former[\s/]+(?:[\w.]+[\s/]+){0,3}(employee|contractor|intern)|worked\s+(at|for).*(before|previously)|worked\s+with\s+us\b.*\b(before|previously)|ever\s+(worked|been\s+employed)\s+(at|for|with|by)(?!\s+(?:this|our)\b)|worked\s+(at|for)\b.*\b(employee|contractor|intern)\b|been\s+(employed|worked)\s+(by|at|for)\s+(?!(?:this|our)\b)[^?]{0,160}\b(in\s+the\s+past|before|previously)\b|\bapplied\s+(?:to|for|at|with)\b[^?]{0,60}?\b(?:or|and)\s+(?:have\s+you\s+)?(?:ever\s+|previously\s+)?(?:worked|been\s+employed|interned)\b/i,
     // A "no" that the form spells as a statement — Waymo's "Are you a current
     // or former Alphabet employee…" offers "Never worked at Alphabet"
     // (2026-09-24) — is tried after the plain No.
-    get: (p) => {
+    // "Have you ever applied or worked for Brooks Automation previously?"
+    // (2026-10-16, F-1036): one box for two histories, and the store held an
+    // earlier Brooks application while this rule answered No from work alone.
+    // Either one is a Yes.
+    // …ONLY WHERE THE QUESTION ASKS ABOUT APPLYING (code review #1,
+    // 2026-11-13). The word anywhere was enough: "Have you been employed by
+    // Acme? Your answer will not affect your application." went out as "Yes,
+    // worked here" from an earlier Acme application.
+    get: (p, text) => {
+      if (asksApplied(text) && appliedHere(p, text) === 'Yes') return 'Yes';
       const v = employedAtApplyingTo(p) ?? p.answers?.previously_employed_here;
       return /^no$/i.test(String(v || '')) ? [v, 'Never worked at', 'Never been employed', 'I have never worked'] : v;
     },
@@ -1766,7 +2377,7 @@ const RULES = [
   // his own answer there was No; the recogniser had to supply it.
   // …and "Are you related to anyone in a Management position at SYNNEX or a
   // subsidiary?" (Hyve, 2026-09-27) — he typed No himself (F-623).
-  { re: /relative|\b(are\s+you|is\s+anyone)\s+related\s+to\s+(anyone|someone|any\s*(one|person|employee|member|manager))\b|\bare\s+you\s+related\s+to\s+an?\s+[\w&.' -]{2,40}?\s+employee\b|family\s+member.*(employ|work)|family\s+or\s+(a\s+)?close\s+friend\b.{0,60}\b(employ|work)|\bimmediate\s+family\s+member\b[^?]{0,120}\bof\s+(an?|any)\s+(partner|employee|officer|director|executive)/i,
+  { re: /relative|\b(are\s+you|is\s+anyone)\s+related\s+to\s+(anyone|someone|any\s*(one|person|employee|member|manager))\b|\bare\s+you\s+related\s+to\s+an?\s+[\w&.' -]{2,40}?\s+employee\b|\bare\s+you\s+related\s+to\s+an?\s+employee\s+of\b|family\s+member.*(employ|work)|family\s+or\s+(a\s+)?close\s+friend\b.{0,60}\b(employ|work)|\bimmediate\s+family\s+member\b[^?]{0,120}\bof\s+(an?|any)\s+(partner|employee|officer|director|executive)/i,
     not: /^\s*if\s+yes\b|provide\s+their\s+name/i, get: p => p.answers?.relatives_at_company },
   // "Please select your area of interest(s)" (Western Digital, 2026-09-24):
   // his degree names it.
@@ -1775,7 +2386,7 @@ const RULES = [
   // Export-control country citizenship. NOT the same as the generic ITAR
   // "U.S. person" question, and it must be answered No for him (Canadian).
   { re: /cuba,?\s*iran|citizen\s+of,?\s+or\s+do\s+you\s+hold\s+dual\s+citizenship|north\s+korea.*syria/i,
-    get: p => p.answers?.restricted_country_citizen, review: true },
+    get: (p, q) => countryListAnswer(p, q), review: true },
   // "A U.S. worker is defined as … are you in one of the above five groups?"
   { re: /u\.?s\.?\s+worker|above\s+five\s+groups/i, get: p => p.answers?.us_person, review: true },
   // …and "present documents showing that you have a right to lawfully work in
@@ -1787,7 +2398,7 @@ const RULES = [
   // …and "able to begin a new opportunity" (Field AI, 2026-09-26), whose list
   // stops at "three to six months" — his June 2027 fits none of it, and the
   // reason now says so instead of "no answer".
-  { re: /when\s+would\s+you\s+be\s+available|available\s+to\s+(start|begin)|\btimeline\s+for\s+(starting|joining|beginning)\b|when\s+(could|can|would)\s+you\s+(realistically\s+|be\s+able\s+to\s+)?(start|begin)|able\s+to\s+(start|begin)\b|start\s+full[- ]?time/i, get: p => p.answers?.earliest_start },
+  { re: /when\s+would\s+you\s+be\s+available|available\s+to\s+(start|begin)|\btimeline\s+for\s+(starting|joining|beginning)\b|when\s+(could|can|would)\s+you\s+(realistically\s+|be\s+able\s+to\s+)?(start|begin)|able\s+to\s+(start|begin)\b|start\s+full[- ]?time/i, get: p => startAnswer(p) },
   // "If you were referred to Base, please share the name of your referrer."
   // (2026-09-25) — he was not referred, so there is no name to give.
   { re: /\bif\s+you\s+were\s+referred\b.{0,80}\b(name|who)\b|\bname\s+of\s+(your\s+)?referr(er|al)\b/i,
@@ -1910,8 +2521,15 @@ const RULES = [
   // An APPLICATION is on record in the store (the dashboard sets
   // appliedHereBefore): he has applied to Micron sixteen times, and the
   // standing No went out there on 2026-09-25 (F-621). An interview is not.
-  { re: /applied\s+on\s+any\s+previous|previously\s+applied|applied\s+before|(?:ever|previously)\s+interviewed\s+(?:at|with|for|here)|interviewed\s+(?:at|with)\s+.{1,40}\s+before/i,
-    get: (p, text) => (p.appliedHereBefore === true && /\bappl(y|ied|ication)/i.test(text) ? 'Yes' : p.answers?.previously_applied_here) },
+  // …and with the employer between (F-891): Schindler's "Have you ever applied
+  // for employment at Schindler before?" went unanswered.
+  // …and with the employer between and a WINDOW after it (F-1036):
+  // GlobalFoundries' "Have you applied to GLOBAL FOUNDRIES within the past 6
+  // months?" matched nothing and was left blank. A window is answered from the
+  // store's application dates; an undated application leaves the box his.
+  { re: APPLIED_BEFORE_RE, not: APPLIED_ONLY_IN_ASIDE,
+    get: (p, text) => (/\bappl(y|ied|ication)/i.test(text) ? appliedHere(p, text) : p.answers?.previously_applied_here),
+    unknownWhy: 'it asks about a time window and an earlier application here has no date — yours to answer' },
   { re: /terminated\s+or\s+asked\s+to\s+resign|been\s+terminated/i, get: p => p.answers?.terminated_for_cause, review: true },
   { re: /board\s+of\s+directors/i, get: p => p.answers?.board_membership },
   // The third spelling is Amazon's, and it arrives as the OPTION TEXT rather
@@ -1981,6 +2599,13 @@ const RULES = [
   // (Apple, 2026-10-16: both boxes held the street line).
   { re: /^address(\s*line)?\s*(1|one)?\s*\*?$|^street\s*address\b(?!\s*(line\s*)?(2|two|ii)\b)|^address\s*:?\s*\*?$/i,
     get: p => p.identity?.address_line1 },
+  // ORACLE'S OWN WORDS FOR THE TWO LINES (F-885). Ford's Oracle form
+  // (2026-10-23) labels them "Street Number and Name or P.O. Box" and
+  // "Apartment or Unit Number"; neither matched, and both went out empty.
+  { re: /^\s*street\s+(number\s+and\s+name|name\s+and\s+number)\b|^\s*street\s+number\s*(,|and|&)?\s*name\b|^\s*street\s+(and|&)\s+number\b/i,
+    get: p => p.identity?.address_line1 },
+  { re: /^\s*(apartment|apt\.?|suite|unit)\s*((or|\/|,)\s*(apartment|apt\.?|suite|unit|building|floor))*\s*(number|no\.?|#)?\s*\*?\s*$/i,
+    get: p => (String(p.identity?.address_line2 || '').trim() || undefined), blankWhenEmpty: true },
   // THE WHOLE ADDRESS IN ONE BOX: "We require the current physical/mailing
   // address for all candidates. Please enter your address here (incomplete
   // addresses may result in your disqualification)." (Re:Build, 2026-09-26,
@@ -2015,7 +2640,7 @@ const RULES = [
     get: p => p.answers?.year_in_school },
   { re: /highest\s+(level\s+of\s+)?(education|degree)|degree\s+(level|type)\s*(you|attain)/i,
     get: p => p.answers?.highest_education },
-  { re: /(field|area)\s+of\s+stud(y|ies)|major\b|discipline\s+of\s+study/i,
+  { re: /(field|area)\s+of\s+stud(y|ies)|\bmajors?\b(?!\s*(life|airports?|hubs?|cit(y|ies)|metro\w*|markets?|accounts?|customers?|projects?|programs?|milestones?|changes?|issues?|incidents?|companies|company|role|responsibilit\w*|contributions?|players?|brands?|international|domestic|u\.?s\.?))|discipline\s+of\s+study/i,
     get: p => p.answers?.field_of_study },
   // "What term did you (or will you) graduate in?" had no rule (measured on the
   // live Applied Materials form, 2026-09-07): "term" was only recognised
@@ -2050,6 +2675,7 @@ const RULES = [
   // today. Start dates and graduation dates match earlier, more specific rules,
   // and date of birth is never-fill.
   { re: /^date\s*:?\*?$|today.?s\s+date|date\s+of\s+(signature|completion)/i,
+    not: /\b(anticipated|expected|projected|estimated|planned|degree|graduat\w*|school|education|program|course)\b/i,
     get: () => new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }),
     review: true },
 
@@ -2078,6 +2704,11 @@ const RULES = [
   // something you are comfortable with?" (Orchard Robotics, 2026-09-26).
   { re: /(willing|able|open).{0,25}travel|travel\s*(requirement|percentage|%)|percent\w*\s+of\s+travel|how\s+much\s+travel|\btravel\b[^?]{0,200}\b(comfortable|okay|ok|fine|willing|able)\b[^?]{0,20}\?/i,
     get: p => p.answers?.travel_ok, ask: 'answers.travel_ok', review: true },
+  // A BARE "Travel Domestically" Yes/No beside "Willing to Relocate"
+  // (Coherent's Oracle form, 2026-10-22): his travel_ok, given for travel within
+  // the United States (Novanta). Travel abroad is not settled by his files.
+  { re: /^\s*(willing\s+to\s+)?travel\s+(domestically|within\s+the\s+(u\.?s\.?a?|united\s+states))\s*\??\s*\*?\s*$/i,
+    get: p => (/within the united states/i.test(String(p.answers?.travel_countries || '')) || !p.answers?.travel_countries ? p.answers?.travel_ok : undefined), review: true },
   // Novanta's follow-up to travel, and its two work-document questions
   // (2026-09-24) — each answered by him on the form, kept in his profile.
   { re: /^\s*to\s+which\s+countr(y|ies)\b/i, get: p => p.answers?.travel_countries, ask: 'answers.travel_countries', review: true },
@@ -2195,6 +2826,9 @@ function conditionalBody(text) {
   if (RULES.some((r) => /^\^?(\\s\*)?if\\s/.test(r.re.source) && !(r.not && r.not.test(text)) && r.re.test(text))) return null;
   const body = text.match(/^\s*if\s+your?\b[^,]{0,80},\s*(.+)$/is)?.[1]?.trim();
   if (!body || /^\s*if\s+your?\b/i.test(body)) return null;
+  // "If you have applied to or worked for Acme before, select Yes." — the condition IS the question, and the
+  // body only says which box means it (his order, 2026-11-13 13:02, week-fixes K4). Read whole.
+  if (/^(please\s+)?(select|answer|choose|check|mark|tick|click|respond)\s+["']?yes\b/i.test(body) && asksApplied(text)) return null;
   return body;
 }
 
@@ -2348,7 +2982,7 @@ function matchRules(text, profile) {
       // noise there — it crowds out the ones a line of YAML would fix. The
       // Workday key table has had this courtesy since Phone Extension
       // (`kind: 'blank'`, apply-plan.mjs); the label rules never could.
-      if (rule.blank) return { kind: 'blank', why: (typeof rule.why === 'function' ? rule.why(profile) : rule.why) || 'deliberately left blank' };
+      if (typeof rule.blank === 'function' ? rule.blank(profile) : rule.blank) return { kind: 'blank', why: (typeof rule.why === 'function' ? rule.why(profile) : rule.why) || 'deliberately left blank' };
       if (rule.residence) {
         const place = (String(text).match(rule.re)?.[6] || '').replace(/[?.!]+$/, '').trim();
         const city = String(profile?.identity?.city || '').trim().toLowerCase();
@@ -2395,6 +3029,7 @@ function matchRules(text, profile) {
       // difference between "this engine is lost" and "one line of YAML ends
       // this question forever" is the whole value of the rule.
       if (value == null) {
+        if (rule.unknownWhy) return { kind: 'unknown', why: typeof rule.unknownWhy === 'function' ? rule.unknownWhy(profile, text) : rule.unknownWhy };
         if (rule.prose) return { kind: 'unknown', why: 'needs your own words — the engine will not write this for you' };
         if (rule.ask) return { kind: 'unknown', why: `add \`${rule.ask}\` to apply-profile.yml and this answers itself` };
         return { kind: 'unknown' };

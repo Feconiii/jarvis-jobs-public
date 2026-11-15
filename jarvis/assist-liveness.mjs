@@ -60,6 +60,20 @@ export function planSweep(company, liveReqIds, handle = db()) {
     (feed.has(req) ? keep : dead).push({ ...r, req });
   }
 
+  // THE OTHER DIRECTION (F-626). The 09-27 Tesla harvest missed 3,604 live
+  // listings and nothing noticed, because this only ever asked which STORE
+  // rows the feed lacks. The feed also says which live requisitions the store
+  // lacks (a short harvest), and which rows were retired although the board
+  // still lists them (a false "expired", the expensive error).
+  const held = new Map();
+  for (const r of handle.prepare('SELECT url, gone_at FROM jobs WHERE company = ?').all(company)) {
+    const req = reqIdOf(r.url);
+    if (!req) continue;
+    held.set(req, held.get(req) === 'live' || !r.gone_at ? 'live' : 'gone');
+  }
+  const missing = [...feed].filter((id) => !held.has(id));
+  const retiredButListed = [...feed].filter((id) => held.get(id) === 'gone');
+
   const judged = dead.length + keep.length;
   const share = judged ? dead.length / judged : 0;
   const refusals = [];
@@ -73,6 +87,9 @@ export function planSweep(company, liveReqIds, handle = db()) {
     company, feedSize: feed.size, storeLive: rows.length,
     judged, keep: keep.length, dead, unkeyed: unkeyed.length,
     share, refusals, wouldRetire: refusals.length ? 0 : dead.length,
+    missing: missing.length, missingSample: missing.slice(0, 20),
+    retiredButListed: retiredButListed.length, retiredButListedSample: retiredButListed.slice(0, 20),
+    ...(missing.length ? { harvestShort: `the board lists ${missing.length} requisition(s) the store does not hold — the last listings harvest was short; harvest the listings again` } : {}),
   };
 }
 

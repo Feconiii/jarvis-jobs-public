@@ -18,6 +18,8 @@
 //   node jarvis/retriage.mjs --block-key no_sponsorship   # just those rows
 //   node jarvis/retriage.mjs --grad-mismatch              # after a grad-window fix
 //   node jarvis/retriage.mjs --degree-mismatch            # after a degree.mjs fix
+//   node jarvis/retriage.mjs --location                   # after a geo.mjs fix: only rows
+//                                                         # whose stored bucket the new reading changes
 //
 // `--block-key` exists because a visa fix that UN-blocks postings cannot be
 // applied with --deck-only: the rows it would free are hard-blocked, so they
@@ -29,7 +31,8 @@
 // supervising it, and a half-finished pass leaves the store disagreeing with
 // itself about which jobs are winnable.
 
-import { ids, getJob, putJob } from './store.mjs';
+import { ids, getJob, putJob, db } from './store.mjs';
+import { bucketDrifted } from './geo.mjs';
 import { triage } from './triage.mjs';
 
 import { guardArgs } from './cli.mjs';
@@ -45,12 +48,13 @@ const USAGE = `
     --budget <value>
     --deck-only
     --degree-mismatch
+    --location            only rows whose stored location bucket the current geo reading changes
     --dry-run
     --help, -h
 `;
 
 // F-163: not one command in this project handled --help, so --help RAN them.
-guardArgs({ usage: USAGE, flags: ["--after","--block-key","--budget","--deck-only","--degree-mismatch","--dry-run","--grad-mismatch"], valued: ["--after","--block-key","--budget"] });
+guardArgs({ usage: USAGE, flags: ["--after","--block-key","--budget","--deck-only","--degree-mismatch","--dry-run","--grad-mismatch","--location"], valued: ["--after","--block-key","--budget"] });
 
 
 const DRY = process.argv.includes('--dry-run');
@@ -72,8 +76,14 @@ const filter = BLOCK_KEY ? { blockKey: BLOCK_KEY } : GRAD_MISMATCH ? { gradMisma
 
 // Ids first, then one job at a time: this pass writes every row it reads, and
 // a live query cannot be iterated while its rows are being updated.
-const jobIds = ids(filter).sort().filter(id => id > AFTER);
-const scope = BLOCK_KEY ? ` blocked as ${BLOCK_KEY}` : GRAD_MISMATCH ? ' excluded on their graduation window' : DEGREE_MISMATCH ? ' excluded on their degree requirement' : DECK_ONLY ? ' in the deck' : '';
+// --location (2026-11-03): a geo.mjs change moves rows no flag names, so they
+// are found by asking the current reading of every open row (read only; the
+// writes below are this pass's own).
+const LOCATION = ARGV.includes('--location');
+const jobIds = (LOCATION
+  ? db().prepare('SELECT id, location, title, url, location_bucket FROM jobs WHERE gone_at IS NULL').all().filter(bucketDrifted).map((r) => r.id)
+  : ids(filter)).sort().filter(id => id > AFTER);
+const scope = LOCATION ? ' whose location bucket the current reading changes' : BLOCK_KEY ? ` blocked as ${BLOCK_KEY}` : GRAD_MISMATCH ? ' excluded on their graduation window' : DEGREE_MISMATCH ? ' excluded on their degree requirement' : DECK_ONLY ? ' in the deck' : '';
 console.log(`Re-triaging ${jobIds.length.toLocaleString()} jobs${scope}${DRY ? ' (dry run)' : ''}…`);
 
 // Count transitions on the fields that change what the user sees, so a
@@ -111,7 +121,8 @@ for (const id of jobIds) {
   const oldFlags = old.flags || {};
   for (const k of Object.keys(before)) if (oldFlags[k]) before[k]++;
 
-  const next = triage({ title: job.title, description: job.description, location: job.location, url: job.url });
+  // enrichedAt: a short body nothing has read in full is "not screened" (F-627).
+  const next = triage({ title: job.title, description: job.description, location: job.location, url: job.url, enrichedAt: job.enrichedAt ?? null });
   const nextFlags = next.flags;
   for (const k of Object.keys(after)) if (nextFlags[k]) after[k]++;
   for (const k of Object.keys(changed)) {

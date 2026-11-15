@@ -303,6 +303,9 @@ eq('Spring 2026 or Fall 2026 still excludes him',
 eq('spring reaches June', winKeys('Graduating Spring 2027.'), ['3/2027', '6/2027']);
 eq('fall reaches December', winKeys('Graduating Fall 2027.'), ['9/2027', '12/2027']);
 eq('winter opens in the previous December', winKeys('Graduating Winter 2027.'), ['12/2026', '3/2027']);
+// J&J STEP (F-959): the second door after "or" widens the window to his date.
+eq('"2024 to 2025 or due to graduate in May 2027" takes his class',
+  prog('X', 'A recent graduate is preferred (2024 to 2025 or due to graduate in May 2027).').gradEligible, true);
 // Silence must still be silence — none of the above may invent a window.
 eq('a bare year in unrelated prose is not a graduation window',
   graduationWindow('We shipped 2027 units last quarter.'), null);
@@ -422,6 +425,17 @@ console.log('\n🧪 a Bachelor\'s that needs no experience is entry, whatever th
 • 10 or more years’ experience as a highly skilled technician/specialist in a relevant discipline.`;
   eq('First Solar\'s degree route is entry', lvl('Engineer- Manufacturing I USA (Finishing)', firstSolar), 'entry');
   eq('…and the card quotes the degree line', /no experience required/.test(classifyExperience('Engineer- Manufacturing I', firstSolar).evidence[0]), true);
+  // 2026-10-20, filed to his inbox as "0 years" and pulled back out.
+  eq('Supermicro: "5+ years of relevant experience with a Bachelor\'s or 3+ … with a Master\'s" is 5 years',
+    exp('Optical Manufacturing Engineer', '• 5+ years of relevant experience with a Bachelor’s degree or 3+ years of relevant experience with a Master’s degree in optical communication systems.'), ['stretch', 5]);
+  eq('First Solar NPI II: "0-3 years" with a PhD is not his route (his is the Bachelor\'s 2)',
+    exp('Engineer- Manufacturing NPI II USA', '• Bachelor’s degree in a technical discipline with 2 years as First Solar Manufacturing Engineer I, or 3 years Engineering experience in a manufacturing setting\n• PhD Degree in a technical discipline with 0-3 years of experience in a manufacturing setting'), ['entry', 2]);
+  eq('Fontaine: "Bachelor of Science … or five years" does not waive "Role typically requires between 5 and 8 years"',
+    lvl('Manufacturing Engineer', 'Role typically requires between 5 and 8 years of experience.\n• Bachelor of Science in an Engineering Discipline or five years of relevant experience.') !== 'entry', true);
+  eq('Bunge: a PTO table ("0 – 9 years: 25 days") is no zero route',
+    exp('Project Engineer', '• 6 - 9 years of experience, in plant operations, maintenance, and safety is required.\nPaid time off\n0 – 9 years: 25 days\n10 – 19 years: 30 days'), ['exclude', 6]);
+  eq('…while "Bachelor\'s or 4 years" beside "2+ years of CAD" is a 2-year ask',
+    exp('Manufacturing Engineer', '• A bachelor\'s degree in engineering or 4+ years of experience in a technical role.\n• 2+ years of CAD experience required.'), ['entry', 2]);
   // The degree and the waiver must be on one line: a waiver for technicians
   // elsewhere does not free a 5-year engineering ask.
   eq('a waiver on another line is not the degree route',
@@ -436,6 +450,8 @@ console.log('\n🧪 a Bachelor\'s that needs no experience is entry, whatever th
     lvl('Silicon Packaging Design Engineer', '- At least 4 years of experience in substrate/package design with a Bachelor\'s degree, 3 years with a Master\'s degree, or no experience required with a PhD.'), 'stretch');
   eq('SSi: no prior experience with a Master\'s is not his route',
     lvl('Systems Design Quality Engineer', 'Minimum 5+ years of experience with a Bachelor’s degree in Quality Engineering, or no prior experience required with a Master’s degree.'), 'stretch');
+  eq('Hitachi: "(ME I) Prior work experience is not required" is a way in (F-959)',
+    lvl('Mechanical Engineer I - IV', 'EXPERIENCE AND TRAVEL REQUIREMENTS\n• (ME I) Prior work experience is not required.\n• (ME IV) PhD with 3+ years of relevant work experience; or MS with 6+ years of relevant work experience; or BS with 8+ years of relevant work experience.'), 'entry');
   eq('AbbVie: "PhD and no experience necessary" is not his route',
     lvl('Data Scientist', 'Bachelor’s Degree and typically 10 years of experience, Master’s Degree and typically 8 years of experience, PhD and no experience necessary.'), 'exclude');
 }
@@ -448,6 +464,67 @@ console.log('\n🧪 a Bachelor\'s that needs no experience is entry, whatever th
   const p = classifyExperience('Mechanical Engineer', 'Preferred\n• 0-2 years nice to have\nRequirements\n• 4+ years of design experience');
   if (p.level !== 'entry') { pass++; console.log('  ✅ a zero range only under Preferred does not undo a required 4+'); }
   else { fail++; console.log('  ❌ a preferred 0-2 overrode a required 4+'); }
+}
+
+console.log('\n🧪 a posting open to new grads is not stored as a 3-year floor (F-766)');
+{
+  // Yaskawa, 2026-10-17: stored as 3+ and screened out.
+  const yaskawa = `Qualifications
+• Bachelor's degree in Mechanical Engineering or Mechatronics.
+• Minimum of three years of experience with CAD or 3D modeling (preferably Solidworks) and Matlab.
+• Recent college graduates with a concentration in mechatronics and a strong GPA are also encouraged to apply.`;
+  eq('Yaskawa: "recent college graduates … are also encouraged to apply" is entry, 0y',
+    exp('Product (Mechanical) Engineer', yaskawa), ['entry', 0]);
+  eq('…and the card quotes the invitation', /encouraged to apply/.test(classifyExperience('Product (Mechanical) Engineer', yaskawa).evidence[0]), true);
+  // Valmont, 2026-10-17: "Up to 3 years" was read as a floor of three.
+  const valmont = 'This entry-level role supports machine design for our irrigation equipment.\nRequirements\n• Up to 3 years of experience in manufacturing engineering/machine design required.';
+  eq('Valmont: "Up to 3 years" is a range from zero', exp('Associate Machine Design Engineer', valmont), ['entry', 0]);
+  eq('Honda: "recent graduates or those with up to 2 years" is 0y',
+    exp('Mechanical Design Engineer', 'Ideal for recent graduates or those with up to 2 years of relevant experience.'), ['entry', 0]);
+  eq('"no less than 3 years" is still a floor of three',
+    exp('Mechanical Engineer', 'Requirements\n• No less than 3 years of design experience.'), ['stretch', 3]);
+  eq('"up to 8-15 years" names its own floor',
+    exp('DGM - Consulting Business Development', 'Highly motivated and experienced sales professional up to 8-15 years of experience to join our team.')[1], 8);
+  eq('"less than 2 years of experience" starts at zero',
+    exp('Mechanical Engineer', 'Requirements\n• Less than 2 years of experience is fine.'), ['entry', 0]);
+  // "This entry-level role" on its own frees a required figure for the reader to judge.
+  eq('"This is an entry-level position" with a 3-year line is entry',
+    exp('Mechanical Engineer', 'This is an entry-level position.\nRequirements\n• 3+ years of experience with CAD.'), ['entry', 0]);
+  // What does not count.
+  // Intel, 2026-11-02: filed as "worth a look" over a 4-year Bachelor's rung.
+  const intel = "This is an entry level position and will be compensated accordingly.\nMinimum qualifications\n• A Bachelor’s degree in Mechanical, Electrical, Material Science or Chemical Engineering, or a related STEM field with 4+ years of relevant semiconductor industry experience.\n• OR a Master’s degree in a matching STEM discipline with 3+ years of relevant semiconductor industry experience.";
+  eq('Intel: a pay-grade "entry level" line does not waive a 4-year Bachelor\'s rung', exp('Packaging Module Equipment Development Engineer', intel)[0] === 'entry', false);
+  eq('…nor does a real invitation when the Bachelor\'s line carries its own years',
+    exp('Mechanical Engineer', "Recent graduates are encouraged to apply.\n• Bachelor's degree in Mechanical Engineering with 3+ years of design experience.")[0] === 'entry', false);
+  eq('a negated invitation is no route',
+    exp('Mechanical Engineer', 'Requirements\n• 5+ years of design experience.\nRecent graduates will not be considered for this role.'), ['stretch', 5]);
+  eq('"this is not an entry-level role" is no route',
+    exp('Mechanical Engineer', 'This is not an entry-level role.\nRequirements\n• 4+ years of design experience.'), ['stretch', 4]);
+  eq('an invitation that names its own years is no route',
+    exp('Mechanical Engineer', 'Requirements\n• 5+ years of design experience.\nRecent graduates with 3+ years of co-op experience are encouraged to apply.'), ['stretch', 5]);
+  eq('LinkedIn\'s "Seniority level: Entry level" footer is no route',
+    exp('Mechanical Engineer', 'Requirements\n• 4+ years of design experience.\n\nSeniority level: Entry level\nEmployment type: Full-time'), ['stretch', 4]);
+  eq('…nor an entry title signal on a posting with no years',
+    classifyExperience('Mechanical Engineer II', 'Design brackets.\nSeniority level: Entry level').level, 'stretch');
+  eq('a senior title still wins over an invitation',
+    exp('Senior Mechanical Engineer', 'Requirements\n• 5+ years.\nRecent graduates are encouraged to apply.')[0], 'exclude');
+  // The degree route's ask is 0y, not the other route's figure (Providien sat at 5y, out of the pool).
+  eq('"a bachelor\'s … or 5+ years" stores 0y',
+    exp('Manufacturing Engineer I', '• A bachelor\'s degree in engineering/sciences or 5+ years of experience in a technical role.'), ['entry', 0]);
+}
+
+// ── F-627: a short body with no full read behind it ─────────────────
+{
+  const teaser = 'Job Description Summary: Join our Madison manufacturing team to lead process improvements on our MR coil lines.';
+  const job = { title: 'Manufacturing Engineer', description: teaser, location: 'Madison, WI', url: 'https://x.wd5.myworkdayjobs.com/a/job/1' };
+  const unread = triage({ ...job, enrichedAt: null });
+  eq('F-627: a teaser never read in full is "not screened"', unread.flags.visaUnscreened, true);
+  eq('F-627: …is neither blocked nor green', [unread.flags.hardBlock, unread.flags.visaGood], [false, false]);
+  eq('F-627: …and the card leads with the note', unread.visa.warnings[0]?.key, 'sponsorship_unscreened');
+  eq('F-627: the same teaser after a full read is judged as read', triage({ ...job, enrichedAt: '2026-10-18T00:00:00Z' }).flags.visaUnscreened, false);
+  eq('F-627: a long body is judged as read even with no enrichedAt', triage({ ...job, description: teaser + ' ' + 'Responsibilities include fixture design and line balancing. '.repeat(10), enrichedAt: null }).flags.visaUnscreened, false);
+  eq('F-627: a caller that says nothing keeps the old verdict', triage(job).flags.visaUnscreened, false);
+  eq('F-627: opts.thin forces it', triage(job, { thin: true }).flags.visaUnscreened, true);
 }
 
 // ── report ──────────────────────────────────────────────────────────

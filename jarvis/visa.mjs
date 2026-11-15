@@ -258,10 +258,22 @@ const STUDENT_CS = /\bOPT\b|\bCPT\b|\bF-?1\b/;
 /** Authorization-to-work phrasing, and the qualifier that makes it a disqualifier. */
 const AUTH_TO_WORK = /\b(?:authoriz\w*|eligible|eligibility|legally\s+(?:authoriz\w*|able))\s+to\s+work\b|\b(?:work|employment)\s+authoriz\w*\b|(?:legal(?:ly)?|unrestricted|permanent)\s+right\s+to\s+work\b|\bright\s+to\s+work\s+(?:in|for)\s+(?:the\s+)?(?:u\.?\s?s\.?|usa|united\s+states|this\s+country|any\s+employer)\b/i;
 const PERMANENCE = /\b(permanent(?:ly)?|indefinite(?:ly)?|unrestricted|without\s+(?:\w+\s+){0,3}sponsorship|without\s+restriction|for\s+any\s+employer|now\s+(?:and|or)\s+in\s+the\s+future)\b/i;
+// The same, without "permanent residence" — for a sentence that ALSO accepts
+// any work authorization (F-664). UPS: "Must be a U.S. Citizen or National of
+// the U.S., an alien lawfully admitted for permanent residence, or an alien
+// authorized to work in the U.S. for this employer." Permanent residence is
+// one status in that list, not a demand that his authorization be permanent.
+// Without the general alternative ("as a U.S. citizen or lawful permanent
+// resident") a green card IS the demand, and that still blocks.
+const PERMANENCE_NOT_RESIDENCE = /\b(permanent(?:ly)?(?!\s+residen)|indefinite(?:ly)?|unrestricted|without\s+(?:\w+\s+){0,3}sponsorship|without\s+restriction|for\s+any\s+employer|now\s+(?:and|or)\s+in\s+the\s+future)\b/i;
 const REQUIREMENT = /\b(must|required?|requires|requiring|need\s+to\s+be|should\s+be|only|shall)\b/i;
 
 /** Sentence-scope topics: read whole, never clause-split (see classifySentence). */
-const CLEARANCE = /\b(?:active\s+)?(?:security\s+clearance|secret\s+clearance|top\s+secret|ts\/sci|sci\s+clearance|dod\s+(?:secret|clearance)|q\s+clearance|polygraph)\b/i;
+// "TS clearance", "DoW" (the Department of War, as DoD now styles itself) and
+// "SCI eligibility" added 2026-10-18 (F-663): NetApp's "Security Clearance:
+// Active DoW TS clearance with SCI eligibility required" was caught only by
+// its heading, and the heading no longer counts.
+const CLEARANCE = /\b(?:active\s+)?(?:security\s+clearance|secret\s+clearance|top\s+secret|ts\/sci|ts\s+clearance|sci\s+clearance|sci\s+eligib\w*|do[dw]\s+(?:secret|ts|clearance)|q\s+clearance|polygraph)\b/i;
 const CITIZEN = /\b(?:must\s+be\s+(?:an?\s+)?)?(?:u\.?\s?s\.?|united\s+states)\s+cit(?:i|iz)[a-z]*\b|\bcit(?:i|iz)enship\s+(?:is\s+)?(?:required|mandatory)\b/i;
 const US_PERSON = /\bu\.?\s?s\.?\s+persons?\b|\b(?:export[- ]control|itar|ear)\b[^.]{0,80}\b(?:u\.?\s?s\.?\s+persons?|citizen|permanent\s+resident)\b/i;
 /**
@@ -275,7 +287,98 @@ const US_PERSON = /\bu\.?\s?s\.?\s+persons?\b|\b(?:export[- ]control|itar|ear)\b
  * and one he never does. Greenhouse's own form question reads "Are you either a
  * US Citizen or a Perm Resident)?", typo and all.
  */
-const PERSON_ALT = /\b(?:lawful(?:ly)?\s+)?perm(?:anent)?\.?\s+resident|green[- ]card|u\.?\s?s\.?\s+persons?|protected\s+individual|asylee|refugee\b|\b8\s*u\.?\s?s\.?\s?c\.?\s*(?:sec\.?|§)?\s*1324b/i;
+//
+// "Residency" and "Residence" too (F-664, 2026-10-18): "resident" was spelled
+// out in full, so "U.S. Citizenship or US Permanent Residency is required"
+// (Axiom, TE Connectivity, Keysight, Viasat …) read as citizen-only and hid the
+// job, while the same list written "permanent resident" only flagged it. Same
+// for "Greencard", "GC holder" and the statute's "lawfully admitted … for
+// permanent residence".
+const PERSON_ALT = /\b(?:lawful(?:ly)?\s+)?perm(?:anent)?\.?\s+resid(?:ent|ency|ence)|green[- ]?cards?|\bGC\s+holders?\b|admitted\s+(?:[\w.]+\s+){0,6}?for\s+permanent\s+residen|u\.?\s?s\.?\s+persons?|protected\s+individual|asylee|refugee\b|\b8\s*u\.?\s?s\.?\s?c\.?\s*(?:sec\.?|§)?\s*1324b/i;
+
+/**
+ * "CITIZEN OR <AUTHORIZED TO WORK>" IS NOT A CITIZENSHIP DEMAND (F-664).
+ *
+ * Trane: "Be a U.S. citizen or have the legal right to work in the U.S.
+ * without requiring sponsorship now or in the future." Owens Corning: "Must be
+ * a US citizen or have the right to work in the US." The block key was taken
+ * from the first word that matched — "citizen" — and not from what the
+ * sentence demands, which is work authorization: citizenship is one way to
+ * have it. An alternative that names AUTHORIZATION removes the citizenship
+ * claim entirely; whatever else the sentence says (no sponsorship, permanent
+ * authorization) still keys the block on its own.
+ *
+ * The alternative is the phrase right after the "or", not anything later in
+ * the sentence: Red Cat's "proof of U.S. Citizenship or Permanent Residence
+ * and must not require sponsorship for export-restricted work authorization"
+ * offers permanent residence as the alternative, and the "work authorization"
+ * at its end belongs to the second demand. So the window after "or" stops at
+ * "and", a semicolon or a colon.
+ */
+//
+// The authorization has to be authorization to WORK. The ITAR list's last
+// alternative — "or be eligible to obtain the required authorizations from the
+// U.S. Department of State" (Rocket Lab, Turion, Stoke) — is an export
+// licence, and that sentence stays a U.S.-person caution.
+//
+// And the alternative is the authorization ITSELF: Diligent's "US citizen or
+// permanent resident with work authorization" offers a green card, so a
+// status named between the "or" and the authorization ends the window too.
+const CITIZEN_OR_AUTH = /\bcit(?:i|iz)[a-z]*\b[^;\n]*?\b(?:or|and\/or)\s+(?:(?!\band\b|perm(?:anent)?\.?\s+resid|green[- ]?card|\bGC\b)[^;:\n]){0,50}?\b(?:authoriz\w*\s+to\s+(?:work|be\s+employed)|eligib\w*\s+to\s+work|eligible\s+(?:workers?|individuals?)|right\s+to\s+work|work\s+authoriz\w*|work\s+permits?|legal(?:ly)?\s+(?:authoriz\w*|eligible|permitted)|permitted\s+to\s+work)/i;
+
+/**
+ * THE AGENCY IS NOT A REQUIREMENT (F-662). "United States Citizenship and
+ * Immigration Services" is the name of the office that runs Form I-9, and
+ * Stoke Space's I-9 paragraph ("Employees must comply with the United States
+ * Citizenship and Immigration Services employment verification requirements")
+ * read as a demand for citizenship. The name is removed before the
+ * citizenship patterns run; nothing else in the sentence moves.
+ */
+// "Georgia Tech prohibits citizenship status, immigration status, and national
+// origin discrimination in hiring…" — the list sits between the verb and
+// "discrimination", so the clause test (which wants them adjacent) missed it,
+// and the clause "except where such restrictions are required" read as a
+// refusal. A sentence that PROHIBITS a list of discriminations is EEO text.
+const EEO_PROHIBITS = /\bprohibits?\s+(?:[\w-]+,?\s+){0,14}?discriminat\w*/i;
+// Boeing's labelled field says the role is NOT export-controlled.
+const NOT_EXPORT_CONTROLLED = /\b(?:is\s+)?not\s+an?\s+export[- ]control(?:led)?\s+(?:position|role|job)\b/i;
+
+const IMMIGRATION_AGENCY =/\b(?:(?:the\s+)?(?:u\.?\s?s\.?|united\s+states)\s+)?citizenship\s+(?:and|&)\s+immigration\s+services?\b|\bUSCIS\b/gi;
+
+/**
+ * A FIELD HEADING STATES NOTHING (F-663). Boeing's Workday bodies are labelled
+ * fields — "Security Clearance:" on one line, its value ("This position does
+ * not require a Security Clearance.") on the next — and the heading alone was
+ * read as a clearance demand: 386 Boeing rows hidden on "Security Clearance:".
+ * A short line ending in a colon, with no word of demand in it, is a label;
+ * the value under it is read as its own sentence.
+ */
+const FIELD_HEADING = /^[\s•·*#>\-–—]*[A-Za-z][^:\n]{0,80}:[\s*]*$/;
+const DEMAND_WORD = /\b(?:must|required?|requires|requiring|need(?:s|ed)?|only|shall|ability|able|eligib\w*|obtain\w*|active|current|hold\w*|possess\w*)\b/i;
+function isFieldHeading(text) {
+  const t = String(text || '').trim();
+  return FIELD_HEADING.test(t) && t.split(/\s+/).length <= 8 && !DEMAND_WORD.test(t);
+}
+
+/**
+ * "This position does not require a Security Clearance" is the field's VALUE,
+ * and it says no (F-663). A clearance is only claimed from a clause that names
+ * one without saying it is not needed — read per clause, so "does not require
+ * a clearance at hire, but must be able to obtain a Secret clearance" still
+ * blocks on its second half.
+ */
+const CLEARANCE_NOT_NEEDED = /\b(?:do(?:es)?|will|would)\s+not\s+(?:require|need)\b|\b(?:doesn'?t|don'?t|won'?t)\s+(?:require|need)\b|\bnot\s+(?:be\s+)?(?:required|needed|necessary)\b|\bno\s+(?:[\w-]+\s+){0,3}?(?:clearances?|polygraph)\s+(?:is\s+|are\s+)?(?:required|needed|necessary|requirements?)\b|\bnot\s+an?\s+(?:[\w-]+\s+){0,2}?clearance\s+(?:position|role|job)\b/i;
+// …unless the same sentence still wants one OBTAINABLE: Eccalon's "No
+// clearance required, must be clearable" and M.C. Dean's "Eligible for a
+// security clearance (although current clearance is not required)" both ask
+// for someone who can be cleared, which takes citizenship.
+const CLEARANCE_OBTAINABLE = /\bclearable\b|\b(?:eligib\w*|able|ability)\s+(?:to\s+(?:obtain|get|receive|hold|be\s+granted)\s+|for\s+)(?:an?\s+)?(?:[\w\/-]+\s+){0,3}?clearance\b|\bobtain\w*\s+(?:an?\s+)?(?:[\w\/-]+\s+){0,3}?clearance\b/i;
+function claimsClearance(s) {
+  if (!CLEARANCE.test(s.text)) return false;
+  if (CLEARANCE_OBTAINABLE.test(s.text)) return true;
+  const naming = s.clauses.filter(c => CLEARANCE.test(c));
+  return naming.length ? naming.some(c => !CLEARANCE_NOT_NEEDED.test(c)) : !CLEARANCE_NOT_NEEDED.test(s.text);
+}
 const EXPORT_CONTROL = /\b(?:itar|ear|export[- ]control(?:led)?|export\s+administration\s+regulations)\b/i;
 /**
  * The export-control sentence that is a BLOCK, as opposed to a badge (F-312).
@@ -316,6 +419,10 @@ const EEO = /\b(?:without\s+regard\s+to|regardless\s+of\s+(?:[\w-]+,?\s+){0,3}?(
  * fixes every topic at once, which is the property the old per-phrase regexes
  * did not have.
  */
+// "does not intend to hire / will not consider / cannot employ …" (F-954).
+const REFUSE_TO_HIRE = /\b(?:not|n'?t|never|cannot|can\s?not|un-?\s?able)\b(?:\s+\w+){0,3}?\s+(?:to\s+)?(?:hire|consider|employ|accept|engage|onboard)\b/i;
+// "… (job seekers|applicants|candidates|individuals|those) who will need / require …"
+const WHO_NEED = /\b(?:who|that)\s+(?:will\s+|would\s+|may\s+|do\s+|does\s+|currently\s+|now\s+)?(?:need|require)s?\b/i;
 const NEG_CUE = /\b(?:not|n'?t|no|never|cannot|can\s?not|un-?\s?able|un-?\s?willing|without|lacks?|lacking|ineligible|declines?|declined|refus\w+|prohibit\w*|preclud\w+|exclud\w+|disqualif\w+|denies|denied|neither|nor|forgo|waive[ds]?)\b/i;
 
 /**
@@ -385,8 +492,8 @@ function sponsorshipPolarity(clause) {
 }
 
 /** Permanent/unrestricted authorization demanded — a disqualifier stated positively. */
-function requiresPermanentAuth(clause) {
-  if (!AUTH_TO_WORK.test(clause) || !PERMANENCE.test(clause)) return false;
+function requiresPermanentAuth(clause, acceptsAnyAuth = false) {
+  if (!AUTH_TO_WORK.test(clause) || !(acceptsAnyAuth ? PERMANENCE_NOT_RESIDENCE : PERMANENCE).test(clause)) return false;
   // "authorized to work in the United States" on its own is boilerplate that an
   // F-1 on OPT satisfies. Only a demand for PERMANENT authorization excludes
   // him, so the requirement framing has to be present too.
@@ -413,15 +520,19 @@ function collectClaims(text) {
   const claims = [];
   for (const s of segment(text)) {
     const sentenceIsEeo = EEO.test(s.text);
+    // The I-9 agency's name says "Citizenship" and demands nothing (F-662).
+    const personText = s.text.replace(IMMIGRATION_AGENCY, ' ');
+    // "citizen or <anyone authorized to work>" (F-664), read once per sentence.
+    const citizenOrAuth = CITIZEN.test(personText) && CITIZEN_OR_AUTH.test(personText);
 
     // — clause-scope, polarity-sensitive —
     for (const clause of s.clauses) {
       // EEO is checked per CLAUSE so a sentence that pairs boilerplate with a
       // real statement keeps the real half: "We do not discriminate …, and we
       // proudly sponsor H-1B" must still register as sponsor-friendly.
-      if (EEO.test(clause)) continue;
+      if (EEO.test(clause) || EEO_PROHIBITS.test(s.text)) continue;
 
-      if (requiresPermanentAuth(clause)) {
+      if (requiresPermanentAuth(clause, citizenOrAuth)) {
         claims.push({ topic: 'permanent_auth', polarity: 'negative', quote: s.text });
       }
       const pol = sponsorshipPolarity(clause);
@@ -447,19 +558,42 @@ function collectClaims(text) {
         claims.push({ topic: 'sponsorship', polarity: 'negative', quote: s.text });
       }
     }
+    // THE SAME REFUSAL, THE OTHER WAY ROUND (F-954). "Entegris does not intend
+    // to hire … job seekers who will need, now or in the future, Entegris
+    // sponsorship through H-1B": the refusal to hire leads, the people it
+    // refuses are those WHO NEED sponsorship, and the commas put the negation
+    // and the noun in different clauses, so neither rule above saw it.
+    if (!sentenceIsEeo && REFUSE_TO_HIRE.test(s.text) && WHO_NEED.test(s.text) && s.clauses.some((c) => AUTH_NOUN.test(c))) {
+      claims.push({ topic: 'sponsorship', polarity: 'negative', quote: s.text });
+    }
 
     // — sentence-scope, list-sensitive —
-    if (sentenceIsEeo) continue;
-    if (CLEARANCE.test(s.text)) claims.push({ topic: 'clearance', polarity: 'negative', quote: s.text });
+    // …except a U.S.-person definition, whose "protected status" is asylum or
+    // refugee status, not an EEO class. Honeywell's "candidate must be a US
+    // person which is defined as a US Citizen, a US permanent resident, or have
+    // protected status in the US under asylum or refugee status" was skipped as
+    // EEO text, and only its "US Person:" heading had been carrying the caution.
+    if (sentenceIsEeo && !US_PERSON.test(personText)) continue;
+    // A label with its value on the next line ("Security Clearance:") is not a
+    // statement; the value is read on its own (F-663).
+    if (isFieldHeading(s.text)) continue;
+    if (claimsClearance(s)) claims.push({ topic: 'clearance', polarity: 'negative', quote: s.text });
     if (EXPORT_AUTH.test(s.text)) claims.push({ topic: 'export_auth', polarity: 'negative', quote: s.text });
-    if (EXPORT_CONTROL.test(s.text)) claims.push({ topic: 'export_control', polarity: 'mention', quote: s.text });
-    if (US_PERSON.test(s.text)) {
+    if (EXPORT_CONTROL.test(s.text) && !NOT_EXPORT_CONTROLLED.test(s.text)) claims.push({ topic: 'export_control', polarity: 'mention', quote: s.text });
+    // "US citizen or authorization to work permanently for any Employer" is a
+    // qualification line with no "must" in it; the alternative it offers is
+    // PERMANENT authorization, and that is what it demands.
+    if (citizenOrAuth && PERMANENCE_NOT_RESIDENCE.test(personText) && !claims.some(c => c.topic === 'permanent_auth' && c.quote === s.text)) {
+      claims.push({ topic: 'permanent_auth', polarity: 'negative', quote: s.text });
+    }
+    if (US_PERSON.test(personText)) {
       claims.push({ topic: 'us_person', polarity: 'negative', quote: s.text });
-    } else if (CITIZEN.test(s.text)) {
+    } else if (CITIZEN.test(personText) && !citizenOrAuth) {
       // Citizen-ONLY and U.S.-person are both disqualifying for an F-1, but they
       // are different requirements and must be LABELLED apart. The alternatives
-      // listed beside "citizen" are what tell them apart.
-      claims.push({ topic: PERSON_ALT.test(s.text) ? 'us_person' : 'us_citizen', polarity: 'negative', quote: s.text });
+      // listed beside "citizen" are what tell them apart. An alternative that
+      // is work AUTHORIZATION is not a citizenship demand at all (F-664).
+      claims.push({ topic: PERSON_ALT.test(personText) ? 'us_person' : 'us_citizen', polarity: 'negative', quote: s.text });
     }
   }
   return claims;
@@ -568,6 +702,41 @@ const GENERIC_NOTES = {
  * @returns {{block: null|{key:string,reason:string,quote:string|null}, warnings: Array<{key:string,level:string,note:string,quote:string|null}>}}
  */
 export function classifyVisa(title, description, ctx = {}) {
+  const verdict = classifyRead(title, description, ctx);
+  return ctx.thin ? unscreened(verdict) : verdict;
+}
+
+/**
+ * A SHORT BODY NOBODY READ IN FULL HAS NOT BEEN SCREENED (F-627).
+ *
+ * GE HealthCare's Workday reqs were stored as their list summary; the full
+ * description, read by hand, says "We will not sponsor individuals for
+ * employment visas, now or in the future". The gate read the summary, found
+ * nothing, and the card said what it says for a posting that is silent — and a
+ * summary that happens to mention OPT could even earn the green badge. A clean
+ * verdict on a teaser is "not read", not "clean".
+ *
+ * `ctx.thin` is the caller's word that this body is under THIN_BODY and has no
+ * full read behind it (triage works it out from `enrichedAt`; see triage.mjs).
+ * What is found still counts — a teaser that says "we do not sponsor" is a
+ * refusal however short it is — but nothing clean is claimed: the green badges
+ * and the "does not mention sponsorship" note give way to one note saying the
+ * posting has not been screened. Never a block: the row stays in the deck, and
+ * enrichment reads it in full on its next pass (db.mjs `needsRead`).
+ */
+function unscreened(verdict) {
+  if (verdict.block) return verdict;
+  const warnings = verdict.warnings.filter(w => w.level !== 'good' && w.key !== 'sponsorship_unmentioned');
+  warnings.unshift({
+    key: 'sponsorship_unscreened',
+    level: 'unknown',
+    note: 'Not screened for sponsorship: only a short summary of this posting has been read, and the full description is where employers say whether they sponsor. Read the posting before counting on it.',
+    quote: null,
+  });
+  return { block: null, warnings };
+}
+
+function classifyRead(title, description, ctx = {}) {
   const text = `${title || ''}\n${description || ''}`;
   const claims = collectClaims(text);
   const warnings = [];
@@ -702,12 +871,17 @@ function exportWarnings(of, warnings, notes) {
   const exportAuth = of('export_auth', 'negative');
   const exportMention = of('export_control', 'mention');
 
+  // `quotes`: every status sentence, not only the one shown. picks.mjs
+  // exportBar excuses a licence-alternative sentence, and a hard "must be a
+  // U.S. person" further down must still bar (F-1045 review).
+  const quotes = [...usPerson, ...exportAuth].map((c) => c.quote).filter(Boolean);
   if (usPerson.length) {
     warnings.push({
       key: 'us_person',
       level: 'caution',
       note: notes.us_person,
       quote: usPerson[0].quote || null,
+      quotes,
     });
   } else if (exportAuth.length) {
     warnings.push({
@@ -715,6 +889,7 @@ function exportWarnings(of, warnings, notes) {
       level: 'caution',
       note: notes.export_authorization,
       quote: exportAuth[0].quote || null,
+      quotes,
     });
   } else if (exportMention.length) {
     warnings.push({

@@ -121,6 +121,54 @@ export function platformOf(text) {
   return '';
 }
 
+// A board no provider in providers/ reads (UKG, ADP Workforce Now and Paylocity
+// are read since F-705/F-720), by the HOST of a URL. A tenant host, never the
+// vendor's own site: a "powered by" footer links www.<vendor>.com. Radancy and
+// the paycor.com marketing site are left out (they name a vendor, not a board).
+const SECOND_BOARD = [
+  ['adp-myjobs', /^myjobs\.adp\.com$/],
+  // Paycom's boards are on www.paycomonline.net itself: its /ats/ path decides.
+  ['paycom', /(^|\.)paycomonline\.net$/, /\/ats\//i],
+  ['dayforce', /\.dayforcehcm\.com$/],
+  ['paycor', /(^|\.)recruitingbypaycor\.com$|\.newtonsoftware\.com$/],
+  ['taleo', /\.taleo\.net$/],
+  ['brassring', /\.brassring\.com$/],
+  ['avature', /\.avature\.net$/],
+  ['eightfold', /\.eightfold\.ai$/],
+  ['jazzhr', /\.applytojob\.com$/],
+  ['clearcompany', /\.clearcompany\.com$/],
+  ['hirebridge', /\.hirebridge\.com$/],
+  ['cornerstone', /\.csod\.com$/],
+  ['successfactors-legacy', /^career\d*\.successfactors\.(?:com|eu)$/],
+];
+const NOT_A_TENANT = /^(?:www|info|blog|help|support|status|docs)\./;
+
+/**
+ * A SECOND BOARD NOTHING HERE READS, linked from a careers page (2026-11-07).
+ * Bastian Solutions' page links the Toyota Automated Logistics Workday board it
+ * shares (none of its Greenfield postings are on it) AND an ADP MyJobs board.
+ * The readable one made it "tracked", so the LinkedIn sweep never looked.
+ *
+ * Only what the page LINKS to or embeds as a frame: an <a href> or an
+ * <iframe src>. A script, a stylesheet, or a vendor's name in the text is not
+ * a board (First Mate's review: a "powered by Paycor" footer script would have
+ * made a shared-board employer partial).
+ */
+export function unreadableBoardIn(text) {
+  const s = String(text || '');
+  const urls = [...s.matchAll(/<(?:a|iframe)\b[^>]*?\b(?:href|src)\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1]);
+  for (const u of urls) {
+    let url;
+    try { url = new URL(u.replace(/&amp;/g, '&'), 'https://example.invalid/'); } catch { continue; }
+    const host = url.hostname.toLowerCase();
+    for (const [k, re, path] of SECOND_BOARD) {
+      if (!re.test(host)) continue;
+      if (path ? path.test(url.pathname) : !NOT_A_TENANT.test(host)) return k;
+    }
+  }
+  return '';
+}
+
 const ctx = makeHttpCtx();
 
 /** The iCIMS/Jibe careers-home app: `<origin>/api/jobs`. */

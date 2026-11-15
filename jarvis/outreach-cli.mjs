@@ -15,6 +15,8 @@
  *   node jarvis/outreach-cli.mjs --job <id> --name "..." --channel note
  *   node jarvis/outreach-cli.mjs --sent <contactId> | --replied <contactId>
  *   node jarvis/outreach-cli.mjs --stop <contactId>    # do not contact, permanently
+ *   node jarvis/outreach-cli.mjs --retire <contactId> --why "<reason>"   # off the open list, reversibly
+ *   node jarvis/outreach-cli.mjs --unretire <contactId>                  # …and back
  *
  * NOTHING HERE SENDS ANYTHING. It prints a message for him to send.
  */
@@ -23,6 +25,7 @@ import { targetSpec, writeOutreach, emailPattern, domainFrom, candidateEmail, CH
 import {
   canContact, saveContact, getContact, forJob, allContacts, contactId,
   markSent, markReplied, markDoNotContact, dueFollowUps, outreachStats,
+  retireContact, unretireContact,
 } from './contacts.mjs';
 import { guardArgs } from './cli.mjs';
 
@@ -40,12 +43,15 @@ const USAGE = `
     --sent <contactId>    you sent it (or, the second time, followed up)
     --replied <contactId> they replied — outreach stops there
     --stop <contactId>    they asked not to be contacted. Permanent.
+    --retire <contactId>  take a lead off the open list (needs --why); keeps the row
+    --why <reason>        why, kept on the row
+    --unretire <contactId>  put a retired lead back where it was
     --help, -h
 `;
 guardArgs({
   usage: USAGE,
-  flags: ['--job', '--name', '--title', '--persona', '--channel', '--request', '--sent', '--replied', '--stop'],
-  valued: ['--job', '--name', '--title', '--persona', '--channel', '--request', '--sent', '--replied', '--stop'],
+  flags: ['--job', '--name', '--title', '--persona', '--channel', '--request', '--sent', '--replied', '--stop', '--retire', '--unretire', '--why'],
+  valued: ['--job', '--name', '--title', '--persona', '--channel', '--request', '--sent', '--replied', '--stop', '--retire', '--unretire', '--why'],
 });
 
 const ARGV = process.argv.slice(2);
@@ -74,6 +80,22 @@ for (const [flag, fn, said] of [['sent', markSent, 'sent'], ['replied', markRepl
   const done = fn(id);
   if (!done) { console.error(`No contact ${id}. Run with no arguments to see the list.`); process.exit(1); }
   console.log(`${done.name} at ${done.company}: ${said}${done.status === 'followed_up' ? ' (that was the follow-up — this one is finished now)' : ''}`);
+  process.exit(0);
+}
+
+// ── retire / unretire (F-977): reversible, never do-not-contact ─────
+if (arg('retire')) {
+  const why = arg('why').trim();
+  if (!why) { console.error('--retire needs --why "<reason>"; the reason is what makes it undoable later.'); process.exit(1); }
+  const done = retireContact(arg('retire'), { why });
+  if (!done) { console.error(`No open contact ${arg('retire')} (unknown, or marked do not contact).`); process.exit(1); }
+  console.log(`${done.name} at ${done.company}: retired (${done.retired_reason}). Undo: node jarvis/outreach-cli.mjs --unretire ${done.id}`);
+  process.exit(0);
+}
+if (arg('unretire')) {
+  const done = unretireContact(arg('unretire'));
+  if (!done) { console.error(`No retired contact ${arg('unretire')}.`); process.exit(1); }
+  console.log(`${done.name} at ${done.company}: back as ${done.status}`);
   process.exit(0);
 }
 

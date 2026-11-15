@@ -386,6 +386,24 @@ export function derivedPlan(pool) {
   };
 }
 
+// THE CATCH-ALL ON HIS PORTFOLIO AND HANDED OUT AT FAIRS (2026-10-27): the
+// all-rounder with no clubs, so Acme Steel and Makerspace get the room ("skip the club
+// stuff and make space for acme and makerspace"; "only no rover for the portfolio
+// version, for job applications dont ban it"); the fixture and the vision model
+// said as one without the Neuro-T name ("no one uses neurocle"); senior design
+// in place of the piston class project. Built as the total-experience lane's
+// "Portfolio" variant; applications never use it.
+PLANS['total-experience-portfolio'] = {
+  ...PLANS['total-experience'],
+  experience: [
+    { org: 'amat', bullets: ['vision-system', 'robodk', 'cobot-rack', 'amr', 'iiot'] },
+    { org: 'acme', bullets: ['robotic-line', 'coil-savings', 'plant-layout', 'packaging'] },
+    { org: 'makerspace', bullets: ['fabrication', 'production', 'supervise'] },
+  ],
+  projects: ['robotic-arm', 'senior-design'],
+  reserve: ['acme.docs'],
+};
+
 /**
  * The plan a family is built from. His preset reads the hand-written PLANS,
  * exactly as before; any other preset reads the pool's own `plans`, or the
@@ -402,9 +420,9 @@ export function planFor(familyKey, pool, presetKey = person.preset) {
  * Throws on any key the pool does not define, so a typo can never silently drop
  * a bullet (or, worse, a whole job) off a resume that then goes out.
  */
-export function buildSpec(familyKey, pool = loadPool()) {
+export function buildSpec(familyKey, pool = loadPool(), planKey = null) {
   const family = familyByKey(familyKey) || fail(`unknown resume family "${familyKey}" — known: ${ALL_FAMILIES.map(f => f.key).join(', ')}`);
-  const plan = planFor(family.key, pool) || fail(`no content plan for family "${family.key}" — add one to PLANS`);
+  const plan = (planKey ? PLANS[planKey] : planFor(family.key, pool)) || fail(`no content plan for family "${family.key}" — add one to PLANS`);
 
   const edu = pool.education;
   const known = new Set(edu.coursework || []);
@@ -695,6 +713,14 @@ export const VARIANTS = [
       // page's ability to tidy itself.
       return out;
     },
+  },
+  {
+    // The no-clubs catch-all for his portfolio and fairs (2026-10-27).
+    key: 'portfolio',
+    label: 'Portfolio',
+    only: 'total-experience',
+    what: 'the catch-all on his portfolio and handed out at fairs: no clubs',
+    transform: (spec, { pool }) => buildSpec('total-experience', pool, 'total-experience-portfolio'),
   },
   {
     key: 'breadth',

@@ -39,7 +39,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { outreachDb, outreachDbPath } from './outreach-db.mjs';
-import { allContacts, getContact, markSent, markReplied } from './contacts.mjs';
+import { allContacts, getContact, markSent, markReplied, markConnected } from './contacts.mjs';
 import { leadPeople } from './leads.mjs';
 
 const dbFile = () => outreachDbPath();
@@ -332,7 +332,7 @@ export function recordEvents(events, { source, dbPath = dbFile(), now = new Date
   const wroteTo = new Set(events.filter((e) => SENT.has(e.kind)).map((e) => personKey(e.name)));
   for (const r of h.prepare("SELECT DISTINCT person FROM li_events WHERE kind IN ('invite_sent','message_sent')").all()) wroteTo.add(r.person);
   const since = now.getTime() - UNTIED_WINDOW_DAYS * 86400e3;
-  const out = { added: 0, tied: 0, sent: [], replied: [] };
+  const out = { added: 0, tied: 0, sent: [], replied: [], connected: [] };
   for (const e of [...events].sort((a, b) => String(a.at).localeCompare(String(b.at)))) {
     const person = personKey(e.name);
     if (!person || !e.at) continue;
@@ -359,6 +359,9 @@ export function recordEvents(events, { source, dbPath = dbFile(), now = new Date
       if (!c || c.do_not_contact) continue;
       if (SENT.has(e.kind) && !c.sent_at) { markSent(c.id, { at: e.at }); out.sent.push(c.name); }
       if (e.kind === 'message_received' && !c.replied_at && (!c.sent_at || e.at >= c.sent_at)) { markReplied(c.id, { at: e.at }); out.replied.push(c.name); }
+      // CONNECT FIRST (2026-10-26): he invited them with a note; their accept
+      // is the go for the saved message, which is free now (serve.mjs schedules it).
+      if (e.kind === 'invite_accepted' && c.invited_at && !c.connected_at && !c.sent_at) { markConnected(c.id, { at: e.at }); out.connected.push({ id: c.id, name: c.name, at: e.at }); }
     }
   }
   return out;

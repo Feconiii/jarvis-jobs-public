@@ -630,6 +630,60 @@ export function postingMetaFrom(ats, json, parts = {}) {
 }
 
 /**
+ * THE DIRECT RUNG, for postings no API answers for (F-762).
+ *
+ * Joby Aviation's tracked iCIMS board answers HTTP 410 for every posting, and
+ * Symbotic's own careers pages 404 their pulled requisitions — but those rows
+ * are `source: browser-assist`, no ATS API maps them, and the dashboard's sweep
+ * runs without a browser, so nothing ever asked. One plain GET answers it.
+ *
+ * What counts, and what never does:
+ *   410            gone — the server saying, on purpose, that this resource is gone
+ *   404            gone ONLY when another posting of the same URL shape on that host answered
+ *                  200 (`hostAnswers`, decided by the caller): the address pattern still works,
+ *                  so the 404 is about this requisition. Symbotic's own site 404s R6971 while
+ *                  its Workday board lists it — a lone 404 is never enough
+ *   403, 429, 5xx  nothing, and the caller stops asking that host for the run: Tesla
+ *                  answers every server request 403 and its live postings must never be
+ *                  retired from that (the export-wide rule — a false "expired" is the
+ *                  expensive error)
+ *   200, 3xx       nothing (a soft-404 page is indistinguishable from a live one here)
+ *
+ * @param {number} status
+ * @param {{hostAnswers?: boolean}} [ctx]
+ * @returns {{result:'expired', code:string, reason:string} | {refused:true} | null}
+ */
+export function classifyDirectStatus(status, { hostAnswers = false } = {}) {
+  if (status === 410) return { result: 'expired', code: 'direct_http_gone', status: 410, reason: 'the posting URL answers HTTP 410 (gone)' };
+  if (status === 404 && hostAnswers) return { result: 'expired', code: 'direct_http_gone', status: 404, reason: 'the posting URL answers HTTP 404 while postings at the same address pattern answer 200' };
+  if (status === 403 || status === 429 || status === 401 || status >= 500 || status === 0) return { refused: true };
+  return null;
+}
+
+/** One plain GET of a posting URL: its HTTP status, or 0 when it never answered. */
+export async function directStatus(url, { fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
+  let u;
+  try { u = new URL(url); } catch { return 0; }
+  if (u.protocol !== 'https:') return 0;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(u.href, {
+      method: 'GET',
+      headers: { 'user-agent': 'Mozilla/5.0 career-ops-liveness/1.0', accept: 'text/html' },
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    try { await res.body?.cancel?.(); } catch { /* nothing to read */ }
+    return res.status;
+  } catch {
+    return 0;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Is this posting DEFINITELY gone? Cheap, and conservative by design.
  *
  * `/api/apply` used to open a tab and spend up to two minutes tailoring a

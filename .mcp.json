@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "linkedin": {
+      "command": "uvx",
+      "args": [
+        "--with",
+        "fastmcp>=3.4.4,<4",
+        "mcp-server-linkedin==4.25.1",
+        "--no-auto-import",
+        "--browser-idle-timeout",
+        "300",
+        "--log-level",
+        "WARNING"
+      ],
+      "env": {
+        "UV_HTTP_TIMEOUT": "300"
+      }
+    }
+  }
+}

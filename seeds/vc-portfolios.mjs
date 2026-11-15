@@ -102,6 +102,7 @@ async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
  * @property {number}   [teamSize]      Headcount, when published.
  * @property {string}   [status]        'Active' | 'Acquired' | 'Inactive' | 'Public'.
  * @property {string}   [oneLiner]      One-sentence description.
+ * @property {string}   [overview]      a16z's blurb; deliberately not read by the hardware filter.
  * @property {string}   [stage]         Funding stage label, when published.
  * @property {boolean}  [isHiring]      Whether the company says it is hiring (yc-oss only).
  */
@@ -227,6 +228,43 @@ export function parseA16zPayload(html) {
   /** @type {Map<string, SeedCompany>} */
   const seen = new Map();
 
+  // Strategy 0 (F-417, 2026-10-19): the page has carried the WHOLE portfolio as
+  // data since its restyle — 875 companies, twice. The `data-companies`
+  // attribute on the portfolio grid is the richer copy (status, a16z's own
+  // tags such as "manufacturing & robotics", verticals); the
+  // `window.a16z_portfolio_companies` array is the fallback (name, website,
+  // overview, exit fields). Either one alone is the full list.
+  for (const item of a16zEmbeddedCompanies(html)) {
+    const name = String(item.name || item.post_title || item.title || '').trim();
+    if (!name) continue;
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!slug || !SLUG_RE.test(slug) || seen.has(slug)) continue;
+    const url = [item.external_url, item.url, item.company_url, item.web]
+      .find(u => typeof u === 'string' && /^https?:\/\//.test(u.trim()))?.trim() || '';
+    /** @type {SeedCompany} */
+    const entry = { name, slug, url, source: 'a16z' };
+    const status = a16zStatus(item);
+    if (status) entry.status = status;
+    // Drop the filter keys ("stg_venture", "sts_active"); keep the words.
+    const tags = (Array.isArray(item.tags) ? item.tags : [])
+      .filter(t => typeof t === 'string' && t.trim() && !/^[a-z]+_/.test(t))
+      .map(t => t.trim());
+    if (tags.length) entry.tags = [...new Set(tags)];
+    const industries = String(item.verticals || '').split(';').map(s => s.trim()).filter(Boolean);
+    if (industries.length) entry.industries = industries;
+    // Kept as `overview`, NOT `oneLiner`: the hardware seed filter reads
+    // oneLiner by substring, and a16z's blurbs are marketing copy — "data
+    // warehouse", "workspace", "autonomous AI agents" passed Fivetran, Envoy
+    // and two health-AI startups as hardware. a16z's own sector tags
+    // ("manufacturing & robotics", "aviation & space") are the signal.
+    const overview = String(item.overview || item.website_description || '').replace(/\s+/g, ' ').trim();
+    if (overview) entry.overview = overview;
+    const stage = Array.isArray(item.stages) ? item.stages.find(s => typeof s === 'string' && s.trim()) : '';
+    if (stage) entry.stage = stage.trim();
+    seen.set(slug, entry);
+  }
+  if (seen.size) return [...seen.values()];
+
   // Strategy 1: JSON-LD embedded in the page (structured data block).
   // a16z sometimes embeds schema.org/Organization blocks — extract if present.
   const jsonLdMatches = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
@@ -277,6 +315,56 @@ export function parseA16zPayload(html) {
   }
 
   return [...seen.values()];
+}
+
+/** HTML attribute text back to the characters it encodes. */
+function decodeEntities(s) {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * The company objects a16z's portfolio page embeds, from the `data-companies`
+ * attribute if it parses, else from `window.a16z_portfolio_companies`.
+ * @param {string} html
+ * @returns {any[]}
+ */
+function a16zEmbeddedCompanies(html) {
+  const attr = html.match(/\sdata-companies=(?:"([^"]*)"|'([^']*)')/);
+  if (attr) {
+    try {
+      const list = JSON.parse(decodeEntities(attr[1] ?? attr[2]));
+      if (Array.isArray(list) && list.length) return list;
+    } catch { /* fall through to the script array */ }
+  }
+  const at = html.indexOf('window.a16z_portfolio_companies');
+  if (at >= 0) {
+    const start = html.indexOf('[', at);
+    const end = html.indexOf('</script>', start);
+    if (start >= 0 && end > start) {
+      try {
+        const list = JSON.parse(html.slice(start, end).trim().replace(/;\s*$/, ''));
+        if (Array.isArray(list)) return list;
+      } catch { /* nothing readable */ }
+    }
+  }
+  return [];
+}
+
+/**
+ * 'Active' or 'Exited'. The attribute copy says it outright ("Active",
+ * "Exits", or "Exits;Active" for a partial exit, which is still a company);
+ * the script copy only has the exit fields.
+ */
+function a16zStatus(item) {
+  const s = String(item.status || item.website_current_status || '');
+  if (s) return /active/i.test(s) ? 'Active' : 'Exited';
+  if (item.acquirer || item.ticker_symbol || item.exit_date) return 'Exited';
+  return 'Active';
 }
 
 // ── Generic pure parser (entry point for test-all.mjs) ───────────────

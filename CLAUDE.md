@@ -89,6 +89,13 @@ without saying why is a bug.
 **A posting is dead only when the checker says so:** `npm run liveness -- <url>`.
 Never decide from a search snippet.
 
+**Nothing is sent to a person without their OK.** Outreach drafts are theirs to
+read and change. Never start a send session, schedule a send
+(`jarvis/send-outreach.mjs`) or press Send for them unless they said to send
+those exact messages. The LinkedIn MCP is for reading; its guard
+(`jarvis/linkedin-mcp-guard.mjs`, attached in `.claude/settings.json`) refuses
+anything that writes, and you never remove or work around it.
+
 ## What each part reads
 
 - `config/profile.yml` → `jarvis/targeting.mjs` → `person` (name, school,
@@ -115,6 +122,11 @@ npm run jarvis:discover-linkedin -- --write         # find hiring companies in t
 npm run jarvis:enrich        # pull full descriptions
 npm run jarvis:rescore       # after editing preferences.md
 npm run jarvis:curate        # read new postings and file the best to their inbox
+npm run jarvis:screen        # screen the whole library against their hard rules, no model
+npm run jarvis:universe -- daily   # the coverage ledger's daily pass (the dashboard runs it)
+npm run jarvis:import-simplify     # Simplify's new-grad listings in their field
+npm run jarvis:lca -- <file.xlsx>  # import a DOL LCA file they downloaded (H-1B record)
+npm run jarvis:outreach      # outreach leads and drafts (sending is theirs)
 npm run jarvis:resumes       # build resume PDFs
 npm run jarvis:apply         # fill an application in the browser (never submits)
 npm run liveness -- <url>    # is this posting still open

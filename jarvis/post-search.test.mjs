@@ -70,3 +70,36 @@ test('a CAPTCHA stops every search after it', async () => {
   assert.equal(r.stopped, true);
   assert.equal(cdp.sent.filter((s) => s.method === 'Target.createTarget').length, 1);
 });
+
+test('once per company: new hires announcing the team they joined (F-783, Chris Moreno)', async () => {
+  const { companySearches } = await import('./post-search.mjs');
+  const q = companySearches('OpenAI');
+  assert.equal(q.length, 2);
+  assert.ok(q.every((s) => s.startsWith('site:linkedin.com/posts "joined OpenAI"')));
+  assert.ok(q.some((s) => s.includes('"open roles"')));
+});
+
+// 2026-10-24: titles outside Amazon's "Role, Team" shape searched as one
+// quoted phrase holding the grad year, the degree and the city.
+test('grad years, degrees and the posting\'s place are not part of the role', () => {
+  assert.equal(titleParts('Semiconductor Manufacturing Engineer 2027 New College Graduate Essex Junction Vermont United States Of America', 'Essex Junction, Vermont, United States').role, 'Semiconductor Manufacturing Engineer');
+  assert.equal(titleParts('Manufacturing Engineer I New College Grad Bachelor S Austin Tx', 'Austin, TX').role, 'Manufacturing Engineer');
+  assert.equal(titleParts('Plainview Mechanical Engineer NY', 'Plainview, NY').role, 'Mechanical Engineer');
+  assert.deepEqual(titleParts('Manufacturing Engineer (Wayne (EPCO), NJ, US)', 'Wayne, NJ'), { role: 'Manufacturing Engineer', team: '', short: '', acronyms: [] });
+});
+
+test('a spaced dash names the team too; a comma inside it keeps the last part', () => {
+  assert.deepEqual(titleParts('Mechanical Engineer - Optical Systems (Miami, FL)', 'Miami, FL'), { role: 'Mechanical Engineer', team: 'Optical Systems', short: 'Optical Systems', acronyms: [] });
+  const h = titleParts('Hardware Operations Engineer - Robotics, Real-World Test Lab');
+  assert.equal(h.role, 'Hardware Operations Engineer');
+  assert.equal(h.short, 'Real-World Test Lab');
+});
+
+test('every search names the company unless the team name is distinctive on its own', () => {
+  const [robot] = clusters([{ id: 'r', title: 'Manufacturing Engineer, Robot' }]);
+  assert.ok(searches('Capstan Medical', robot).every((s) => s.includes('"Capstan Medical"')));
+  const [plain] = clusters([{ id: 'p', title: 'Mechanical Engineer' }]);
+  const q = searches('Genesis', plain);
+  assert.ok(q.every((s) => s.includes('"Genesis"')), 'never "Mechanical Engineer" "my team" alone');
+  assert.equal(q.length, 2);
+});

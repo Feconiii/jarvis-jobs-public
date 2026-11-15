@@ -26,7 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guardArgs } from './cli.mjs';
 import { person } from './targeting.mjs';
-import { fillScript, attachScript, fillableContacts, peopleFor, BRIDGE_LABEL } from './linkedin-fill.mjs';
+import { fillScript, attachScript, fillableContacts, peopleFor, BRIDGE_LABEL, PAGE } from './linkedin-fill.mjs';
 
 const PORT = Number(process.env.OPERA_DEBUG_PORT || 9222);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -59,8 +59,8 @@ async function run(cdp, sessionId, script) {
   return r.result?.value;
 }
 
-export async function fillOne(cdp, p, log = console.log, opened = []) {
-  const { targetId } = await cdp.send('Target.createTarget', { url: p.profile, background: true });
+export async function fillOne(cdp, p, log = console.log, opened = [], { background = true } = {}) {
+  const { targetId } = await cdp.send('Target.createTarget', { url: p.profile, background });
   opened.push({ targetId, name: p.name });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   // A background tab is not focused: LinkedIn's editor and the paste need a
@@ -97,7 +97,7 @@ export async function fillOne(cdp, p, log = console.log, opened = []) {
  * "Use 1 of N InMail credits". The compose page's address does not tell.
  */
 async function creditLine(cdp, sessionId) {
-  const r = await cdp.send('Runtime.evaluate', { returnByValue: true, expression: `(() => { const D = [document, ...[...document.querySelectorAll('iframe')].map((f) => { try { return f.contentDocument; } catch { return null; } }).filter(Boolean)]; const R = []; for (const d of D) { const s = d.querySelector('#interop-outlet')?.shadowRoot; if (s) R.push(s.textContent || ''); R.push(d.body?.innerText || ''); } const t = R.join(' '); const m = t.match(/Use \\d+ of \\d+ InMail credits?/i); return m ? 'InMail: ' + m[0] : /Free message/i.test(t) ? 'free message' : ''; })()` }, sessionId).catch(() => null);
+  const r = await cdp.send('Runtime.evaluate', { returnByValue: true, expression: `(${PAGE.creditLine})()` }, sessionId).catch(() => null);
   return r?.result?.value || '';
 }
 
@@ -179,6 +179,106 @@ export async function readBack(cdp, opened) {
   return lines;
 }
 
+/**
+ * SEND SESSION (2026-10-23, his words: "its annoying to leave messages sitting
+ * overnight its just really fragile"). Filled tabs died to reloads, memory
+ * pressure and restarts. A message now waits in the outreach table (text,
+ * subject, which resume) and is filled only when he sits down to send: all of
+ * them at once, one tab each, so he can look them over and send in a row. Each
+ * tab is watched; once its box is empty and the message shows in the thread,
+ * the contact is marked sent and the tab closes. Nothing here can press Send.
+ * The desktop shortcut "Send outreach" (send-outreach.ps1) opens Opera with
+ * its debugging port and runs this.
+ */
+
+/** A few long lines of the draft, to recognise it in the thread after he sends. */
+export const draftMarks = PAGE.draftMarks;
+
+/**
+ * What the tab shows: is the draft still in the box, and is it in the thread
+ * (counted outside the box). Both at once means it went out in an earlier
+ * session that was never marked: he must not send it twice.
+ */
+export const sentState = PAGE.sentState;
+
+/** Drafts older than this come up only when he names the person. */
+export const FRESH_DAYS = 21;
+export function sessionRows(rows, only = [], now = Date.now()) {
+  if (only.length) return { rows, stale: [] };
+  const fresh = (c) => now - Date.parse(c.created_at || 0) <= FRESH_DAYS * 86400e3;
+  return { rows: rows.filter(fresh), stale: rows.filter((c) => !fresh(c)) };
+}
+
+export const SENT_CHECK = (marks) => `(${PAGE.sentCheck})(${JSON.stringify(marks)})`;
+
+export async function waitForSend(cdp, targetId, marks, { timeoutMs = 15 * 60e3, everyMs = 2000 } = {}) {
+  const end = Date.now() + timeoutMs;
+  let cleared = 0;
+  let warned = false;
+  while (Date.now() < end) {
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    if (!targetInfos.some((t) => t.targetId === targetId)) return 'closed';
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true }).catch(() => ({}));
+    if (sessionId) {
+      const r = await cdp.send('Runtime.evaluate', { expression: SENT_CHECK(marks), returnByValue: true }, sessionId).catch(() => null);
+      await cdp.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      const state = r?.result?.value ? sentState(r.result.value) : 'waiting';
+      if (state === 'sent') return 'sent';
+      if (state === 'already' && !warned) {
+        warned = true;
+        console.log('  CAREFUL: this text is already in your conversation with them. If it went out before, do NOT send it again: close the tab and mark it sent on the Outreach tab.');
+      }
+      // Box emptied but the text is not in the thread: give LinkedIn a few
+      // seconds to draw it, then call it unclear rather than guess.
+      if (state === 'cleared' && ++cleared >= 8) return 'cleared';
+      if (state !== 'cleared') cleared = 0;
+    }
+    await sleep(everyMs);
+  }
+  return 'timeout';
+}
+
+// His workflow (2026-10-23): "i should go over see all tabs are up take
+// quicklook then send". Every message is filled first, each in its own tab;
+// then every tab is watched at once and closes itself once its message is sent.
+async function sendSession(cdp, people) {
+  const { markSent } = await import('./contacts.mjs');
+  const ready = [];
+  let failed = 0;
+  for (const [i, p] of people.entries()) {
+    const opened = [];
+    const out = await fillOne(cdp, p, () => {}, opened).catch((e) => `${p.name}: ERROR ${e.message}`);
+    const tab = opened[0];
+    if (/ATTACHED: /.test(out)) { ready.push({ p, tab }); console.log(`  ${i + 1}/${people.length} ${p.name}: ready`); continue; }
+    failed++;
+    console.log(`  ${i + 1}/${people.length} ${out}  (skipped; still saved)`);
+    if (tab) await cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => {});
+  }
+  if (!ready.length) { console.log('\nNothing filled.'); return; }
+  await cdp.send('Target.activateTarget', { targetId: ready[0].tab.targetId }).catch(() => {});
+  console.log(`\nALL ${ready.length} TABS ARE UP in Opera. Look each over and press Send; each tab closes itself once sent. Close a tab to skip it.`);
+  let sent = 0;
+  const left = [];
+  await Promise.all(ready.map(async ({ p, tab }) => {
+    const r = await waitForSend(cdp, tab.targetId, draftMarks(p.message), { timeoutMs: 45 * 60e3, everyMs: 3000 });
+    if (r === 'sent') {
+      markSent(p.id);
+      sent++;
+      console.log(`  SENT ${p.name} (${sent}/${ready.length}), marked`);
+      await sleep(1500);
+      await cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => {});
+      return;
+    }
+    left.push(p.name);
+    console.log({
+      closed: `  ${p.name}: tab closed without sending; still saved for next time`,
+      cleared: `  ${p.name}: box emptied but the message is not in the thread; NOT marked (mark it on the Outreach tab if you sent it)`,
+      timeout: `  ${p.name}: not sent within 45 minutes; tab left open, still saved as unsent`,
+    }[r]);
+  }));
+  console.log(`\nDone: ${sent} sent and marked${left.length ? ` · still waiting: ${left.join(', ')}` : ''}${failed ? ` · ${failed} could not be filled` : ''}.`);
+}
+
 /** A pop-up compose on the profile is a free message; the full page is an InMail (a credit). */
 async function kindOf(cdp, targetId) {
   const { targetInfos } = await cdp.send('Target.getTargets');
@@ -189,7 +289,7 @@ async function kindOf(cdp, targetId) {
 }
 
 async function main() {
-  guardArgs({ usage: 'usage: node jarvis/opera-fill.mjs --name <a,b> [--subject <text> | "<first>=<subject>|…"]  |  --credits <profile url,…>', flags: ['--name', '--subject', '--credits'], valued: ['--name', '--subject', '--credits'] });
+  guardArgs({ usage: 'usage: node jarvis/opera-fill.mjs --send [--name <a,b>]  |  --name <a,b> [--subject <text> | "<first>=<subject>|…"]  |  --credits <profile url,…>', flags: ['--name', '--subject', '--credits', '--send'], valued: ['--name', '--subject', '--credits'] });
   const args = process.argv.slice(2);
   const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : ''; };
   if (args.includes('--credits')) {
@@ -202,6 +302,19 @@ async function main() {
     return;
   }
   const only = opt('--name').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
+  if (args.includes('--send')) {
+    // Running it IS his word: he is at the keyboard to press Send on each one.
+    const { rows, stale } = sessionRows(fillableContacts(only), only);
+    if (stale.length) console.log(`Left out, saved more than ${FRESH_DAYS} days ago (name them with --name to include): ${stale.map((c) => `${c.name} (${c.company})`).join(', ')}`);
+    const people = await peopleFor(rows, opt('--subject'));
+    if (!people.length) { console.log('Nothing waiting: no saved, unsent message with a LinkedIn profile.'); return; }
+    const cdp = await connect().catch((e) => { console.log(e.message); process.exitCode = 1; return null; });
+    if (!cdp) return;
+    console.log(`${cdp.browser} · filling ${people.length}: ${people.map((p) => p.name).join(', ')}`);
+    await sendSession(cdp, people);
+    cdp.close();
+    return;
+  }
   if (!only.length) { console.log('Name the people (--name a,b): this fills only on his word, for named people.'); process.exitCode = 1; return; }
   const people = await peopleFor(fillableContacts(only), opt('--subject'));
   if (!people.length) { console.log('Nothing to fill: no written, unsent message for those names.'); return; }

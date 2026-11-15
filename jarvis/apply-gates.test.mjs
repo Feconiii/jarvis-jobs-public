@@ -22,7 +22,7 @@
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { APPLY_PATH_RE, APPLY_TEXT_RE, bouncedToRoot, SITE_FURNITURE_SRC, DEAD_POSTING_RE, isResumeField, chooseOption, CERT_RE, CERT_NOT_RE } from './apply/_form.mjs';
+import { APPLY_PATH_RE, APPLY_TEXT_RE, bouncedToRoot, SITE_FURNITURE_SRC, DEAD_POSTING_RE, isResumeField, chooseOption, CERT_RE, CERT_NOT_RE, resolveLabel as driverLabel, typedAnswer } from './apply/_form.mjs';
 import { wdValue } from './apply/_workday-keys.mjs';
 import { resolveLabel, tidyLabel } from './apply/_answers.mjs';
 import { planForm, formatForType, fitToLength } from './apply-plan.mjs';
@@ -205,6 +205,11 @@ console.log('\n🧪 the resume slot is decided ONE way, by both engines');
     isResumeField({ label: 'Resume', name: 'resume' }), true);
   ok('an unlabelled file input still counts',
     isResumeField({ label: '', name: '' }), true);
+  // F-1013 #25: …unless the words beside it name another document.
+  ok('an unlabelled slot under "Transcript (optional)" is not the resume\'s',
+    isResumeField({ label: '', name: '', id: 'file-input-2', near: 'Transcript (optional)' }), false);
+  ok('an unlabelled slot under "Portfolio" is not the resume\'s',
+    isResumeField({ label: '', name: '', near: 'Portfolio or work samples' }), false);
 }
 
 // A profile carrying a skills list, for the Workday multi-select check.
@@ -261,17 +266,32 @@ console.log('\n🧪 NEITHER ENGINE ANSWERS A QUESTION THE OTHER WOULD NOT');
   let drift = 0;
   for (const label of LABELS) {
     const a = planForm([{ label, type: 'text' }], DIFF_PROFILE).actions[0];
-    const r = resolveLabel(label, DIFF_PROFILE);
+    const r = driverLabel(label, DIFF_PROFILE);   // the driver's own wrapper, as it types (F-1014)
     const planned = a.action === 'fill' ? String(a.value) : null;
     // The driver reads rules through apply/_form.mjs, which takes the first
     // alternative when it has no options — compare that, not the raw list.
-    const resolved = r.kind === 'answer' ? String(Array.isArray(r.value) ? r.value[0] : r.value) : null;
+    const resolved = r.kind === 'answer' ? String(typedAnswer(r)) : null;   // what the driver types into this text box
     if (planned !== resolved) {
       drift += 1;
       console.log(`  ✗ ${label.slice(0, 60)}\n      planner ${JSON.stringify(planned)} vs driver ${JSON.stringify(resolved)}`);
     }
   }
   ok('every answer the planner gives, the driver gives too', drift, 0);
+}
+
+console.log('\n🧪 a sponsorship MENU still gets his own row in both engines (F-1014 review)');
+{
+  // The driver asks without options and picks from the menu afterwards, so the
+  // text-box form ("Yes") must never be what reaches chooseOption: on
+  // [Yes, now | Yes, but not until the future | No] it could take "Yes, now".
+  const label = 'Will you now or in the future require sponsorship for employment visa status?';
+  const options = ['Yes, I will need sponsorship support now', 'Yes, but not until the future', 'No'];
+  const r = driverLabel(label, DIFF_PROFILE);
+  const driverPick = options[chooseOption(r.value, options)] ?? null;
+  const a = planForm([{ label, type: 'select', options }], DIFF_PROFILE).actions[0];
+  ok('the driver picks his row from the menu', driverPick, 'Yes, but not until the future');
+  ok('…the same row the planner picks', String(a.value), driverPick);
+  ok('…and a text box with the same question gets "Yes"', String(typedAnswer(r)), 'Yes');
 }
 
 console.log('\n🧪 the two engines agree on labels taken from REAL forms');
@@ -324,11 +344,11 @@ console.log('\n🧪 the two engines agree on labels taken from REAL forms');
   let drift = 0;
   for (const label of REAL) {
     const a = planForm([{ label, type: 'text' }], DIFF_PROFILE).actions[0];
-    const r = resolveLabel(label, DIFF_PROFILE);
+    const r = driverLabel(label, DIFF_PROFILE);   // the driver's own wrapper (F-1014)
     const planned = a.action === 'fill' ? String(a.value) : null;
     // The driver reads rules through apply/_form.mjs, which takes the first
     // alternative when it has no options — compare that, not the raw list.
-    const resolved = r.kind === 'answer' ? String(Array.isArray(r.value) ? r.value[0] : r.value) : null;
+    const resolved = r.kind === 'answer' ? String(typedAnswer(r)) : null;
     if (planned !== resolved) {
       drift += 1;
       console.log(`  ✗ ${label.slice(0, 62)}\n      planner ${JSON.stringify(planned)} vs driver ${JSON.stringify(resolved)}`);

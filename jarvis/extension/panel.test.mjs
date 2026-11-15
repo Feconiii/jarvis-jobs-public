@@ -34,14 +34,14 @@ let browser;
 let page;
 const sent = [];
 
-async function open({ armed = null, running = false, resume = { ok: true, pdf: PDF_B64, filename: 'Alex Rivera Resume.pdf' }, panel = { ok: true, data: DATA }, letter = { ok: false, status: 404, error: 'no letter for this job yet' }, report = null, live = '' } = {}) {
+async function open({ armed = null, running = false, resume = { ok: true, pdf: PDF_B64, filename: 'Alex Rivera Resume.pdf' }, panel = { ok: true, data: DATA }, letter = { ok: false, status: 404, error: 'no letter for this job yet' }, report = null, live = '', stopped = null } = {}) {
   sent.length = 0;
   page = await browser.newPage();
   await page.exposeFunction('__sent', (m) => { sent.push(m); });
-  await page.addInitScript(({ armed, running, resume, panel, letter, report, live }) => {
+  await page.addInitScript(({ armed, running, resume, panel, letter, report, live, stopped }) => {
     const answers = {
-      panel: { ...panel, tab: { id: 7, url: 'https://jobs.smartrecruiters.com/oneclick-ui/company/Co/publication/abc', title: 'Easy apply' }, armed, running },
-      'panel-state': { ok: true, armed, running, report, live },
+      panel: { ...panel, tab: { id: 7, url: 'https://jobs.smartrecruiters.com/oneclick-ui/company/Co/publication/abc', title: 'Easy apply' }, armed, running, stopped },
+      'panel-state': { ok: true, armed, running, report, live, stopped },
       // "ask Claude" from the Answers tab: the worker asks the page which box
       // it is about, then the server — here, the answer comes straight back.
       'panel-ask': { ok: true, q: 'Why do you want to work at Becton Dickinson?', status: 'ready', text: 'I want to work on medical device manufacturing lines.', problems: [], model: { used: 'opus' } },
@@ -64,7 +64,8 @@ async function open({ armed = null, running = false, resume = { ok: true, pdf: P
       runtime: {
         sendMessage: (msg, cb) => {
           globalThis.__sent(msg);
-          let a = answers[msg.type];
+          // A test can move the tab to another posting (F-1013 #13).
+          let a = (msg.type === 'panel' && globalThis.__panelNow) || answers[msg.type];
           if (Array.isArray(a)) a = a.length > 1 ? a.shift() : a[0];
           setTimeout(() => cb(a || { ok: false, error: `unknown ${msg.type}` }), 5);
         },
@@ -75,13 +76,13 @@ async function open({ armed = null, running = false, resume = { ok: true, pdf: P
       // The only API that names a download authoritatively (F-386).
       downloads: { download: async (o) => { globalThis.__sent({ type: '__download', ...o }); return 1; } },
       tabs: {
-        query: async () => [{ id: 7, url: 'https://jobs.smartrecruiters.com/oneclick-ui/company/Co/publication/abc', title: 'Easy apply' }],
+        query: async () => [{ id: 7, url: globalThis.__tabUrl || 'https://jobs.smartrecruiters.com/oneclick-ui/company/Co/publication/abc', title: 'Easy apply' }],
         create: async () => ({}),
         onActivated: { addListener() {} },
         onUpdated: { addListener() {} },
       },
     };
-  }, { armed, running, resume, panel, letter, report, live });
+  }, { armed, running, resume, panel, letter, report, live, stopped });
   await page.goto(PANEL);
   await page.waitForFunction(() => !document.getElementById('main').hidden || /Not a posting|cannot see/.test(document.getElementById('empty').textContent));
   return page;
@@ -125,6 +126,71 @@ test('FILL PRESSES FOR THE TAB BESIDE IT, and the walk\'s state is read back', a
   const press = sent.find((m) => m.type === 'press');
   assert.ok(press, 'a press went to the worker');
   assert.equal(press.tabId, 7, 'for the tab the panel is beside');
+  await page.close();
+});
+
+test('F-773: A BLOCKED POSTING ASKS ONCE — the sentence, then "Fill anyway", then a recorded press', async () => {
+  const blockedData = { ...DATA, fit: { ...DATA.fit, blockers: ['No sponsorship — "We will not sponsor individuals for employment visas, now or in the future."'] } };
+  await open({ panel: { ok: true, data: blockedData } });
+  assert.equal(await page.textContent('#band'), 'Blocked');
+  await page.click('#fill');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sent.filter((m) => m.type === 'press').length, 0, 'the first press fills nothing');
+  assert.match(await page.textContent('#status'), /This posting is blocked: No sponsorship — "We will not sponsor/);
+  assert.equal(await page.textContent('#fill'), 'Fill anyway');
+  await page.click('#fill');
+  await new Promise((r) => setTimeout(r, 50));
+  const press = sent.find((m) => m.type === 'press');
+  assert.ok(press, 'the second press fills');
+  assert.equal(press.blockedAnyway?.id, 'job-1', 'and says it was past a block, so the server records it');
+  assert.match(press.blockedAnyway.reasons[0], /We will not sponsor/);
+  await page.close();
+});
+
+test('FILL STOP: a toolbar press the worker stopped is said on the panel, and ONE press of Fill anyway fills it', async () => {
+  const reason = 'Export control with no licence route — "Must be a U.S. Citizen or U.S. Permanent Resident (Green Card holder)"';
+  const data = { ...DATA, stop: { reasons: [reason], read: true } };
+  await open({ panel: { ok: true, data }, stopped: { id: 'job-1', reasons: [reason], at: Date.now() } });
+  assert.equal(await page.textContent('#band'), 'Blocked', 'an export bar alone marks the posting blocked on the panel');
+  assert.match(await page.textContent('#status'), /Not filled — this posting is blocked: Export control with no licence route/);
+  assert.match(await page.textContent('#status'), /Nothing was written to the form/);
+  assert.equal(await page.textContent('#fill'), 'Fill anyway');
+  await page.click('#fill');
+  await new Promise((r) => setTimeout(r, 50));
+  const press = sent.find((m) => m.type === 'press');
+  assert.ok(press, 'one press fills');
+  assert.equal(press.blockedAnyway?.id, 'job-1');
+  assert.match(press.blockedAnyway.reasons[0], /Green Card holder/);
+  await page.close();
+});
+
+test('FILL STOP: the server\'s stop reasons ask once on the panel\'s own press too, with no stop from the worker yet', async () => {
+  const data = { ...DATA, stop: { reasons: ['Requires U.S. citizenship — "Must be a U.S. citizen."'], read: true } };
+  await open({ panel: { ok: true, data } });
+  await page.click('#fill');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sent.filter((m) => m.type === 'press').length, 0, 'the first press fills nothing');
+  assert.match(await page.textContent('#status'), /This posting is blocked: Requires U\.S\. citizenship/);
+  await page.click('#fill');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sent.find((m) => m.type === 'press')?.blockedAnyway?.id, 'job-1');
+  await page.close();
+});
+
+test('FILL STOP: a stop for ANOTHER posting in the tab is not shown on this one', async () => {
+  await open({ stopped: { id: 'job-other', reasons: ['Requires U.S. citizenship'], at: Date.now() } });
+  assert.doesNotMatch(await page.textContent('#status'), /Not filled/);
+  assert.equal(await page.textContent('#fill'), 'Fill this page');
+  await page.close();
+});
+
+test('…an unblocked posting fills on the first press, with nothing extra', async () => {
+  await open();
+  await page.click('#fill');
+  await new Promise((r) => setTimeout(r, 50));
+  const press = sent.find((m) => m.type === 'press');
+  assert.ok(press);
+  assert.equal(press.blockedAnyway, undefined);
   await page.close();
 });
 
@@ -320,6 +386,24 @@ test('PUT IT IN THE SLOT sends the page the file, and says where it went (F-413)
   await page.close();
 });
 
+test('F-1013 #13: AFTER THE TAB MOVES TO ANOTHER POSTING, THE RESUME CHIP ATTACHES THAT POSTING\'S FILE, never the last one', async () => {
+  await open();
+  await page.waitForFunction(() => !document.getElementById('attach-pdf').hidden);
+  // A route change in the same tab, to job 2; the panel has not refreshed yet.
+  await page.evaluate((d) => {
+    globalThis.__tabUrl = 'https://jobs.smartrecruiters.com/oneclick-ui/company/Co/publication/def';
+    globalThis.__panelNow = { ok: true, data: { ...d, job: { ...d.job, id: 'job-2', title: 'Process Engineer' } }, tab: { id: 7 } };
+  }, DATA);
+  await page.click('#attach-pdf');
+  await page.waitForFunction(() => /Attached|reading/i.test(document.getElementById('save-note').textContent));
+  // The new posting's resume lands after the attach; the note stays.
+  await page.waitForFunction(() => !document.getElementById('pdf').hidden);
+  assert.match(await page.textContent('#save-note'), /Attached|reading/i, 'the attach note is not wiped by the resume load');
+  const asked = sent.filter((m) => m.type === 'attach-file').at(-1);
+  assert.equal(asked?.id, 'job-2', 'the page is read again first, and the file is the new posting\'s');
+  await page.close();
+});
+
 test('WITH NO REPORT ON THE TAB, THE ASK BOX IS STILL THERE (2026-09-24)', async () => {
   // "telling claude to answer again ... it legit just doesnt let me or show it":
   // every ask lived inside a fill report, so no report meant no way to ask.
@@ -379,5 +463,15 @@ test('THE PROGRESS LINE SHOWS UNDER FILL, not in the corner of the form', async 
   await page.waitForFunction(() => !document.getElementById('live').hidden);
   assert.match(await page.textContent('#live'), /still writing the resume/);
   assert.equal(await page.textContent('#fill'), 'Filling…');
+  await page.close();
+});
+
+test('S6: the panel names the run\'s slowest step, from its own clock; a quick run says nothing', async () => {
+  const armed = { id: 'job-1', company: 'Becton Dickinson', started: true, acc: { filled: 12, checked: 1, uploaded: false, unanswered: [], stoppedBecause: 'reached the last step before Submit' } };
+  await open({ armed, report: { filled: 12, timings: { total: 7912, discover: 640, plan: 1210, dropdowns: 3204, waits: 2100, slowest: 'dropdowns' } } });
+  assert.match(await page.textContent('#status'), /slowest step: dropdowns 3\.2 s of 7\.9 s/);
+  await page.close();
+  await open({ armed, report: { filled: 12, timings: { total: 600, plan: 400, slowest: 'plan' } } });
+  assert.doesNotMatch(await page.textContent('#status'), /slowest step/, 'under a second: nothing to say');
   await page.close();
 });

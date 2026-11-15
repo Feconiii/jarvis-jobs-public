@@ -69,6 +69,7 @@ function quoteFor(text, re) {
 // person" is not "citizen-only").
 export { classifyVisa } from './visa.mjs';
 import { classifyVisa } from './visa.mjs';
+import { THIN_BODY } from './db.mjs';
 import { checkDegree } from './degree.mjs';
 import { yearsMentions } from './requirements.mjs';
 import { person, screen, DEFAULT_PERSON } from './targeting.mjs';
@@ -146,10 +147,13 @@ function degreeOrYears(line) {
   if (LINE_YEARS_RE.test(m[1]) || /\bmaster|\bph\.?\s?d|\bdoctor/i.test(m[1])) return false;
   // "5+ years with a Bachelor's or 3+ years with a Master's" (1X): the years sit
   // BEFORE the degree, and the "or" years belong to another degree.
-  const before = s.slice(Math.max(0, m.index - 40), m.index);
-  if (/(?:\d|\byears?\b|\byrs?\b)[^.;]{0,25}$/i.test(before)) return false;
-  const after = s.slice(m.index + m[0].length, m.index + m[0].length + 40);
-  if (/^\s*[^.;]{0,15}\b(?:with|and)\s+(?:an?\s+)?(?:master|ph\.?\s?d|doctor|associate|bachelor)/i.test(after)) return false;
+  // Supermicro (2026-10-20): "5+ years of relevant experience with a Bachelor's
+  // or 3+ years of relevant experience with a Master's" puts 30 characters
+  // between the figure and the degree, so the window reaches 50.
+  const before = s.slice(Math.max(0, m.index - 60), m.index);
+  if (/(?:\d|\byears?\b|\byrs?\b)[^.;]{0,50}$/i.test(before)) return false;
+  const after = s.slice(m.index + m[0].length, m.index + m[0].length + 60);
+  if (/^\s*[^.;]{0,40}\b(?:with|and)\s+(?:an?\s+)?(?:master|ph\.?\s?d|doctor|associate|bachelor)/i.test(after)) return false;
   return true;
 }
 function degreeNeedsNoYears(text) {
@@ -161,6 +165,64 @@ function degreeNeedsNoYears(text) {
     if (!/\bbachelor/i.test(before) || LINE_YEARS_RE.test(line)) continue;
     if (WAIVER_FOR_HIGHER_RE.test(line.slice(m.index + m[0].length, m.index + m[0].length + 30)) || WAIVER_FOR_HIGHER_RE.test(before.slice(-30))) continue;
     return line.trim();
+  }
+  return null;
+}
+
+/**
+ * A POSTING THAT OPENS ITSELF TO NEW GRADUATES (F-766, 2026-10-17). Yaskawa's
+ * Product (Mechanical) Engineer asks for a "Minimum of three years of
+ * experience with CAD" and then says "Recent college graduates with a
+ * concentration in mechatronics and a strong GPA are also encouraged to
+ * apply"; it was stored as a 3-year floor and the pick screen never offered
+ * it. A posting that invites recent graduates, or calls itself an entry-level
+ * role, has a way in with no years. Only the posting's own words count: a
+ * negated one ("will not be considered", "is not an entry-level role") and one
+ * whose invitation carries a years figure of its own do not.
+ *
+ * LinkedIn's footer is not the posting's words. "Seniority level: Entry level"
+ * sits under thousands of LinkedIn copies and says nothing about the role.
+ */
+const LINKEDIN_FOOTER_RE = /^[ \t]*(?:seniority level|employment type|job function|industries)[ \t]*:.*$/gim;
+const GRADS = String.raw`(?:recent|new)\s+(?:college\s+|university\s+)?grad(?:uate)?s?`;
+const GRAD_INVITES = [
+  new RegExp(String.raw`\b${GRADS}\b([^.\n]{0,160}?)\b(?:(?:are|is)\s+(?:also\s+)?(?:strongly\s+)?(?:encouraged|welcomed?|invited)\b|(?:will|may|can)\s+(?:also\s+)?be\s+considered\b|(?:may|can)\s+(?:also\s+)?apply\b(?!\s+(?:their|your|his|her|the|a|an|this|these|those|what|knowledge|skills)\b))`, 'i'),
+  new RegExp(String.raw`\b(?:open|welcome|ideal|suited|perfect|great)\s+(?:to|for)\s+(?:a\s+)?${GRADS}\b()`, 'i'),
+  new RegExp(String.raw`\bwelcomes?\s+${GRADS}\b()`, 'i'),
+  // Not Intel's pay-grade line, "This is an entry level position and will be
+  // compensated accordingly" — it names the pay band, not a way in (2026-11-02).
+  /\b(?:this|the)\s+(?:is\s+an?\s+)?entry[- ]level\s+(?:role|position|opportunity|job)\b(?!\s+and\s+will\s+be\s+compensated)()/i,
+  /\b(?:this|the)\s+(?:role|position|job|opportunity)\s+is\s+(?:an?\s+)?entry[- ]level\b()/i,
+];
+export function newGradRoute(text) {
+  const body = String(text || '').replace(LINKEDIN_FOOTER_RE, '');
+  // A BACHELOR'S RUNG WITH YEARS OF ITS OWN IS NOT WAIVED by an invitation
+  // elsewhere (2026-11-02): Intel's "A Bachelor's degree in Mechanical … with
+  // 4+ years of relevant semiconductor industry experience" was read as entry
+  // level twice and filed as worth a look. Yaskawa's invitation (F-766) still
+  // counts: its years sit on a CAD line, not on the degree.
+  if (/\bbachelor'?s?\b[^\n;]{0,220}?\bwith\s+(?:a\s+minimum\s+of\s+|at\s+least\s+)?[1-9]\d?\s*\+?\s*(?:years?|yrs?)\b/i.test(body)) return null;
+  for (const re of GRAD_INVITES) {
+    const m = body.match(re);
+    if (!m) continue;
+    if (/\d\s*\+?\s*(?:years?|yrs?)\b|\byears?\b/i.test(m[1] || '')) continue;
+    return sentenceAround(body, m.index, m.index + m[0].length);
+  }
+  return null;
+}
+
+// A LEVEL I THAT NEEDS NO EXPERIENCE: "(ME I) Prior work experience is not
+// required", "Level I: no experience required". Only a line labelled as the
+// first level counts; a degree rung ("…or no experience required with a PhD")
+// or another track ("Technician track: …") is degreeNeedsNoYears' business.
+const LEVEL_NO_EXPERIENCE_RE = /\b(?:no\s+(?:prior\s+|previous\s+)?(?:work\s+|industry\s+|professional\s+)?experience\s+(?:is\s+)?(?:required|necessary|needed)|(?:prior\s+|previous\s+)?(?:work\s+|industry\s+|professional\s+)?experience\s+is\s+not\s+(?:required|necessary|needed))\b/i;
+const FIRST_LEVEL_LABEL_RE = /^\W*(?:\(\s*[A-Z]{1,5}\s*(?:I|1)\s*\)|level\s+(?:I|1|one)\b|(?:[A-Za-z]+\s+)?(?:engineer|E)\s*(?:I|1)\s*[:)–—-])/;
+function noExperienceRoute(text) {
+  for (const line of String(text || '').split('\n')) {
+    if (!FIRST_LEVEL_LABEL_RE.test(line)) continue;
+    const m = LEVEL_NO_EXPERIENCE_RE.exec(line);
+    if (!m || /\b(?:master|ph\.?\s?d|doctor)/i.test(line)) continue;
+    return line.trim().replace(/^[•*\-\s]+/, '');
   }
   return null;
 }
@@ -243,10 +305,49 @@ export function classifyExperience(title, description) {
   }
 
   const titleSenior = SENIOR_TITLE_RE.test(title || '');
-  const titleEntry = ENTRY_TITLE_RE.test(text);
+  // Not LinkedIn's "Seniority level: Entry level" footer (F-766).
+  const titleEntry = ENTRY_TITLE_RE.test(text.replace(LINKEDIN_FOOTER_RE, ''));
 
   let level = 'unknown';
   let note = '';
+  // A route in with no years at all: a range from zero, an invitation to
+  // recent graduates, a Bachelor's that needs no experience. Its ask is 0y,
+  // never the figure another route names — the pick screen reads level_years.
+  let zeroRoute = false;
+  let invite = null;
+  let noExp = null;
+  // 2026-10-20. Two zero routes that were not his: First Solar's NPI II offers
+  // "0-3 years" only with a PhD (a Bachelor's needs 2-3), and Fontaine's
+  // "Bachelor of Science … or five years" sits above "Role typically requires
+  // between 5 and 8 years of experience" — a bar the degree does not waive.
+  let otherBar = null;
+  const lineOf = (at) => {
+    const s = text.lastIndexOf('\n', Math.max(0, at - 1)) + 1;
+    const e = text.indexOf('\n', at);
+    return [s, e === -1 ? text.length : e];
+  };
+  const zeroIsHis = (h) => {
+    const [s, e] = lineOf(h.at);
+    const near = text.slice(Math.max(s, h.at - 80), Math.min(e, h.end + 80));
+    return !(/\b(?:master|ph\.?\s?d|doctor|associate)/i.test(near) && !/\bbachelor|\bB\.?\s?S\.?(?:c\.?)?\b/i.test(near));
+  };
+  const barOffLine = (line) => {
+    const at = text.indexOf(line);
+    const end = at + line.length;
+    // A figure on another line is a bar only when it is not another route in:
+    // First Solar's "Associate's … combined with 3 or more years …, or" and
+    // "10 or more years' experience as a … technician" are routes for people
+    // without his degree; Fontaine's "Role typically requires …" is a bar.
+    const route = (h) => {
+      const [s, e] = lineOf(h.at);
+      const line = text.slice(s, e);
+      const prev = text.slice(lineOf(Math.max(0, s - 1))[0], Math.max(0, s - 1));
+      return /\bor\s*[,;:]?\s*$/i.test(line) || /^\W*or\b/i.test(line) || /\bor\s*[,;:]?\s*$/i.test(prev) || /\bcombined\s+with\s*$/i.test(prev)
+        || /\b(?:associate|bachelor|master|ph\.?\s?d|doctor|degree|diploma|technician|specialist)/i.test(line);
+    };
+    const off = kept.filter((h) => h.section !== 'pref' && h.n > 0 && (at === -1 || h.at < at || h.at >= end) && !route(h));
+    return off.length ? Math.max(...off.map((h) => h.n)) : null;
+  };
 
   if (titleSenior) {
     level = 'exclude';
@@ -258,24 +359,40 @@ export function classifyExperience(title, description) {
     // job he can get — the expensive error.
     level = 'entry';
     note = `Titled for new grads; ${preferredYears}y is listed as preferred, not required.`;
-  } else if (kept.some((h) => h.section !== 'pref' && h.n === 0)) {
+  } else if (kept.some((h) => h.section !== 'pref' && h.n === 0 && zeroIsHis(h))) {
     // A REQUIRED RANGE THAT STARTS AT ZERO IS A WAY IN (2026-10-16). Therm-X's
     // "Mechanical Engineer I/II": "Level I: 0–2 years of relevant experience,
     // or strong internship and project work. Level II: 3+ years" — the
     // highest floor (3) was read as the ask and the card said "stretch" over
     // a quote that says otherwise. The curator already passes a zero range.
-    const zero = kept.find((h) => h.section !== 'pref' && h.n === 0);
+    const zero = kept.find((h) => h.section !== 'pref' && h.n === 0 && zeroIsHis(h));
     level = 'entry';
+    zeroRoute = true;
     note = maxYears > 0 ? `A 0-year route is offered; the ${maxYears}-year figure is a higher level of the same role.` : 'Asks for 0+ years — entry-friendly.';
     evidence.unshift(sentenceAround(text, zero.at, zero.end));
-  } else if (maxYears != null && degreeNeedsNoYears(text)) {
+  } else if (maxYears != null && (noExp = noExperienceRoute(text))) {
+    // Hitachi's "Mechanical Engineer I - IV" (F-959): "(ME I) Prior work
+    // experience is not required" above "(ME IV) … BS with 8+ years" was read
+    // as an 8-year bar. A level that needs no experience is a way in.
     level = 'entry';
+    zeroRoute = true;
+    note = `A level of this role needs no experience; the ${maxYears}-year figure is a higher level.`;
+    evidence.unshift(noExp);
+  } else if (maxYears != null && degreeNeedsNoYears(text) && !(otherBar = barOffLine(degreeNeedsNoYears(text)))) {
+    level = 'entry';
+    zeroRoute = true;
     note = `A Bachelor's needs no experience here; the ${maxYears}-year figure is another route in.`;
     evidence.unshift(degreeNeedsNoYears(text).replace(/^[•*\-\s]+/, ''));
+  } else if (maxYears != null && (invite = newGradRoute(text))) {
+    level = 'entry';
+    zeroRoute = true;
+    note = `The posting invites recent graduates; the ${maxYears}-year figure is the bar for experienced applicants.`;
+    evidence.unshift(invite);
   } else if (maxYears != null) {
-    if (maxYears <= 2) { level = 'entry'; note = `Asks for ~${maxYears}y experience — entry-friendly.`; }
-    else if (maxYears <= 5) { level = 'stretch'; note = `Asks for ${maxYears}+ years — ${IS_HIM ? `he graduates ${person.gradLabel} with none` : `a new grad (${person.gradLabel}) has none`}, so this is a stretch.`; }
-    else { level = 'exclude'; note = `Asks for ${maxYears}+ years — likely too senior, but shown so you can judge.`; }
+    const ask = otherBar ?? maxYears;
+    if (ask <= 2) { level = 'entry'; note = `Asks for ~${ask}y experience — entry-friendly.`; }
+    else if (ask <= 5) { level = 'stretch'; note = `Asks for ${ask}+ years — ${IS_HIM ? `he graduates ${person.gradLabel} with none` : `a new grad (${person.gradLabel}) has none`}, so this is a stretch.`; }
+    else { level = 'exclude'; note = `Asks for ${ask}+ years — likely too senior, but shown so you can judge.`; }
   } else if (titleEntry) {
     level = 'entry';
     note = 'Title signals new-grad / entry level.';
@@ -294,7 +411,7 @@ export function classifyExperience(title, description) {
 
   // The zero route's floor is the ask that matters ("entry 0y", never "entry 3y"),
   // and one sentence quoted twice is one quote.
-  const years = level === 'entry' && kept.some((h) => h.section !== 'pref' && h.n === 0) ? 0 : maxYears;
+  const years = level === 'entry' && zeroRoute ? 0 : (otherBar ?? maxYears);
   return { level, years, note, evidence: [...new Set(evidence.filter(Boolean))] };
 }
 
@@ -463,6 +580,20 @@ function termSpan(word, year) {
   return { from: monthKey('jan', y), to: monthKey('dec', y) };
 }
 
+/**
+ * A window can name a second door right after it: J&J STEP's "A recent
+ * graduate is preferred (2024 to 2025 or due to graduate in May 2027)" (F-959)
+ * was read as 2024–2025 and blocked his class. The second term widens the span.
+ */
+function orAlsoGraduating(src, end, win, M) {
+  const more = new RegExp(`^[^.]{0,20}?\\bor\\s+(?:those\\s+)?(?:(?:who\\s+are\\s+)?(?:due|expected|about|set|scheduled)\\s+to\\s+)?graduat\\w*\\s+(?:in|by|on)?\\s*(${M})?\\.?\\s*(20\\d\\d)`, 'i').exec(src.slice(end));
+  if (!more) return win;
+  const span = termSpan(more[1], more[2]);
+  const from = win.from && span.from.key < win.from.key ? span.from : win.from;
+  const to = win.to && span.to.key > win.to.key ? span.to : win.to;
+  return { ...win, from, to };
+}
+
 const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const monthNameOf = n => MONTH_NAMES[Math.min(12, Math.max(1, n)) - 1];
 
@@ -492,11 +623,11 @@ export function graduationWindow(text) {
     `graduat\\w*[^.]{0,40}?(?:between\\s+)?(${M})?\\.?\\s*(20\\d\\d)\\s*(?:and|to|or|-|–|—|through)\\s*(${M})?\\.?\\s*(20\\d\\d)`, 'i',
   ).exec(src);
   if (m) {
-    return {
+    return orAlsoGraduating(src, m.index + m[0].length, {
       from: termSpan(m[1], m[2]).from,
       to: termSpan(m[3], m[4]).to,
       quote: quoteFor(src, /graduat\w*/i),
-    };
+    }, M);
   }
 
   // The same two ends, written the other way round: "<Term> <Year> or <Term>
@@ -586,7 +717,16 @@ export function classifyProgram(title, description, gradDate) {
  */
 export function triage(job, opts = {}) {
   const { title, description, location, url } = job;
-  const visa = classifyVisa(title, description);
+  // NOT SCREENED IS NOT CLEAN (F-627). A body under THIN_BODY with no full read
+  // behind it is a list teaser; the visa gate says so instead of passing it.
+  // Only a caller that passes `enrichedAt` (the row's own field, null when never
+  // read in full) or `opts.thin` is judged this way — the others are reading a
+  // body they just fetched (enrich, import) or have no body to judge, and keep
+  // the verdict they always had.
+  const thin = opts.thin ?? (Object.hasOwn(job, 'enrichedAt')
+    ? String(description || '').length < THIN_BODY && !job.enrichedAt
+    : false);
+  const visa = classifyVisa(title, description, { thin });
   const experience = classifyExperience(title, description);
   const relevance = scoreRelevance(title, description);
   // The URL is passed because the ATS writes the primary site into it, and
@@ -626,6 +766,8 @@ export function triage(job, opts = {}) {
       visaWarning: visa.warnings.some(w => w.level === 'caution'),
       // Kept separate so the card and any future filter can still ask.
       visaSilent: visa.warnings.some(w => w.key === 'sponsorship_unmentioned'),
+      // Only a teaser has been read (F-627): neither clean nor blocked.
+      visaUnscreened: visa.warnings.some(w => w.key === 'sponsorship_unscreened'),
       // A hard block always wins: a posting can't be "sponsor-friendly" and
       // blocked at the same time.
       visaGood: !visa.block && visa.warnings.some(w => w.level === 'good'),

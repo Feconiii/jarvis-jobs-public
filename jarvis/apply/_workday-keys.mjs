@@ -16,6 +16,8 @@
 // to type/select, or null to leave for the user. Kept explicit (not the
 // generic label matcher) because Workday's automation-ids are 100% stable and
 // far more reliable than its visible labels.
+import { employedAtApplyingTo } from './_history.mjs';
+
 function wdValue(fieldId, p) {
   const A = p.answers || {}, I = p.identity || {}, E = p.education || {};
   switch (fieldId) {
@@ -35,7 +37,11 @@ function wdValue(fieldId, p) {
     case 'formField-countryPhoneCode': return 'United States of America (+1)';
     case 'formField-phoneNumber': return (I.phone || '').replace(/[^\d]/g, '').replace(/^1(?=\d{10}$)/, '');
     case 'formField-extension': return null;                // leave blank — not a phone extension
-    case 'formField-candidateIsPreviousWorker': return A.previously_employed_here || 'No';
+    // HIS WORK HISTORY FIRST (F-1036). The standing No went out on Applied
+    // Materials' own form on 2026-10-20 and 2026-11-07, where he interned, and
+    // he changed it to Yes by hand both times. The follow-up email and worker ID
+    // stay his to type.
+    case 'formField-candidateIsPreviousWorker': return employedAtApplyingTo(p) || A.previously_employed_here || 'No';
     // "How Did You Hear About Us?" is required, and every tenant words its list
     // differently (KLA has no "Job Board" at all). Offer truthful alternatives in
     // order of preference — Jarvis finds these postings by reading the company's

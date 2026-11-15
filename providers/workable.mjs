@@ -7,7 +7,47 @@
 // `https://apply.workable.com/<slug>`. A tracked_companies entry can also
 // set `provider: workable` explicitly to bypass detection.
 
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { loadState, saveState, heldUntil, hold, holdDeadline } from '../jarvis/ats-holds.mjs';
+
 const ALLOWED_WORKABLE_HOSTS = new Set(['apply.workable.com']);
+
+// THE SAME HOLD DISCOVERY KEEPS (F-634). Workable answers a burst with a 429
+// that is a ~20-hour Cloudflare IP block, and every request inside it restarts
+// the clock — which also keeps him from applying to Workable jobs from this
+// network. Discovery writes the deadline to discover-holds.json; the scanner
+// reads the same file, so a scan neither trips the block nor extends it.
+// Read per call, so a test can point it at a scratch file.
+const holdsPath = () => process.env.JARVIS_DISCOVER_HOLDS
+  || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'jarvis', 'discover-holds.json');
+const SERVICE = 'workable.com';
+
+/** A held host is a refusal, never a dead board: same shape as a 429. */
+function heldError(until) {
+  const err = new Error(`workable: held until ${until} (Workable IP block; nothing sent)`);
+  err.status = 429;
+  err.held = true;
+  return err;
+}
+
+/** Fetch through the hold: refuse while held, record a block when one starts. */
+async function heldFetch(ctx, url, opts, holdsFile = holdsPath()) {
+  const until = heldUntil(loadState(holdsFile), SERVICE);
+  if (until) throw heldError(until);
+  try {
+    return await ctx.fetchText(url, opts);
+  } catch (err) {
+    const deadline = holdDeadline(SERVICE, err?.status, err?.retryAfter);
+    if (deadline) {
+      const state = loadState(holdsFile);
+      hold(state, SERVICE, deadline, { status: err.status });
+      saveState(holdsFile, state);
+    }
+    throw err;
+  }
+}
+export const _internals = { heldFetch };
 
 function assertWorkableUrl(url) {
   let parsed;
@@ -54,7 +94,7 @@ export default {
     assertWorkableUrl(feedUrl);
     // redirect:'error' prevents SSRF via server-side redirects; combined with
     // assertWorkableUrl above it guarantees the final hostname stays in the allowlist.
-    const text = await ctx.fetchText(feedUrl, { redirect: 'error' });
+    const text = await heldFetch(ctx, feedUrl, { redirect: 'error' });
     const departments = departmentsFromSearchGuide(text);
     if (!departments.length) return parseWorkableMarkdown(text, entry.name);
     // A LARGER BOARD ANSWERS WITH A SEARCH GUIDE, NOT A TABLE (F-659).
@@ -75,7 +115,7 @@ export default {
     for (const query of searches) {
       const url = `${feedUrl}?${query}`;
       assertWorkableUrl(url);
-      for (const job of parseWorkableMarkdown(await ctx.fetchText(url, { redirect: 'error' }), entry.name)) {
+      for (const job of parseWorkableMarkdown(await heldFetch(ctx, url, { redirect: 'error' }), entry.name)) {
         if (!byUrl.has(job.url)) byUrl.set(job.url, job);
       }
     }

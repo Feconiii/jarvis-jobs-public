@@ -98,9 +98,10 @@ export const underPreferredHeading = (text, index) => sectionAt(text, index) ===
 
 // ── years ─────────────────────────────────────────────────────────────
 
-const WORD_NUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+// "zero to two years" (Yaskawa, F-959) is a range from zero, so zero is a number too.
+const WORD_NUM = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 export const toYears = (s) => (/^\d+$/.test(String(s)) ? Number(s) : WORD_NUM[String(s).toLowerCase()] ?? NaN);
-const NUM = String.raw`(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*\(\d{1,2}\))?`;
+const NUM = String.raw`(?:\d{1,2}|zero|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*\(\d{1,2}\))?`;
 
 // F-466. A number of years is a requirement when it is written like one. The
 // first number is the FLOOR: "3+ years", "3-5 years", "minimum 3 years" and
@@ -140,7 +141,9 @@ const YEARS_PATTERNS = [
 //   Zebra  "…a 4 year degree"                          — the degree, not a bar
 // Read from the word "years" on, so "3+ years of programming" is no program.
 // "…ten years of it yet" is about the field, not about him.
-const NOT_A_REQUIREMENT_AFTER = /^\W{0,3}(?:of (?:it|this|that|them|us|our)\b|programs?|degrees?|school|university|college|courses?|rotations?|contracts?(?!\s+(?:management|manufactur\w*|negotiat\w*|administration|engineering))|warrant(?:y|ies)|roadmaps?|plans?|leases?|old|age|running|in a row|of (?:growth|history|operation|excellence|innovation)|of service(?=\s*(?:[.,;)]|$|\s+(?:with|at|to|for|in|plus|and)\b)))\b/i;
+// Bunge (2026-10-20): a paid-time-off table, "0 – 9 years: 25 days", read as a
+// range from zero and filed over a required 6-9 years.
+const NOT_A_REQUIREMENT_AFTER = /^\W{0,3}(?:\d+\s*(?:days?|hours?|weeks?)|(?:of\s+)?(?:PTO|vacation|paid\s+time)|of (?:it|this|that|them|us|our)\b|programs?|degrees?|school|university|college|courses?|rotations?|contracts?(?!\s+(?:management|manufactur\w*|negotiat\w*|administration|engineering))|warrant(?:y|ies)|roadmaps?|plans?|leases?|old|age|running|in a row|of (?:growth|history|operation|excellence|innovation)|of service(?=\s*(?:[.,;)]|$|\s+(?:with|at|to|for|in|plus|and)\b)))\b/i;
 // "…who graduated within the last 2 years" is new-grad INCLUSION (Medtronic, fit 94).
 const RECENCY_BEFORE = /\b(?:with)?in\s+the\s+(?:last|past|previous)\s*$|\bgraduated\s+(?:with)?in\s+the\s+\w+\s*$/i;
 // "Base Pay Range: $117,800.00 - $200,300.00" must not lend a digit to a match.
@@ -152,6 +155,12 @@ const HORIZON_BEFORE = /\b(?:roadmaps?|horizons?|forecasts?|strateg(?:y|ies|ic)|
 
 // "Nobody has ten years of it yet", "no one has 5 years in this": not an ask.
 const NEGATED_BEFORE = /\b(?:nobody|no one|no-one|none of us)\b[^.\n]{0,30}$/i;
+// A CEILING IS A RANGE THAT STARTS AT ZERO (F-766). Valmont's "Up to 3 years of
+// experience in manufacturing engineering/machine design required" on "This
+// entry-level role" was stored as a 3-year floor; Honda's "recent graduates or
+// those with up to 2 years" as a 2-year one. The floor of "up to N" is zero.
+// "No less than 3 years" is a floor, so it is not one of these.
+const CEILING_BEFORE = /\b(?:up\s+to|no\s+more\s+than|not\s+more\s+than|(?<!\b(?:no|not)\s+)(?:less|fewer)\s+than|maximum\s+of|max\.?\s+of)\s*$/i;
 
 function isRequirementYears(text, m) {
   const [num, numEnd] = m.indices[1];
@@ -180,8 +189,11 @@ export function yearsMentions(text) {
     const re = new RegExp(yre.source, 'gid');
     let m;
     while ((m = re.exec(src)) !== null) {
-      const n = toYears(m[1].replace(/\s*\(.*$/, ''));
+      let n = toYears(m[1].replace(/\s*\(.*$/, ''));
       if (Number.isNaN(n) || n > 15 || !isRequirementYears(src, m)) continue;
+      // …but "up to 8-15 years" names its own range, and its floor is the 8.
+      const ranged = new RegExp(String.raw`^${NUM}\s*\+?\s*(?:-|–|—|to)\s*${NUM}`, 'i').test(src.slice(m.indices[1][0]));
+      if (!ranged && CEILING_BEFORE.test(src.slice(Math.max(0, m.indices[1][0] - 24), m.indices[1][0]))) n = 0;
       // Anchored at the NUMBER: "Required Experience\n\n3+ years in …" matches
       // from the heading, but the requirement is the line the figure is on.
       hits.push({ at: m.indices[1][0], end: m.index + m[0].length, n });

@@ -59,8 +59,13 @@
    * Score", a search box) into one on the same form. Closed roots cannot be
    * entered and are not tried.
    */
-  const FOREIGN_ROOT_RE = /jarvis-overlay|simplify|grammarly|lastpass|1password|bitwarden|dashlane/i;
-  const foreignHost = (h) => FOREIGN_ROOT_RE.test(`${h.id || ''} ${typeof h.className === 'string' ? h.className : ''} ${h.tagName}`);
+  // …and a CHAT WIDGET is not the page either (F-884). Schindler's posting
+  // carries Paradox's "Eli" as <apply-widget>, whose root holds a "Write a
+  // reply..." box and an "Upload Video" file input: read as the page's
+  // fields, they stopped the Apply menu being chosen and the resume was
+  // planned into the video slot (2026-10-23).
+  const FOREIGN_ROOT_RE = /jarvis-overlay|simplify|grammarly|lastpass|1password|bitwarden|dashlane|^apply-widget$|\bparadox|\bolivia\b|intercom|\bdrift[-_]|zendesk|livechat|chat-?widget|chatbot/i;
+  const foreignHost = (h) => FOREIGN_ROOT_RE.test(`${h.id || ''} ${typeof h.className === 'string' ? h.className : ''}`) || FOREIGN_ROOT_RE.test(String(h.tagName || '').toLowerCase());
   function deepQuerySelectorAll(selector, root = document, out = []) {
     for (const el of root.querySelectorAll('*')) {
       if (el.matches(selector)) out.push(el);
@@ -76,6 +81,24 @@
    * rendered six rows and this file counted zero of them (F-336).
    */
   const onScreen = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  /**
+   * A control on screen, CUSTOM ELEMENTS INCLUDED (R3 review). A <ukg-button>
+   * can be `display: contents` or sized to nothing, its box drawn by its
+   * children or its shadow root; read by its own rects it is "off screen",
+   * which is the Warren CAT false "sent" again. Hidden only when it, or what
+   * draws it, is display:none / visibility:hidden.
+   */
+  const shownControl = (el) => {
+    if (!el) return false;
+    if (onScreen(el)) return true;
+    if (!String(el.tagName || '').includes('-')) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    const drawn = [...(el.children || []), ...(el.shadowRoot?.children || [])];
+    if (drawn.some((c) => onScreen(c) || (c.getBoundingClientRect?.().width > 0 && c.getBoundingClientRect().height > 0))) return true;
+    // …or only its text, as a `display: contents` button labelled "Submit" is.
+    try { const r = document.createRange(); r.selectNodeContents(el); return [...r.getClientRects()].some((b) => b.width > 0 && b.height > 0); } catch { return false; }
+  };
   /**
    * What tells one instance of a component from the next. It must be UNIQUE
    * on the page: SmartRecruiters' two dropzones — "Easy Apply" (parse a file
@@ -527,7 +550,29 @@
   function attachedNear(el) {
     const scope = el.closest('[data-automation-id="file-upload"], section, form') || document;
     const chips = scope.querySelectorAll('[data-automation-id="delete-file"], [data-automation-id="file-preview"]');
+    // PHENOM'S SERVER COPY IS THE EVIDENCE, NOT THE INPUT (2026-10-26). Honda's
+    // hidden input kept a file the site had refused (name too long), and every
+    // later pass said "1 file already attached" over an empty slot. Its
+    // #resumeName holds the name once the upload really landed.
+    if (el.closest?.('.resume-upload-wrapper')) {
+      const held = (el.ownerDocument || document).getElementById('resumeName');
+      if (held) return String(held.value || '').trim() ? 1 : 0;
+    }
     if (chips.length || el.files?.length) return chips.length || el.files.length;
+    // ICIMS POSTS THE PAGE THE MOMENT A FILE IS CHOSEN (F-836). Its input's
+    // onchange is `this.form.submit()` with uploadResume=1: the page comes
+    // back with the file named in "<id>_FileName" / "<id>_FileNameLabel" and a
+    // "Replace Resume" button, and the file box itself empty. Read as empty,
+    // Spirit AeroSystems' resume was planned again (another reload) and then
+    // reported "left blank" (2026-10-02).
+    const base = String(el.id || '').replace(/_File$/, '');
+    if (base && base !== el.id) {
+      const doc = el.ownerDocument || document;
+      const nameBox = doc.getElementById(`${base}_FileName`);
+      const shownAs = doc.getElementById(`${base}_FileNameLabel`);
+      if (String(nameBox?.value || '').trim()
+        || (shownAs && !/\biCIMS_NoDisplay\b/.test(String(shownAs.className || '')) && /\S/.test(shownAs.textContent || ''))) return 1;
+    }
     // A COMPONENT THAT TOOK THE FILE AND EMPTIED ITS INPUT (SmartRecruiters'
     // <spl-dropzone>, 2026-09-24) shows it in its own shadow root: a file name
     // and a "Delete file" control. Counted, so a second pass does not upload
@@ -573,6 +618,9 @@
   }
 
   function labelFor(el, type) {
+    // THE BOX THE RESUME OPENER JUST OPENED is the resume's (F-896), whatever
+    // the dialog calls it ("Upload from Device"), and wins over a leftover.
+    if (type === 'file' && el.getAttribute?.('data-jarvis-resume') === '1') return 'Resume';
     let label = '';
     // Workday's wrapper holds the real question ("Have you previously worked as
     // an Employee or Intern?"), while the input's own label is just the option
@@ -1009,7 +1057,8 @@
    */
   const FURNITURE_NAME = /^(?:keyword|keywords|kwopt|reqnumber|requisition_?id|jobreqid|radius|distance|sortby|sort_?order|pagesize|facet)/i;
   /** …and by what the label says, for a panel whose names are numbered too. */
-  const FURNITURE_LABEL = /^\s*keywords?\s*$|^\s*keyword search options\b|^\s*search (?:jobs|openings|by)\b|^\s*requisition id\s*$|^\s*(?:sort by|results per page|search radius|distance)\s*$|^\s*subscribe\b|\bnews\s*(?:&|and)\s*updates\b/i;
+  // A chat's own reply box (F-884), wherever the widget draws it.
+  const FURNITURE_LABEL = /^\s*keywords?\s*$|^\s*keyword search options\b|^\s*search (?:jobs|openings|by)\b|^\s*requisition id\s*$|^\s*(?:sort by|results per page|search radius|distance)\s*$|^\s*subscribe\b|\bnews\s*(?:&|and)\s*updates\b|^\s*(?:write|type)\s+(?:a\s+|your\s+)?(?:reply|message)\b/i;
   // A SITE'S OWN SEARCH BOX is named `q` (Swisslog's careers page, 2026-09-25:
   // "q" and "Subscribe for news & updates" were the two things "left for you"
   // on a page with no application on it). The WHOLE name, never a prefix —
@@ -1043,7 +1092,13 @@
         // Page coordinates, not the viewport's: a field scrolled out of view
         // above is still a field.
         const r = el.getBoundingClientRect?.();
-        if (r && (r.right + window.scrollX < -500 || r.bottom + window.scrollY < -500)) return true;
+        // …BUT A STYLED CHECKBOX PARKS ITS REAL BOX OFFSCREEN TOO (ADP, 2026-10-17):
+        // "Yes, I agree to sign electronically." sits at left:-9999px behind a
+        // drawn box, with a visible <label for> and an ordinary tab stop. A trap
+        // is meant to be unseen; one with a label on screen is a question.
+        const drawnLabel = /^(checkbox|radio)$/i.test(el.type || '') && el.getAttribute?.('tabindex') !== '-1'
+          && [...(el.labels || [])].some((l) => l.getClientRects().length > 0 && (l.textContent || '').trim());
+        if (r && !drawnLabel && (r.right + window.scrollX < -500 || r.bottom + window.scrollY < -500)) return true;
       } catch { /* not measurable — judged by its words below */ }
     }
     if (HONEYPOT_TEXT.test(el.getAttribute?.('aria-label') || '')) return true;
@@ -1147,7 +1202,14 @@
     // hour before this line and would have excluded Eightfold's resume input,
     // silently reintroducing the exact bug it sits above. Assigning to `.files`
     // works on any of them; that is how the Playwright driver has always done it.
-    if (el.type === 'file') return true;
+    if (el.type === 'file') {
+      // …except a leftover once the resume opener has opened the real box
+      // (F-896): an untagged box whose whole container is not drawn (a closed
+      // dialog's remains) is nobody's slot, and took the resume first.
+      if (el.getAttribute('data-jarvis-resume') !== '1' && el.parentElement && !el.parentElement.getClientRects().length
+        && document.querySelector('input[type="file"][data-jarvis-resume="1"]')) return false;
+      return true;
+    }
 
     // `aria-hidden` means "this is not for a person", and for everything that is
     // not an upload it is telling the truth. Greenhouse's newer forms are built
@@ -1270,6 +1332,23 @@
     // judged by whether the section already shows an entry's worth of text
     // beyond its heading, its Add and its boilerplate.
     const seen = new Set(out.map((s) => s.kind));
+    // ORACLE'S SECTIONS COUNT THEIR SAVED TILES (F-889). Each Add is
+    // data-qa="add<N>" and its saved entries are article[data-qa=
+    // "profileItem<N>"]. The generic read below took the Add's own wrapper for
+    // the section (its label says "Education"), saw no entry, and reported
+    // TI's Education empty on every run. `filled` stays false so the planner
+    // still sends his entries — content.js skips each one a tile already shows
+    // and adds only what is missing.
+    for (const add of document.querySelectorAll('[data-qa^="add"]')) {
+      const qa = add.getAttribute('data-qa') || '';
+      if (!/^add\d+$/.test(qa)) continue;
+      const name = (add.textContent || '').replace(/\s+/g, ' ').trim();
+      const kind = Object.keys(SECTION_RE).find((k) => SECTION_RE[k].test(name) && !seen.has(k));
+      if (!kind) continue;
+      const tiles = document.querySelectorAll(`article[data-qa="profileItem${qa.slice(3)}"]`).length;
+      seen.add(kind);
+      out.push({ kind, label: name, count: tiles, filled: false, blank: false, hasAdd: true, generic: true, saved: tiles });
+    }
     const boiler = /\badd\b|fields marked with \*? ?are required\.?|i currently work here|cancel|save|\*/gi;
     for (const b of deepQuerySelectorAll('button, [role="button"]').filter(onScreen)) {
       const name = buttonName(b);
@@ -1348,6 +1427,11 @@
         id: el.id ? (el.getRootNode().host ? `${hostName(el.getRootNode().host)}/${el.id}` : el.id) : '',
         key: fieldKey(el),
         current: prompt ? prompt.current : undefined,
+        // WHAT A PLAIN BOX ALREADY HOLDS (F-873). Only the job-row matcher reads
+        // it: Phenom and UKG fill their rows from the resume in their own order,
+        // and a row is placed by the company it already names.
+        held: !prompt && (el.tagName === 'TEXTAREA' || /^(text|email|tel|number|url|search)$/i.test(el.type || '')) && String(el.value || '').trim()
+          ? String(el.value).trim().slice(0, 160) : undefined,
         promptKind: prompt ? prompt.kind : undefined,
         // WHICH PART OF A SPLIT DATE (2026-09-24). Workday's signature date is
         // three boxes, month / day / year, all labelled "Date"; each was given
@@ -1521,6 +1605,9 @@
       // Western Digital 2026-09-24). Nor a country-code picker anywhere.
       if (el.getRootNode() !== document) continue;
       if (/country\s*code|dial(l?ing)?\s*code|calling\s*code/i.test(`${el.getAttribute('aria-label') || ''} ${el.id || ''}`)) continue;
+      // An open list's own search box is not a question (ADP's portal: "Enter
+      // text to filter your options", 2026-10-17).
+      if (/\bsc-sdf-select/.test(el.className || '') || /^\s*(enter\s+text\s+to\s+)?filter\s+(your\s+)?options\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''}`)) continue;
       const lb = (el.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => text(byId(el, id))).filter(Boolean).join(' ');
       const aria = el.getAttribute('aria-label') || '';
       const named = lb || (/^(select|choose)\b/i.test(aria) ? '' : aria);
@@ -1556,6 +1643,44 @@
         near: undefined,
         options: [],
         elements: [el],
+      });
+    }
+
+    // ADP'S DROPDOWN, A WEB COMPONENT (Therm-X, 2026-10-17). <sdf-select-simple>
+    // keeps its trigger — a div[role=button] reading "Choose an option" — in a
+    // shadow root, and draws its <sdf-select-item role="option"> rows in a
+    // portal at the end of the document. The combobox pass above skips shadow
+    // roots, so "How many years have you worked as a mechanical design
+    // engineer?" was neither answered nor listed as left for him, and ADP
+    // would not move on. The trigger is the field; the open-and-read path
+    // finds the portal's rows like any other list's.
+    for (const host of document.querySelectorAll('sdf-select-simple, sdf-select')) {
+      const trigger = host.shadowRoot?.querySelector('[role="button"], [role="combobox"]');
+      if (!trigger || !onScreen(host) || siteFurniture(host)) continue;
+      let label = '';
+      for (let n = host, i = 0; n && i < 6 && !label; n = n.parentElement, i += 1) {
+        const sib = n.previousElementSibling;
+        if (!sib || sib.querySelector('input, select, textarea, [role="combobox"], [role="radio"], sdf-select-simple')) continue;
+        const first = (sib.innerText || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
+        if (first.length > 3 && first.length <= 400) label = first.replace(/^\d+\.\s*/, '').replace(/[*✱]\s*$/, '').trim();
+      }
+      if (!label) label = String(host.getAttribute('label') || host.getAttribute('aria-label') || '').trim();
+      if (!label) continue;
+      const shown = (host.shadowRoot.querySelector('.selected-label, [part="value"]')?.textContent || '').trim();
+      fields.push({
+        label,
+        type: 'prompt',
+        name: '',
+        id: host.id || '',
+        key: host.id || '',
+        current: shown && !/^choose an option$|^select/i.test(shown) ? shown : undefined,
+        promptKind: 'combo',
+        attached: undefined,
+        required: host.hasAttribute('required') || /question-error/.test(host.className) || /\*\s*$/.test(label),
+        maxLength: undefined,
+        near: undefined,
+        options: [],
+        elements: [trigger],
       });
     }
 
@@ -1737,7 +1862,10 @@
       }
     }
     const CALENDAR = /S\s?M\s?T\s?W\s?T\s?F\s?S\d|Su\s*Mo\s*Tu\s*We\s*Th\s*Fr\s*Sa/;
-    return fields.filter((f) => !(typeof f.label === 'string' && CALENDAR.test(f.label)));
+    return fields.filter((f) => !(typeof f.label === 'string' && CALENDAR.test(f.label)))
+      // An open list's own search box, whichever pass found it (ADP's portal,
+      // "Enter text to filter your options", 2026-10-17).
+      .filter((f) => !(/^\s*(enter\s+text\s+to\s+)?filter\s+(your\s+)?options\b/i.test(String(f.label || '')) || /\bsc-sdf-select/.test(String(f.elements?.[0]?.className || ''))));
   }
 
   // ── walking a multi-step application ────────────────────────────────
@@ -1750,7 +1878,12 @@
   // attached and nothing past the first screen was ever answered.
 
   /** Text that means "this button finishes the application". Never clicked. */
-  const FINAL_RE = /^\s*(submit|submit application|send application)\s*$/i;
+  // In the languages a localized Workday or Oracle tenant shows on its last
+  // step too (F-1013 #21, review 2026-11-05): their Next slot is chosen by its
+  // markup, not its words, so "Soumettre" or "Enviar" there read as Next.
+  const FINAL_RE = /^\s*(?:submit|submit application|submit my application|send|send application|finish|complete application|soumettre|envoyer|postuler|absenden|abschicken|einreichen|bewerbung (?:absenden|abschicken|einreichen)|enviar|inviare|invia|indienen|verzenden|versturen|wyślij|提交|送信|応募する)(?:\s+(?:ma |la |mi |my |the |la mia |mijn |meine )?(?:candidature|application|solicitud|candidatura|bewerbung|sollicitatie|aplikację))?\s*$/i;
+  /** A footer button that goes back or parks the draft, never forward (Oracle lists them in the same slot). */
+  const NOT_FORWARD_RE = /^\s*(?:back|previous|prev|zurück|retour|précédent|atrás|anterior|indietro|cancel|save(?: as)? draft|save for later|save and exit)\s*$/i;
 
   /** Text that means "go to the next step". */
   const NEXT_RE = /^\s*(save and continue|save & continue|continue|next|next step|save and next|review)\s*$/i;
@@ -1781,7 +1914,8 @@
     if (!el) return false;
     const tag = el.tagName;
     if (tag === 'INPUT' && /^(submit|image)$/i.test(el.type || '')) return true;
-    if (tag === 'BUTTON' && String(el.type || '').toLowerCase() === 'submit' && el.closest('form')) return true;
+    // `el.form` too: a button outside any form submits the one its form="id" names (week-fixes J1).
+    if (tag === 'BUTTON' && String(el.type || '').toLowerCase() === 'submit' && (el.form || el.closest('form'))) return true;
     return false;
   }
 
@@ -1810,6 +1944,7 @@
     for (const b of [...wd, ...named, ...generic]) {
       const t = (text(b) || b.value || b.getAttribute('aria-label') || '').trim();
       if (FINAL_RE.test(t)) return null;    // the Review step. Stop here.
+      if (NOT_FORWARD_RE.test(t)) continue; // Oracle's Back / Save beside Next (F-1013 #21)
       // THE ATS SAYS THIS ONE SENDS THE APPLICATION. Its name wins over
       // whatever the button reads.
       if (ats?.submit && matchesAny(b, ats.submit)) return null;
@@ -1922,11 +2057,17 @@
       const words = `${pane.textContent || ''} ${pane.shadowRoot?.textContent || ''}`.replace(/\s+/g, ' ');
       if (!/\bprivacy\b|\bconsent\b|\bterms\b|\bdata\s+protection\b|\bcookies?\b|\bnotice\b|\bagree(ment)?\b|\bartificial\s+intelligence\b|\bAI\b/i.test(words)) continue;
       // …and never a sign-in or account box's Continue: that is his.
-      const plainOk = !/\b(submit|submission|withdraw|delete|remove|discard|cancel\s+(your|this)\s+application)\b/i.test(words)
+      // A NOTICE THAT SAYS THE APPLICATION GOES OUT is a send, whatever its
+      // button reads (F-1013 #22, review 2026-11-05): "Confirm — your
+      // application will be sent" passed, because only "submit" was looked for.
+      const sends = /\b(?:submit|submission|send|sent|finali[sz]e)\b[^.]{0,40}\bapplication\b|\bapplication\b[^.]{0,40}\b(?:will be|is being|gets?|to be)\s+(?:sent|submitted|finali[sz]ed)\b/i.test(words);
+      const plainOk = !sends && !/\b(submit|submission|withdraw|delete|remove|discard|cancel\s+(your|this)\s+application)\b/i.test(words)
         && !pane.querySelector('input[type="password"], input[type="email"], input[autocomplete="username"]');
       const named = (b) => (b.textContent || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ');
       const buttons = [...pane.querySelectorAll('button, [role="button"], sdf-button')].filter((b) => onScreen(b) && !wouldSubmit(b));
-      const go = buttons.find((b) => CONSENT_GO_RE.test(named(b))) || (plainOk && buttons.find((b) => CONSENT_PLAIN_RE.test(named(b))));
+      // "Accept & Apply" only where the notice says nothing of sending.
+      const goOk = (b) => CONSENT_GO_RE.test(named(b)) && !(sends && /\bapply\b/i.test(named(b)));
+      const go = buttons.find(goOk) || (plainOk && buttons.find((b) => CONSENT_PLAIN_RE.test(named(b))));
       if (go) return go.shadowRoot?.querySelector('button') || go;
     }
     return null;
@@ -1947,7 +2088,115 @@
 
   /** A box that wants the code from his email or phone. */
   // Not a bare "code": a three-field form with a postal code on it is a form.
-  const OTP_RE = /verif(?:y|ication)\s*code|one[\s-]?time|passcode|security code|confirmation code|authentication code|\botp\b|\bmfa\b|enter (?:the )?code|code (?:we|that was) sent/i;
+  // Word-bounded: "phone time", "anyone time" and an MFA degree are not codes.
+  const OTP_RE = /verif(?:y|ication)\s*code|\bone[\s-]time\s+(?:pass(?:code|word)?|code|pin)\b|\bpasscode|security code|confirmation code|authentication code|\botp\b|\bmfa\s+code\b|enter (?:the )?code|code (?:we|that was) sent/i;
+
+  /**
+   * THE BOXES THAT TAKE AN EMAILED CODE (his consent, 2026-10-23), or [].
+   * One box named for a code on a page of three controls or fewer, or a row
+   * of 4-8 one-character boxes on a page that talks about a code.
+   */
+  function otpBoxes() {
+    const vis = allControls().filter(visible).filter((el) => el.tagName === 'INPUT'
+      && !/^(checkbox|radio|hidden|submit|button|file|password|email)$/i.test(el.type || ''));
+    const named = (el) => el.getAttribute('autocomplete') === 'one-time-code'
+      || OTP_RE.test(`${el.name || ''} ${el.id || ''} ${el.getAttribute('aria-label') || ''} ${el.placeholder || ''}`)
+      || OTP_RE.test(labelFor(el, (el.type || 'text').toLowerCase()) || '');
+    // A CODE PAGE IS SMALL. The boxes, perhaps a "remember me" box and a
+    // resend link: never a page of questions with a code box among them.
+    const total = allControls().filter(visible).length;
+    const singles = vis.filter((el) => Number(el.getAttribute('maxlength')) === 1);
+    // One-character boxes count only as ONE ROW — siblings under one parent —
+    // and only when nothing else is on the page beside them (middle initials,
+    // split dates and phone pieces sit among other questions).
+    const row = singles.length && singles.every((el) => el.parentElement === singles[0].parentElement) ? singles : [];
+    const pageSays = OTP_RE.test(`${document.title} ${(document.body?.innerText || '').slice(0, 3000)}`);
+    if (row.length >= 4 && row.length <= 8 && pageSays && total <= row.length + 2) return row;
+    const one = vis.filter(named);
+    if (one.length === 1 && total <= 3) return one;
+    // ORACLE'S SIX BOXES (F-908): each is named "Enter verification code digit
+    // N of six", each sits in its own segment and none has a maxlength, so
+    // neither rule above saw them. A row of 4-8 boxes that each name a code,
+    // on a page with little else (Back, Verify, Send New Code), is the code.
+    if (one.length >= 4 && one.length <= 8 && total <= one.length + 4) return one;
+    return [];
+  }
+  /**
+   * The button that sends the code in, looked for in the boxes' own form or
+   * box only, Verify and Confirm first. Never a bare "Submit" or "Done", and
+   * nothing when the boxes are not alone on the page (F-905 review).
+   */
+  function codeConfirmControl(boxes = otpBoxes()) {
+    if (!boxes.length) return null;
+    const RANK = [/^\s*verify(\s+(code|email|me))?\s*$/i, /^\s*(confirm|submit\s+code)\s*$/i, /^\s*(sign|log)\s?in\s*$/i, /^\s*(continue|next)\s*$/i];
+    const nameOf = (b) => text(b) || b.value || b.getAttribute('aria-label') || '';
+    let scope = boxes[0].closest('form');
+    for (let p = boxes[0].parentElement; !scope && p && p !== document.documentElement; p = p.parentElement) {
+      if (p.querySelector('button, [role="button"], input[type="submit"], input[type="button"]')) scope = p;
+    }
+    if (!scope) return null;
+    const cands = [...scope.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]')]
+      .filter((b) => onScreen(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true' && !b.closest('header, nav, footer'));
+    for (const re of RANK) {
+      const b = cands.find((c) => re.test(nameOf(c)));
+      if (b) return b;
+    }
+    return null;
+  }
+  /**
+   * "YOUR SESSION IS ABOUT TO EXPIRE" — ITS OWN CONTINUE (his call, 2026-10-23:
+   * "staying logged in is fine, opening it again is probably where I draw the
+   * line"). Only a dialog that is on screen, says the session is about to end,
+   * and holds a stay/continue button; never one that mentions a captcha or a
+   * human check. A form already closed is NOT reopened — that stays his.
+   */
+  const SESSION_WARN_RE = /session\s+(is\s+about\s+to|will(\s+soon)?)\s+(expire|time\s*out|end)|about\s+to\s+(expire|time\s*out|be\s+(logged|signed)\s+out)|are\s+you\s+still\s+(there|working|here)|(extend|continue)\s+(your\s+)?session|stay\s+(signed|logged)\s+in|you\s+will\s+be\s+(logged|signed)\s+out|been\s+inactive\s+for|are\s+you\s+still\s+with\s+us|(will|going\s+to)\s+end\s+your\s+session/i;   // Oracle: "Are You Still With Us? … we will end your session automatically in 03:00" (F-910)
+  const STAY_RE = /^\s*(continue(\s+(session|working|my\s+session))?|extend(\s+(my\s+|your\s+)?session)?|stay\s+(signed|logged)\s+in|keep\s+(me\s+)?(signed|logged)\s+in|keep\s+working|i'?m\s+still\s+here|still\s+here|yes|ok(ay)?|resume(\s+session)?)\s*$/i;
+  const HUMAN_WORDS_RE = /captcha|are\s+you\s+(a\s+)?human|not\s+a\s+(ro)?bot|human\s+verification|verify\s+you\s+are/i;
+  /**
+   * A form a session dialog may submit: the dialog itself or inside it, owning
+   * nothing but hidden inputs and buttons. `f.elements`, not a search inside
+   * the form, so an <input form="id"> drawn elsewhere counts (week-fixes K2),
+   * and a contenteditable box counts as a field he could type in.
+   */
+  function ownSessionForm(d, f) {
+    if (!f || !(f === d || d.contains(f))) return false;
+    const fields = [...(f.elements || [])].some((el) => el.tagName === 'SELECT' || el.tagName === 'TEXTAREA'
+      || (el.tagName === 'INPUT' && !/^(hidden|submit|button|image|reset)$/i.test(el.type || '')));
+    return !fields && !f.querySelector('[contenteditable]:not([contenteditable="false" i]), [role="textbox"], [role="combobox"]');
+  }
+  function sessionStayControl() {
+    // Oracle's is a plain div, `standard-apply-session-expire-container` (F-910).
+    const dialogs = deepQuerySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog[open], .modal, .oj-dialog, [class*="session-expire" i], [class*="session-timeout" i]')
+      .filter((d) => d.getClientRects().length > 0);
+    for (const d of dialogs) {
+      const words = (d.innerText || d.textContent || '').slice(0, 1200);
+      if (!SESSION_WARN_RE.test(words) || HUMAN_WORDS_RE.test(words)) continue;
+      if (d.querySelector('iframe, input[type="password"]')) continue;
+      const b = [...d.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')]
+        .filter((x) => x.getClientRects().length > 0 && !x.disabled)
+        // A Continue that would SUBMIT a form outside the dialog is the
+        // application's, not the session's (week review, 2026-11-13): a
+        // type-less <button> in a dialog drawn inside the application <form>
+        // sends it. A dialog's own form is fine to submit — only a form inside
+        // the dialog holding nothing he could fill (week-fixes J1): a "dialog"
+        // (.modal, session-expire container) can wrap the whole application.
+        .filter((x) => !wouldSubmit(x) || ownSessionForm(d, x.form || x.closest('form')))
+        .find((x) => STAY_RE.test(text(x) || x.value || x.getAttribute('aria-label') || ''));
+      if (b) return b;
+    }
+    return null;
+  }
+
+  /** Oracle Recruiting Cloud's email-only sign-in: the one Next pressed for him (2026-10-23). */
+  function oracleEmailNext() {
+    if (!/\/hcmUI\/CandidateExperience\/|\/sites\/CX[^/]*\//i.test(location.pathname)) return null;
+    if (deepQuerySelectorAll('iframe[src*="captcha" i], .h-captcha, .g-recaptcha').some((f) => f.getClientRects().length > 0)) return null;
+    if (deepQuerySelectorAll('input[type="password"]').some((el) => el.getClientRects().length > 0)) return null;
+    return deepQuerySelectorAll('button, [role="button"], input[type="submit"]')
+      .filter((b) => onScreen(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true')
+      .find((b) => /^\s*(next|continue)\s*$/i.test(text(b) || b.value || '')) || null;
+  }
 
   function signInWall() {
     // A GATE AT AN AUTH URL, even with no password on it.
@@ -2281,8 +2530,18 @@
       .filter((el) => visible(el) && !siteFurniture(el));
     if (real.length > 2) return null;
 
+    // NOT A ONE-CLICK APPLY THROUGH ANOTHER SITE, AND NOT THE SEND BUTTON OF A
+    // TINY FORM (F-1013 #16, review 2026-11-05). "Apply with LinkedIn / Indeed
+    // / Google" applies on another site's profile, some of them at once; and on
+    // a quick-apply page with one or two boxes, a plain type="button" "Apply"
+    // in the same form as those boxes IS the send — wouldSubmit only knows
+    // type=submit. Neither is followed from these loose matches.
+    const VIA_RE = /\bapply\s+(?:now\s+)?(?:with|via|using|through)\s+(?:linkedin|indeed|google|seek|glassdoor|ziprecruiter|facebook|xing|handshake|simplify|your\s+profile)\b/i;
+    const sendsForm = (b) => { const f = b.closest('form'); return !!f && real.some((el) => f.contains(el)); };
+    const loose = cands.filter((b) => !VIA_RE.test(`${b.textContent || ''} ${b.getAttribute('aria-label') || ''}`) && !sendsForm(b));
+
     // Exact text first — "Apply" beats "Apply for other roles at this company".
-    const byText = cands.find((b) => APPLY_TEXT_RE.test((b.textContent || '').trim()));
+    const byText = loose.find((b) => APPLY_TEXT_RE.test((b.textContent || '').trim()));
     if (byText) return byText;
 
     // Then a short control that STARTS with apply. iCIMS renders its link as
@@ -2290,13 +2549,13 @@
     // span, concatenated), which no exact match will ever catch — and iCIMS
     // postings were reporting zero fields because of it. Length-capped so a
     // paragraph beginning "Apply by 30 June to..." is not mistaken for a button.
-    const byPrefix = cands.find((b) => {
+    const byPrefix = loose.find((b) => {
       const t = (b.textContent || '').replace(/\s+/g, ' ').trim();
       return t.length <= 48 && /^apply\b/i.test(t) && !/other role|another|filter|all jobs/i.test(t);
     });
     if (byPrefix) return byPrefix;
 
-    return cands.find((b) => {
+    return loose.find((b) => {
       const href = b.getAttribute('href') || '';
       return href && APPLY_PATH_RE.test(href) && /apply/i.test(b.textContent || href);
     }) || null;
@@ -2327,6 +2586,99 @@
     for (const b of heads) b.click();
     return heads.length;
   }
+
+  /**
+   * A RESUME SLOT BEHIND A BUTTON (F-835). SuccessFactors' career portal
+   * (portalcareer, career2/4/5/8 tenants: EnerSys, Newell, TSMC, Veeco) draws
+   * its Resume section as an "Upload a Resume" link; the file box ("Upload
+   * from Device") exists only once that dialog is open. Run after run filled
+   * every question and attached nothing — on career5 (2026-10-16) the resume
+   * went in on the very next pass after he opened the dialog himself.
+   *
+   * Pressed only when the page holds NO file input anywhere: a button that
+   * fronts a hidden input means the input is already there to be filled, and
+   * a scripted click on it would only ask for the file chooser. Never a link
+   * to another page, never site furniture, never anything that submits.
+   * Returns the button's words, or '' when nothing was pressed.
+   */
+  const RESUME_OPENER_RE = /^\s*(upload|attach|add)\s+(a\s+|your\s+|new\s+|my\s+)?(resume|r[ée]sum[ée]|cv)(\s*\/\s*cv)?\s*$/i;
+  // THE NAME AS A SCREEN READER HEARS IT (F-894). SuccessFactors' portal
+  // (career2/5/8: Lincoln, Schindler, Veeco, 2026-10-23) puts the dialog
+  // behind a "+" icon — span.glyphicon-plus-sign.addAttachments, role=button —
+  // named by aria-labelledby as "Resume/CV Upload a Resume Opens a dialog".
+  // The tile's own "Upload a Resume" text is a plain div that does nothing.
+  // The exact-match test above never fired, nothing was pressed, and three
+  // forms went out without a resume. The name is read without the "Opens a
+  // dialog" hint and without a leading slot label; a cover letter's "+" and
+  // a filled slot's delete never match.
+  const labelledBy = (b) => String(b.getAttribute?.('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+    .map((id) => (b.getRootNode?.().getElementById?.(id) || document.getElementById(id))?.textContent || '')
+    .join(' ').trim();
+  const openerName = (b) => String(labelledBy(b) || buttonName(b) || b.getAttribute?.('aria-label') || b.textContent || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[-–—,.]?\s*\(?\bopens?\s+(in\s+)?(a\s+)?(new\s+)?(dialog|window|popup|pop-up|modal|tab)\b\)?.*$/i, '')
+    .replace(/^\s*(r[ée]sum[ée]|cv)(\s*\/\s*(cv|r[ée]sum[ée]))?\s*\*?\s+(?=(upload|attach|add)\b)/i, '')
+    .trim();
+  // WHAT THE OPENER SAW, for the run's report (F-896). Lincoln and Veeco ran
+  // the F-894 opener and still attached nothing, with no trace of why; the
+  // next live run names the file boxes, the candidates and what was pressed.
+  let resumeOpenerNote = '';
+  async function openResumeUpload() {
+    resumeOpenerNote = '';
+    const navigates = (b) => b.tagName === 'A' && /^\s*(https?:|\/)/i.test(b.getAttribute('href') || '');
+    const deletes = (b) => /\b(delete|remove|trash|replace)\b/i.test(`${buttonName(b) || ''} ${typeof b.className === 'string' ? b.className : ''}`);
+    const fits = (b) => RESUME_OPENER_RE.test(openerName(b))
+      && !b.closest('label') && !navigates(b) && !deletes(b) && !siteFurniture(b) && !wouldSubmit(b);
+    // A "+" drawn as a focusable span with no role is still a button (F-896).
+    const candidates = () => deepQuerySelectorAll('a, button, [role="button"], [tabindex][aria-labelledby], .addAttachments').filter(fits);
+    // A FILE BOX ALREADY THERE FOR THE RESUME means nothing is pressed (F-835):
+    // one he can see, one named for a resume, or one beside the opener. A
+    // hidden, unnamed box elsewhere — a closed dialog's leftover — is not the
+    // resume's slot, and used to stop the opener on Lincoln and Veeco (F-896).
+    const boxes = deepQuerySelectorAll('input[type="file"]');
+    const first = candidates()[0];
+    const near = (i) => {
+      // Its own row only: two levels up. Higher holds the whole form.
+      for (let p = first?.parentElement, k = 0; p && k < 2; p = p.parentElement, k += 1) if (p.contains(i)) return true;
+      return false;
+    };
+    const resumeBox = (i) => i.getClientRects().length > 0 || near(i) || !!i.closest('[role="dialog"], [aria-modal="true"]')
+      || /\b(r[ée]sum[ée]|cv)\b|resume/i.test(`${[...(i.labels || [])].map((l) => l.textContent).join(' ')} ${i.getAttribute('aria-label') || ''} ${i.name || ''} ${i.id || ''}`);
+    const named = (els) => els.slice(0, 4).map((e) => (openerName(e) || e.name || e.id || e.tagName).slice(0, 40)).join(' | ');
+    resumeOpenerNote = `file boxes ${boxes.length}${boxes.length ? ` (${named(boxes)})` : ''}; openers ${candidates().length}${first ? ` (${named(candidates())})` : ''}`;
+    if (boxes.some(resumeBox)) { resumeOpenerNote += '; a resume box is already there'; return ''; }
+    let btn = candidates().find((b) => b.getClientRects().length > 0);
+    // …AND A SLOT IN A CLOSED SECTION (F-894). Lincoln's "My Documents" stayed
+    // collapsed while every other section was open, so its "+" had no box to
+    // be pressed. The section that hides it is opened by its own header
+    // button (aria-expanded=false), then the "+" is looked for again.
+    if (!btn) {
+      const hidden = candidates()[0];
+      let head = null;
+      for (let p = hidden?.parentElement; p && !head; p = p.parentElement) {
+        head = [...p.querySelectorAll('button[aria-expanded="false"], [role="button"][aria-expanded="false"]')]
+          .find((h) => !h.contains(hidden) && h.getClientRects().length > 0 && !wouldSubmit(h) && !h.hasAttribute('aria-haspopup')) || null;
+      }
+      if (head) {
+        head.click();
+        for (let i = 0; i < 10 && !btn; i += 1) { await pause(200); btn = candidates().find((b) => b.getClientRects().length > 0); }
+      }
+    }
+    if (!btn) { resumeOpenerNote += first ? '; the opener is not on screen' : '; no opener'; return ''; }
+    btn.click();
+    // The dialog's box can take a moment to be drawn.
+    let opened = false;
+    for (let i = 0; i < 15 && !opened; i += 1) {
+      const fresh = deepQuerySelectorAll('input[type="file"]').filter((i) => !boxes.includes(i));
+      opened = fresh.length > 0;
+      if (opened) fresh.forEach((i) => i.setAttribute('data-jarvis-resume', '1'));
+      if (!opened) await pause(200);
+    }
+    const name = String(openerName(btn) || buttonName(btn) || btn.textContent || '').replace(/\s+/g, ' ').trim();
+    resumeOpenerNote += `; pressed "${name.slice(0, 60)}"${opened ? ', a file box appeared' : ', NO new file box appeared'}`;
+    return name || 'resume';
+  }
+  const resumeOpenerSaw = () => resumeOpenerNote;
 
   function stepSignature() {
     const ids = [...document.querySelectorAll('[data-automation-id^="formField-"]')]
@@ -2478,6 +2830,104 @@
    * it the most trustworthy source there is, and it is the same markup Google
    * for Jobs reads, so vendors keep it accurate.
    */
+  /**
+   * THE SITE'S NAME AS AN EMPLOYER (R1): "Acme Careers", "Jobs at Acme",
+   * "Careers | Acme", "Acme Careers Home", "Acme Jobs | Home" are all Acme.
+   * Only the careers words are taken off, and "Home" only as part of them
+   * (review): "Smart Home" stays. A name that is nothing but those words is
+   * no name.
+   */
+  function siteNameAsCompany(raw) {
+    let s = String(raw || '').replace(/\s+/g, ' ').trim();
+    const JOBS = '(?:careers?|jobs?|job board|job openings|opportunities|work with us|join us|official site)';
+    for (let i = 0; i < 3; i += 1) {
+      const before = s;
+      // "Build your Career at Tesla" (Tesla's own), "Amazon.jobs" (Amazon's own),
+      // and a careers phrase's own "Home" ("Careers Home", "Jobs | Home").
+      s = s.replace(/^(?:build|start|grow|shape|find) your (?:career|future)s? (?:at|with)\s+/i, '')
+        .replace(/\.(?:jobs|careers)$/i, '')
+        .replace(new RegExp(`(\\s*[|:–—-]?\\s*(?:${JOBS}))\\s*[|:–—-]?\\s*home$`, 'i'), '$1')
+        .replace(new RegExp(`^(?:${JOBS})\\s*(?:at|with|@)\\s+`, 'i'), '')
+        .replace(new RegExp(`^(?:${JOBS})\\s*[|:–—-]\\s*`, 'i'), '')
+        .replace(new RegExp(`\\s*[|:–—-]\\s*(?:${JOBS})$`, 'i'), '')
+        .replace(new RegExp(`\\s+(?:${JOBS})$`, 'i'), '')
+        .trim();
+      if (s === before) break;
+    }
+    return new RegExp(`^(?:${JOBS})?$`, 'i').test(s) ? '' : s;
+  }
+
+  /** A title compared loosely: case, spacing and punctuation aside. */
+  const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  /**
+   * HAS THIS EXACT JSON-LD BEEN READ FIRST AT ANOTHER ADDRESS IN THIS TAB? (R1)
+   * Remembered per tab (sessionStorage); the first address wins. Tracking
+   * parameters are ignored, and a page under the same path (".../123" and
+   * ".../123/apply") is the same posting.
+   */
+  const TRACKING_PARAM = /^(utm_|gh_src$|source$|src$|ref$|referrer$|lever-source|lever-origin)/i;
+  function pageKey(href) {
+    try {
+      const u = new URL(String(href));
+      for (const k of [...u.searchParams.keys()]) if (TRACKING_PARAM.test(k)) u.searchParams.delete(k);
+      u.hash = '';
+      // A leading locale segment is the same page in another language (review):
+      // /en/jobs/17 and /en-US/jobs/17 and /jobs/17.
+      const pathOnly = u.pathname.replace(/^\/[a-z]{2}(?:[-_][a-z]{2})?(?=\/|$)/i, '').replace(/\/+$/, '');
+      return `${u.origin}${pathOnly}${u.search}`;
+    } catch { return String(href || ''); }
+  }
+  const samePage = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  function staleJsonLd(raw) {
+    const text = String(raw || '');
+    if (!text) return false;
+    let h = 5381;
+    for (let i = 0; i < text.length; i += 1) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+    const key = `jarvis-ld:${h.toString(36)}:${text.length}`;
+    const here = pageKey(location.href);
+    try {
+      const first = sessionStorage.getItem(key);
+      if (first && !samePage(first, here)) return true;
+      if (!first) sessionStorage.setItem(key, here);
+    } catch { /* no storage here: nothing to compare against */ }
+    return false;
+  }
+
+  /**
+   * WHAT ELSE THE POSTING SAYS ABOUT ITSELF (R1): employment type, pay,
+   * remote, where applicants may live, the closing date and the employer's
+   * own site. Facts about the job, never about him. A closing date in the
+   * past is only ever a caution: a false "expired" is the expensive error.
+   */
+  function jsonLdExtras(jp) {
+    const out = {};
+    const et = [].concat(jp.employmentType || []).map(String).filter(Boolean);
+    if (et.length) out.employmentType = et.join(', ').slice(0, 80);
+    const num = (x) => { const n = Number(String(x ?? '').replace(/[^0-9.]/g, '')); return Number.isFinite(n) && n > 0 ? n : null; };
+    const bs = jp.baseSalary;
+    const v = bs && typeof bs === 'object' ? (bs.value && typeof bs.value === 'object' ? bs.value : bs) : null;
+    if (v) {
+      const min = num(v.minValue ?? v.value); const max = num(v.maxValue ?? v.value);
+      if (min || max) {
+        out.salary = {
+          min: min || max, max: max || min,
+          currency: String(bs.currency || v.currency || '').trim().slice(0, 3).toUpperCase() || null,
+          unit: String(v.unitText || bs.unitText || '').trim().toUpperCase().slice(0, 10) || null,
+        };
+      }
+    }
+    if (/telecommute/i.test([].concat(jp.jobLocationType || []).join(' '))) out.remote = true;
+    const where = [].concat(jp.applicantLocationRequirements || []).map((r) => (typeof r === 'string' ? r : r?.name)).filter(Boolean).map(String);
+    if (where.length) out.applicantLocations = where.slice(0, 10).map((w) => w.slice(0, 60));
+    const vt = Date.parse(String(jp.validThrough || ''));
+    if (Number.isFinite(vt)) out.validThrough = new Date(vt).toISOString();
+    const org = jp.hiringOrganization;
+    const site = org && typeof org === 'object' ? [].concat(org.sameAs || org.url || [])[0] : '';
+    if (site && /^https?:\/\//i.test(String(site))) out.employerSite = String(site).slice(0, 300);
+    return out;
+  }
+
   function postingFromJsonLd() {
     const found = [];
     for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
@@ -2493,25 +2943,42 @@
       };
       walk(data);
       const isJob = (n) => /jobposting/i.test([].concat(n['@type'] || []).join(' '));
-      found.push(...nodes.filter(isJob));
+      found.push(...nodes.filter(isJob).map((n) => ({ n, raw: s.textContent || '' })));
     }
-    // ONE JOB, OR NONE. A careers landing page lists several postings as
-    // JSON-LD; taking the first would tailor his resume to whichever job the
-    // page happened to put first. Ambiguity is answered with nothing.
-    if (found.length !== 1) return null;
-    const jp = found[0];
-    const title = String(jp.title || jp.name || '').replace(/\s+/g, ' ').trim();
-    if (!title) return null;
-    const url = String(jp.url || '').trim();
+    if (!found.length) return null;
     // THE MARKUP MUST DESCRIBE THIS PAGE. A tenant that leaves a previous
     // job's JSON-LD in a shared template would otherwise rename every
     // application after it. Compared by requisition id, the only thing two
     // URLs for one posting reliably share.
-    if (url && ATS) {
-      const a = ATS.reqToken(url);
-      const b = ATS.reqToken(location.href);
-      if (a && b && a !== b) return null;
+    const pageToken = ATS?.reqToken?.(location.href) || '';
+    const tokenOf = (jp) => (ATS && jp.url ? ATS.reqToken(String(jp.url)) : '') || '';
+    const titleOf = (jp) => String(jp.title || jp.name || '').replace(/\s+/g, ' ').trim();
+    // ONE JOB, OR NONE (R1, 2026-11-07: chosen, not refused, when the page can
+    // say which). A careers landing page lists several postings as JSON-LD;
+    // taking the first would tailor his resume to whichever job the page put
+    // first. Several are narrowed to the one whose requisition is this page's,
+    // or else whose title is this page's own heading; anything still
+    // ambiguous is answered with nothing.
+    let pick = null;
+    if (found.length === 1) pick = found[0];
+    else {
+      const byToken = pageToken ? found.filter((f) => tokenOf(f.n) === pageToken) : [];
+      const heading = norm(jobHeading());
+      const byTitle = heading ? found.filter((f) => norm(titleOf(f.n)) === heading) : [];
+      pick = byToken.length === 1 ? byToken[0] : (!byToken.length && byTitle.length === 1 ? byTitle[0] : null);
     }
+    if (!pick) return null;
+    const jp = pick.n;
+    const title = titleOf(jp);
+    if (!title) return null;
+    const url = String(jp.url || '').trim();
+    const a = tokenOf(jp);
+    if (a && pageToken && a !== pageToken) return null;
+    // A STALE BLOB ON A PAGE THAT MOVED (R1). A single-page site keeps the
+    // first posting's JSON-LD in the document while its own router shows the
+    // next one, and with no requisition in either URL nothing above notices.
+    // The same markup seen first at another address is that address's job.
+    if (!(a && pageToken && a === pageToken) && staleJsonLd(pick.raw)) return null;
     const org = jp.hiringOrganization;
     const company = typeof org === 'string' ? org : (org && (org.name || org.legalName)) || '';
     // `where`, not `location`: a local by that name shadows window.location
@@ -2529,6 +2996,7 @@
       url,
       location: String(where || '').replace(/\s+/g, ' ').trim().slice(0, 120),
       source: 'jsonld',
+      ...jsonLdExtras(jp),
     };
   }
 
@@ -2550,15 +3018,51 @@
   ].join(', ');
 
   /** Headings that are never a job title, however the page is shaped. */
-  const NOT_A_TITLE_RE = /^(?:my information|my experience|application questions|voluntary disclosures|self[- ]identify|review|sign in|log in|create account|candidate (?:profile|home)|apply(?: now)?|careers?|jobs?|search(?: jobs)?|job search|open (?:roles|positions|jobs)|current openings|welcome|home|thank you.*|error|page not found)$/i;
+  // R1 (2026-11-07, read off the live pages): Google's only <h1> is "Job
+  // Details"; Tesla's second is its hero, "Build your Career at Tesla".
+  const NOT_A_TITLE_RE = /^(?:my information|my experience|application questions|voluntary disclosures|self[- ]identify|review|sign in|log in|create account|candidate (?:profile|home)|apply(?: now)?|careers?|jobs?|search(?: jobs)?|job search|open (?:roles|positions|jobs)|current openings|welcome|home|thank you.*|error|page not found|(?:job|position|role) (?:details|description|overview|summary)|(?:build|start|grow|shape|find) your (?:career|future)\b.*|(?:life|careers?|jobs?) at .+)$/i;
+  /** A site's furniture read as a heading (F-1012): Tesla's first <h1> is its logo, "Careers" and the skip link. */
+  const SITE_CHROME_RE = /skip (?:to|navigation)\b|^(?:main|site|primary) (?:menu|navigation)$|^toggle (?:navigation|menu)$|\b(?:accept|reject) (?:all )?cookies\b|\bcookie (?:settings|preferences)\b/i;
+  const badTitle = (t) => !t || t.length > 160 || NOT_A_TITLE_RE.test(t) || SITE_CHROME_RE.test(t);
+  /** In the site's own banner or navigation, not the posting (a posting's own <header> inside main/article is kept). */
+  const inSiteChrome = (el) => !!el.closest('nav, [role="navigation"], [role="banner"]')
+    || (!!el.closest('header') && !el.closest('main, article, [role="main"]'));
+
+  /**
+   * WHERE AN EMPLOYER'S OWN CAREERS SITE PUTS THE TITLE (R1), each read off
+   * its live public posting page on 2026-11-07 (fixtures in discover.test).
+   * Asked before any guessed heading. A site not listed keeps the general path.
+   */
+  const SITE_TITLE = [
+    { host: /(^|\.)tesla\.com$/i, sel: '#job-details-container h1' },
+    { host: /(^|\.)amazon\.jobs$/i, sel: '.info h1.title' },
+    { host: /(^|\.)jobs\.apple\.com$/i, sel: '#jobdetails-postingtitle' },
+  ];
+  function siteTitleAnchor() {
+    const site = SITE_TITLE.find((s) => s.host.test(location.hostname));
+    return site ? text(document.querySelector(site.sel)) : '';
+  }
+
+  /** The job's heading: the first <h1> that is not the site's header (F-1012). */
+  function jobHeading() {
+    for (const h of document.querySelectorAll('h1')) {
+      const t = text(h);
+      if (!badTitle(t) && !inSiteChrome(h)) return t;
+    }
+    return '';
+  }
 
   function postingFromDom() {
     if (!applyControl()) return null;
-    const title = text(document.querySelector('[data-automation-id="jobPostingHeader"]'))
-      || text(document.querySelector('h1'))
-      || (document.querySelector('meta[property="og:title"]')?.content || '').replace(/\s+/g, ' ').trim();
-    if (!title || title.length > 160 || NOT_A_TITLE_RE.test(title)) return null;
-    const company = (document.querySelector('meta[property="og:site_name"]')?.content || '').replace(/\s+/g, ' ').trim();
+    const first = (...xs) => xs.map((x) => String(x || '').replace(/\s+/g, ' ').trim()).find((t) => !badTitle(t)) || '';
+    const title = first(
+      text(document.querySelector('[data-automation-id="jobPostingHeader"]')),
+      siteTitleAnchor(),
+      jobHeading(),
+      document.querySelector('meta[property="og:title"]')?.content,
+    );
+    if (badTitle(title)) return null;
+    const company = siteNameAsCompany(document.querySelector('meta[property="og:site_name"]')?.content);
     // The longest description-looking block wins: the selectors are ordered by
     // how specifically they name a description, but a `[class*="description"]`
     // can be a one-line teaser above the real body.
@@ -2600,10 +3104,20 @@
    * as "no form here yet" on a Jabil posting he had sent on the 2nd (F-371).
    */
   const ALREADY_RE = /you(?:'ve| have) already applied|already applied (?:for|to) this|application (?:was )?already (?:submitted|received)|you have applied to this (?:job|position|role)|you applied (?:for|to) this (?:job|position|role) on [A-Z][a-z]+ \d{1,2},? \d{4}/i;
+  // A CONDITIONAL IS NOT A STATEMENT (F-1013 #2, review 2026-11-05): "If you
+  // have already applied for this position, please do not reapply" is
+  // boilerplate on live postings and forms, and it stood the tab down and
+  // marked the job applied. The clause before the match is read: if/whether/
+  // unless/once/when/in case in the same sentence means it is not about him.
+  const ALREADY_IF_RE = /\b(?:if|whether|unless|once|when|in case|those who|anyone who|candidates who|applicants who)\b[^.!?]*$/i;
   function alreadyApplied() {
     const t = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1500);
-    const m = t.match(ALREADY_RE);
-    return m ? m[0] : null;
+    const re = new RegExp(ALREADY_RE.source, 'gi');
+    for (let m = re.exec(t); m; m = re.exec(t)) {
+      const before = t.slice(Math.max(0, m.index - 80), m.index);
+      if (!ALREADY_IF_RE.test(before)) return m[0];
+    }
+    return null;
   }
 
   function applicationDone() {
@@ -2620,17 +3134,36 @@
     const offersSubmit = [...document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]')]
       .some((b) => onScreen(b) && (FINAL_RE.test(text(b) || b.value || '') || SUBMIT_RE.test(text(b) || b.value || '')));
     if (offersSubmit) return null;
-    // Some ATSes say it in the URL before they say it on the page.
-    if (ATS?.CONFIRMATION_URL_RE?.test(location.pathname)) return `confirmation page (${location.pathname})`;
+    // …AND THE SITE'S OWN SUBMIT, whatever it is built from (R3, 2026-11-07).
+    // UKG's is a <ukg-button> custom element, which the test above never sees:
+    // his Warren CAT form was logged "sent" on a step that still had it, and he
+    // had not sent it. Each platform's submit selector lives in ats.js.
+    // ONLY WHERE THE PLATFORM OPTS IN (review): iCIMS's selector is a plain
+    // button[type="submit"] and BrassRing's is button#save, both of which a
+    // real confirmation page can carry (a header search, "Submit another").
+    const site = ATS?.atsFor?.(location.href) || null;
+    if (site?.submit && site.submitSelectorBlocks) {
+      try { if ([...document.querySelectorAll(site.submit)].some((b) => shownControl(b))) return null; } catch { /* a bad selector never says "sent" */ }
+    }
+    // The headline, not the whole page: a confirmation leads with it.
+    const t = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+    const said = t.match(SUBMITTED_RE);
+    // Some ATSes say it in the URL before they say it on the page. Where a
+    // platform's URL has said it falsely (UKG, R3), the page must say it too.
+    if (ATS?.CONFIRMATION_URL_RE?.test(location.pathname)) {
+      if (!site?.confirmNeedsText) return `confirmation page (${location.pathname})`;
+      if (said) return `confirmation page (${location.pathname}): ${said[0]}`;
+      // A miss is remembered — the path and why, never the page's words — so
+      // a wording SUBMITTED_RE does not know shows up in the captures.
+      globalThis.__jarvisDoneMiss = { path: location.pathname, why: `${site.key || 'this platform'}: confirmation-shaped URL, but the headline does not say it was sent` };
+      return null;
+    }
     // A CANDIDATE'S OWN DASHBOARD lists his applications and their statuses
     // ("Application Submitted", "jobs you have applied to") — it is never the
     // confirmation of the one in front of him (iCIMS /jobs/dashboard, Werfen,
     // 2026-09-24).
     if (/\/(dashboard|my-?applications|candidate-?home|candidatehome|myprofile)\b/i.test(location.pathname)) return null;
-    // The headline, not the whole page: a confirmation leads with it.
-    const t = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 800);
-    const m = t.match(SUBMITTED_RE);
-    return m ? m[0] : null;
+    return said ? said[0] : null;
   }
 
   /**
@@ -2745,6 +3278,21 @@
   const SUCCESS_RE = /\b(successfully|success|uploaded|saved|thank\s+you|complete[d]?)\b/i;
   // The static required markers every form draws in red before anything goes wrong.
   const REQUIRED_MARK_RE = /^[\s*†‡()]*(?:required(?:\s+fields?)?|indicates\s+(?:a\s+)?required(?:\s+(?:field|question)s?)?|required\s+fields?\s+are\s+marked(?:\s+with\s+an?\s+asterisk)?|fields?\s+marked\s+with\s+(?:an?\s+)?\*?\s*(?:are|is)\s+required)?[\s*†‡().:]*$/i;
+  // STANDING NOTICES ARE NOT ERRORS (F-840). ADP draws its accommodation
+  // notice — "If you are unable to complete this application due to a
+  // disability, contact this employer…" — as role=alert on every page, and
+  // "unable" is an error word: 21 of 266 logged page-error records were that
+  // sentence. SmartRecruiters' entry dialog is one role=alert holding "Fields
+  // marked with * are required." and its own buttons. Those sentences are
+  // taken out; what is left must still say something is wrong.
+  const STANDING_SENTENCE_RE = /[^.!?]*(?:unable\s+to\s+complete\s+(?:this|the|an?|your)\s+application\s+due\s+to\s+a\s+disability|alternative\s+application\s+process|(?:request|ask\s+for)\s+(?:a\s+|an\s+)?(?:reasonable\s+)?accommodation)[^.!?]*[.!?]?/gi;
+  const REQUIRED_SENTENCE_RE = /(?:^|\s|\b)\*?\s*(?:all\s+)?(?:fields?|questions?)\s+marked\s+with\s+(?:an?\s+)?(?:asterisk\s*)?\(?\s*\*?\s*\)?\s+(?:are|is)\s+(?:required|mandatory)\.?/gi;
+  function isStandingNotice(text) {
+    const s = String(text || '').replace(/\s+/g, ' ').trim();
+    const rest = s.replace(STANDING_SENTENCE_RE, ' ').replace(REQUIRED_SENTENCE_RE, ' ').replace(/\s+/g, ' ').trim();
+    if (rest === s) return false;
+    return !(ERROR_WORD_RE.test(rest) || /\b(correct|highlighted|fix)\b/i.test(rest));
+  }
   function redness(color) {
     const m = String(color || '').match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+%?))?/i);
     if (!m) return false;
@@ -2771,6 +3319,7 @@
       const t = String(text || '').replace(/\s+/g, ' ').trim();
       if (t.length < 2 || t.length > 400 || seen.has(t)) return;
       if (REQUIRED_MARK_RE.test(t)) return;
+      if (isStandingNotice(t)) return;
       if (SUCCESS_RE.test(t) && !ERROR_WORD_RE.test(t)) return;
       seen.add(t);
       let color = '';
@@ -2858,6 +3407,8 @@
         if (!drawn(el)) continue;
         if (el.closest?.('#jarvis-overlay, [role="listbox"], [role="grid"], [role="menu"], .react-datepicker, video, audio')) continue;
         if (el.getRootNode?.()?.host?.id === 'jarvis-overlay') continue;
+        // An open list's own search box (ADP's portal filter, 2026-10-17).
+        if (/\bsc-sdf-select/.test(el.className || '') || /^\s*(enter\s+text\s+to\s+)?filter\s+(your\s+)?options\b/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''}`)) continue;
         if (siteFurniture(el)) continue;
         // Work/education/language/website entries are filled by the entry
         // filler from his history, not by the plan.
@@ -2892,10 +3443,165 @@
     return out.filter((u) => { const k = `${u.label}|${u.el.name || ''}`; if (seen.has(k)) return false; seen.add(k); return true; });
   }
 
+  /**
+   * WHAT HE TOUCHED IS HIS (F-1024, 2026-11-06). "sometimes i see its crashing
+   * out i try to edit it myself the dropdown but it keeps running my shit
+   * over". A run kept going while he changed a dropdown, and its later passes
+   * (the read-back that refills what "was lost", the second try for lists,
+   * the follow-along run's address and visa exceptions) put the planned
+   * answer back over his.
+   *
+   * Every control he changes is marked here, in the capture phase, before the
+   * page's own handlers run: a key, a pointer press, a paste or a drop from
+   * HIM, then the input or change it causes on that control. A choice he makes
+   * in a list the page draws elsewhere (a Workday prompt, a react-select menu)
+   * is credited to the control that opened it. The mark is kept per element
+   * and, once the page has been read again, per question (path + label) in
+   * this tab's sessionStorage, so a re-render does not make it Jarvis's again.
+   *
+   * `execCommand('insertText')`, which Jarvis types with, raises TRUSTED input
+   * events, so an input event alone proves nothing: it counts only right after
+   * his own gesture on the same control, and the filler never writes within
+   * 2.5 s of one (content.js waitForHim).
+   *
+   * One registry per document, kept on globalThis, because this file is
+   * injected again on every press and every step.
+   */
+  const HIS = globalThis.__jarvisHis || (() => {
+    const STORE_KEY = 'jarvis-his-fields';
+    const marks = new WeakSet();
+    let labels = new Set();
+    try { labels = new Set(JSON.parse(sessionStorage.getItem(STORE_KEY) || '[]')); } catch { /* no storage here: this document only */ }
+    const save = () => { try { sessionStorage.setItem(STORE_KEY, JSON.stringify([...labels].slice(-300))); } catch { /* full or refused */ } };
+    const st = { gestureAt: 0, gestureControl: null };
+    const CONTROL_SEL = 'input:not([type=hidden]), select, textarea, [contenteditable=""], [contenteditable="true"], [role=combobox], [role=radio], [role=checkbox], [role=switch], [role=spinbutton], button[aria-haspopup], button[aria-pressed]';
+    const LISTISH = (c) => !!c && (c.getAttribute?.('role') === 'combobox' || c.hasAttribute?.('aria-haspopup') || c.hasAttribute?.('aria-expanded') || c.tagName === 'SELECT');
+    const OPTION_SEL = '[role=option], [role=menuitem], [role=menuitemradio], [role=menuitemcheckbox], [data-automation-id="promptOption"], [data-automation-id="promptLeafNode"]';
+    const WRAP_SEL = '[data-automation-id^="formField-"]';
+    const elOf = (t) => (t && t.nodeType === 1 ? t : t?.parentElement) || null;
+    const jarvisUi = (n) => !!n?.closest?.('[id^="jarvis"], [class^="jarvis"], [data-jarvis]');
+    // ONE POSTING'S QUESTIONS (review): Eightfold, Phenom, Taleo and Greenhouse's
+    // embed keep one path for every job and name it in the query (or the hash),
+    // so the path alone carried his Gender pick into the next posting he opened.
+    const pageKey = () => `${location.pathname}${location.search}${String(location.hash || '').split('?')[0]}`;
+    const keyOf = (f) => `${pageKey()}|${String(f?.label || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 160)}`;
+    function controlOf(t) {
+      const n = elOf(t);
+      if (!n) return null;
+      const c = n.closest(CONTROL_SEL);
+      if (c) return c;
+      const lab = n.closest('label');
+      if (lab) return lab.control || lab.querySelector(CONTROL_SEL) || null;
+      const wrap = n.closest(WRAP_SEL);
+      return wrap ? (wrap.querySelector(CONTROL_SEL) || wrap) : null;
+    }
+    /** The control a list belongs to: the one naming it, the one open, or the one he pressed last. */
+    function ownerOfList(opt) {
+      // The box he just opened, when it is a box that opens a list (review: the
+      // first expanded element in the document is not necessarily his).
+      if (LISTISH(st.gestureControl) && Date.now() - st.gestureAt < 20000 && st.gestureControl.isConnected) return st.gestureControl;
+      const list = opt.closest('[role=listbox], [role=menu], [role=tree]');
+      if (list?.id) {
+        try {
+          const owner = document.querySelector(`[aria-controls~="${CSS.escape(list.id)}"], [aria-owns~="${CSS.escape(list.id)}"]`);
+          if (owner) return owner;
+        } catch { /* odd id */ }
+      }
+      const open = [...document.querySelectorAll('[aria-expanded="true"]')].filter((n) => n.matches(CONTROL_SEL) || n.closest(WRAP_SEL));
+      return open.length === 1 ? open[0] : null;
+    }
+    function mark(c) {
+      if (!c) return;
+      const fresh = !marks.has(c);   // a read of the form per keystroke would drag his typing
+      marks.add(c);
+      // The whole question: a Workday field's parts, a radio group by name.
+      const wrap = c.closest?.(WRAP_SEL);
+      if (wrap) { marks.add(wrap); for (const x of wrap.querySelectorAll(CONTROL_SEL)) marks.add(x); }
+      if (c.type === 'radio' && c.name) {
+        try { for (const r of (c.form || document).querySelectorAll(`input[type=radio][name="${CSS.escape(c.name)}"]`)) marks.add(r); } catch { /* odd name */ }
+      }
+      // At once, while the control is still on the page (review: Workday and
+      // react-select can redraw within the half second), and again once it settles.
+      if (fresh) promote();
+      promoteSoon();
+    }
+    /** The marked controls' questions, remembered by label too. */
+    function promote() {
+      try {
+        const read = globalThis.__jarvis?.discover;
+        if (typeof read !== 'function') return;
+        let grew = false;
+        for (const f of read()) {
+          if (!f?.label) continue;
+          if ((f.elements || []).some((e) => marks.has(e) || marks.has(e.closest?.(WRAP_SEL)))) {
+            const k = keyOf(f);
+            if (!labels.has(k)) { labels.add(k); grew = true; }
+          }
+        }
+        if (grew) save();
+      } catch { /* a memory, never in the way */ }
+    }
+    let promoteTimer = null;
+    function promoteSoon() {
+      clearTimeout(promoteTimer);
+      promoteTimer = setTimeout(promote, 500);
+    }
+    const gesture = (e) => {
+      if (!e.isTrusted || jarvisUi(elOf(e.target))) return;
+      st.gestureAt = Date.now();
+      const n = elOf(e.target);
+      const opt = n?.closest?.(OPTION_SEL);
+      const picks = e.type === 'pointerdown' || e.type === 'click' || (e.type === 'keydown' && e.key === 'Enter');
+      if (opt) {
+        // A choice in a list: the box the list belongs to is his now — the
+        // box around it when the list is drawn inside it (ARIA 1.0), else the
+        // one that opened it.
+        const inside = opt.closest(CONTROL_SEL);
+        if (picks) mark(inside && inside !== opt ? inside : ownerOfList(opt));
+        return;
+      }
+      const c = controlOf(n);
+      if (c) st.gestureControl = c;
+      // A box he ticks, a pill or a Yes/No button he presses is his on the press.
+      if ((e.type === 'click') && c && (/^(checkbox|radio)$/i.test(c.type || '') || /^(radio|checkbox|switch)$/.test(c.getAttribute?.('role') || '') || c.hasAttribute?.('aria-pressed'))) mark(c);
+      // A pick from an open list by keys (arrows, then Enter) raises no input event.
+      if (e.type === 'keydown' && e.key === 'Enter' && LISTISH(c) && c.getAttribute?.('aria-expanded') === 'true') mark(c);
+    };
+    const edit = (e) => {
+      if (!e.isTrusted) return;
+      // A native <select> changed by him: Chrome draws its list outside the
+      // page, so no event marks the pick and he may read it for a while. Jarvis
+      // never raises a trusted change on a select (its events are dispatched).
+      if (e.type === 'change' && e.target?.tagName === 'SELECT') { mark(e.target); return; }
+      if (Date.now() - st.gestureAt > 1500) return;
+      const c = controlOf(e.target);
+      if (c && (c === st.gestureControl || c.contains?.(st.gestureControl) || st.gestureControl?.contains?.(c))) mark(c);
+    };
+    if (!globalThis.__jarvisHisListening && typeof document !== 'undefined') {
+      globalThis.__jarvisHisListening = true;
+      for (const t of ['pointerdown', 'click', 'keydown', 'paste', 'drop', 'cut']) document.addEventListener(t, gesture, true);
+      for (const t of ['input', 'change']) document.addEventListener(t, edit, true);
+    }
+    return {
+      /** Did he touch this field (a discovered field, or a bare element)? */
+      touched(f) {
+        const els = f?.elements || (f?.nodeType === 1 ? [f] : []);
+        if (els.some((e) => marks.has(e) || marks.has(e.closest?.(WRAP_SEL)))) return true;
+        return !!f?.label && labels.has(keyOf(f));
+      },
+      /** When he last pressed, typed or clicked on this page (0: never). */
+      lastGestureAt: () => st.gestureAt,
+      /** For tests: forget this tab's memory. */
+      forget() { labels.clear(); save(); },
+    };
+  })();
+  globalThis.__jarvisHis = HIS;
+
   globalThis.__jarvis = {
-    errorsOnPage, redness, unseenControls,
+    his: HIS,
+    errorsOnPage, redness, unseenControls, isStandingNotice,
     labelFor, optionText, groupKey, visible, discover, setNativeValue, enterText,
-    fieldKey, promptOf, isCombobox, comboValue, nextControl, stepSignature, expandSections, settle, startGate, signInWall, signInWallKind, applyControl,
+    fieldKey, promptOf, isCombobox, comboValue, nextControl, stepSignature, expandSections, openResumeUpload, resumeOpenerSaw, otpBoxes, codeConfirmControl, oracleEmailNext, sessionStayControl, settle, startGate, signInWall, signInWallKind, applyControl,
     wouldSubmit, advanceBlockedBy, postingGone, pageBlocked, atsMoved,
     readPosting, postingFromJsonLd, postingFromDom, htmlToText, applicationDone, alreadyApplied, looksLikeApplication, ssoControl, waitForSomething,
     dismissCookieBanner, COOKIE_DECLINE_RE, consentGate,

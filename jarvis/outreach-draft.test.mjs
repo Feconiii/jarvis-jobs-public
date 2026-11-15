@@ -76,3 +76,12 @@ test('without a post, a message that claims one fails', () => {
   const r = checkDraft({ text: DRAFT, job: JOB, jd: JD, cvText: CV, name: 'Dana Lee' });
   assert.ok(r.problems.some((p) => /verify|shared history/.test(p)));
 });
+
+test('a connection note: 300 characters, addressed to them, no link, never visa or a referral', async () => {
+  const { checkConnectNote } = await import('./outreach-draft.mjs');
+  assert.equal(checkConnectNote("Hi Chris, I came across your post about the roles on OpenAI's actuator team. I applied to a few of them, so I'd love to connect.", 'Chris Moreno').ok, true);
+  assert.match(checkConnectNote('x'.repeat(301), 'Chris Moreno').problems.join(' '), /300/);
+  assert.match(checkConnectNote('Hello there, I applied.', 'Chris Moreno').problems.join(' '), /Hi Chris/);
+  assert.match(checkConnectNote('Hi Chris, see https://x.com', 'Chris Moreno').problems.join(' '), /links/);
+  assert.match(checkConnectNote('Hi Chris, could you refer me?', 'Chris Moreno').problems.join(' '), /referral/);
+});

@@ -61,8 +61,10 @@ const jobs = rows.map(r => {
 }).filter(Boolean);
 
 const { added, updated } = upsertJobs(jobs);
+await (await import('./dedupe.mjs')).recheckAfterUpsert();   // F-1028
 recordScan({
   at: new Date().toISOString(),
+  full: false,   // one careers page: never the auto-scan clock (code review #3)
   companiesScanned: 1, companiesNeedingAssist: 0,
   postingsCaptured: jobs.length, added, updated,
   perCompany: [{ company, tier, provider: 'browser-assist', status: 'ok', found: jobs.length, note: 'Assisted scan via user browser session.' }],

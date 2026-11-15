@@ -32,13 +32,14 @@ import { fileURLToPath } from 'url';
 import { familyFor, familyByKey } from './resume-family.mjs';
 import { buildSpec, loadPool, verifyPoolAgainstCv } from './resume-variants.mjs';
 import { buildVocabulary, applyRewrites } from './resume-tailor.mjs';
-import { applyPlan, reserveFor, protectedPhrases } from './resume-plan.mjs';
+import { applyPlan, reserveFor, protectedPhrases, ensureProofs } from './resume-plan.mjs';
+import { requirementLines, checklist, checklistLine } from './jd-checklist.mjs';
 import { tailorWithClaude } from './tailor-llm.mjs';
 import { polish } from './resume-polish.mjs';
 import { qaReport } from './resume-qa.mjs';
 import { coverageLine } from './jd-terms.mjs';
 import { keepReport } from './earns-its-keep.mjs';
-import { syncToOneDrive } from './onedrive-resumes.mjs';
+import { syncInBackground } from './onedrive-resumes.mjs';
 import { person } from './targeting.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -106,6 +107,25 @@ export function framingFrom(cvText) {
  * rewrites — including deliberately dishonest ones — without spending a model
  * call or depending on one being available.
  */
+/**
+ * A DESCRIPTION NOT WORTH TAILORING TO (F-935, 2026-10-26). West Pharma's stored
+ * "description" was a cookie notice and Honda's were 351–385-character teasers;
+ * all three resumes were tailored to them. A body that short, or one that reads
+ * as a cookie or consent banner, ships the family base and says why — the
+ * posting needs reading again, not a resume shaped around noise.
+ * @returns {string|null} why it was set aside, or null when it is usable
+ */
+export function thinDescription(jd) {
+  if (!jd) return null;
+  const text = String(jd).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const banner = /\bcookies?\b/i.test(text) && /\b(accept|consent|preferences|reject all|privacy (policy|settings))\b/i.test(text)
+    // "improve your experience" is cookie-banner English; these are not.
+    && !/\b(responsibilities|qualifications|requirements|what you('ll| will) do|bachelor'?s?|degree in)\b/i.test(text);
+  if (banner) return 'the stored description is a cookie or consent notice, not the posting — resume ships as the family base; read the posting again';
+  if (text.length < 600) return `the stored description is a ${text.length}-character teaser — resume ships as the family base; read the posting again`;
+  return null;
+}
+
 export async function resumeForJob(job, {
   outDir = OUT_DIR,
   jd = null,
@@ -143,13 +163,15 @@ export async function resumeForJob(job, {
   let rewrites = {};
   let plan = null;
   let why = 'tailoring not attempted';
+  const thin = thinDescription(jd);
+  if (thin) { jd = null; why = thin; }
   if (jd) {
     phase('choosing what goes on the page');
     const asked = await tailor({ spec: base, job, jd, familyLabel: family.label, pool, framing: framingFrom(cvText), request: String(request || '') });
     rewrites = asked?.rewrites || {};
     plan = asked?.plan || null;
     why = asked?.why || why;
-  } else {
+  } else if (!thin) {
     why = 'no description on this posting — resume ships in his own words';
   }
 
@@ -196,11 +218,29 @@ export async function resumeForJob(job, {
     unmatched = [...unmatched, ...second.unmatched];
   }
 
+  // THE POSTING'S CHECKLIST (2026-10-27). Every requirement sentence, numbered
+  // the same way the planner saw it; its duty/must/nice reading is ours, not the
+  // model's. Every bullet or project cited as proof of a duty or must-have goes
+  // on the page and is the last thing the layout cuts.
+  const reqLines = jd ? requirementLines(jd) : [];
+  if (plan && Array.isArray(plan.coverage) && reqLines.length) {
+    const byId = new Map(reqLines.map((r) => [r.id, r]));
+    plan.coverage = plan.coverage.map((c) => (c.id && byId.has(c.id) ? { ...c, need: byId.get(c.id).need, req: c.req || byId.get(c.id).text } : c));
+  }
+  let protect = null;
+  if (plan && Array.isArray(plan.coverage)) {
+    const proofs = ensureProofs(spec, plan.coverage, pool, jd);
+    spec = proofs.spec;
+    protect = proofs.protect;
+    if (proofs.added.length) planNotes.push(`put on the page as proof of a stated requirement: ${proofs.added.join(', ')}`);
+  }
+
   const dir = path.join(outDir, family.variant);
   let pdfPath = null;
   let auditPath = null;
   let fit = null;
   let qa = null;
+  let reqChecklist = [];
   const fitNotes = [];
   if (render) {
     mkdirSync(dir, { recursive: true });
@@ -210,7 +250,7 @@ export async function resumeForJob(job, {
     // (resume-polish.mjs): the page is measured after every change and the
     // worst thing found is answered with content before spacing; the
     // finished sheet is rasterised and his checklist run on it.
-    const reserve = reserveFor(spec, pool, plan?.reserve || []);
+    const reserve = reserveFor(spec, pool, plan?.reserve || [], { tailored: !!plan, amatCapped: !!plan?.whyFewerAmat });
     // WHAT THE POSTING ASKED FOR BY NAME, and therefore what the layout may
     // not spend. Reduced to phrases his own approved wordings actually carry —
     // the model can list anything, and only what is really on the page counts.
@@ -218,12 +258,15 @@ export async function resumeForJob(job, {
     phase('laying out the page');
     const polished = await polish(spec, {
       pdfPath, pool, reserve, tailor: fixOrphans ? tailor : null, job, jd, vocab, keep, dpi: rasterDpi,
-      tailored: !!jd, log: phase,
+      tailored: !!jd, log: phase, protect,
     });
     phase('checking the finished sheet');
     spec = polished.spec;
     fit = polished.fit;
     fitNotes.push(...polished.notes);
+    reqChecklist = plan ? checklist(reqLines, plan.coverage, spec) : [];
+    const cl = checklistLine(reqChecklist);
+    if (cl) fitNotes.push(cl);
     applied = [...applied, ...polished.applied];
     refused = [...refused, ...polished.refused];
     qa = { judge: polished.judge, raster: polished.raster, checklist: polished.checklist, layout: polished.layout };
@@ -258,8 +301,11 @@ export async function resumeForJob(job, {
         // read after the fact instead of discovered in a rejection.
         coverage: Array.isArray(plan?.coverage) ? plan.coverage : null,
         uncovered: Array.isArray(plan?.coverage)
-          ? plan.coverage.filter((c) => c && /^none$/i.test(String(c.proof || '').trim())).map((c) => `${c.need === 'must' ? 'MUST' : 'nice'}: ${c.req}`)
+          ? plan.coverage.filter((c) => c && /^none$/i.test(String(c.proof || '').trim())).map((c) => `${c.need === 'must' ? 'MUST' : c.need === 'duty' ? 'duty' : 'nice'}: ${c.req}`)
           : null,
+        // EVERY REQUIREMENT SENTENCE, its proof, and whether that proof made
+        // the finished page (jd-checklist.mjs).
+        checklist: reqChecklist.length ? reqChecklist : null,
         mustKeep: keep,
         emphasise: Array.isArray(plan?.emphasise) ? plan.emphasise : null,
         whyFewerAmat: plan?.whyFewerAmat || null,
@@ -277,13 +323,14 @@ export async function resumeForJob(job, {
       // A missing sidecar must never cost him the resume itself.
     }
     // His phone gets it too, in its own folder (after the sidecar: the folder
-    // is named from it). Never throws.
-    syncToOneDrive({ from: sent });
+    // is named from it). Never throws. In its own process (F-1053): the
+    // dashboard runs builds in-process, and the copy held it for 2 s.
+    syncInBackground({ from: sent });
   }
 
   // `jd` travels with the result so the report can measure coverage against the
   // posting's own words rather than only against the writer's paraphrase of it.
-  return { family, spec, pdfPath, auditPath, fit, qa, applied, refused, unmatched, notices, why, plan, changed, planNotes, fitNotes, jd, request: String(request || '') };
+  return { family, spec, pdfPath, auditPath, fit, qa, applied, refused, unmatched, notices, why, plan, changed, planNotes, fitNotes, checklist: reqChecklist, jd, request: String(request || '') };
 }
 
 /** A short, readable account of what tailoring did — printed and logged, never guessed at. */

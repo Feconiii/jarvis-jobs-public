@@ -68,9 +68,26 @@ export default {
     // redirect:'error' + the host check above keep the final hostname pinned to
     // the tenant — a server-side redirect can't bounce us off-domain (SSRF).
     const json = /** @type {any} */ (await ctx.fetchJson(apiUrl, { redirect: 'error' }));
+    // A failed read, never a set of postings: the scan names it under
+    // "board(s) failed to read" every run until the entry is fixed (F-637).
+    if (isBambooPlaceholder(json?.result)) {
+      throw new Error(`bamboohr: ${origin} serves BambooHR's placeholder demo board (#15 "IT Security Engineer", Mayfair), not ${entry.name}'s careers site (F-637)`);
+    }
     return parseBambooHRResponse(json, entry.name, origin);
   },
 };
+
+/**
+ * The demo board BambooHR served under unclaimed-looking subdomains (F-637):
+ * andai, culture, curative, xylem, mte and nine more all answered with job #15
+ * "IT Security Engineer" in Mayfair, London, beside a generic four or five.
+ * @param {any} jobs  the `result` array of /careers/list
+ */
+export function isBambooPlaceholder(jobs) {
+  return (Array.isArray(jobs) ? jobs : []).some(x => String(x?.id) === '15'
+    && /^IT Security Engineer$/i.test(String(x?.jobOpeningName || '').trim())
+    && /mayfair/i.test(JSON.stringify(x?.location || '')));
+}
 
 /**
  * Parse a BambooHR `/careers/list` response. Exported for unit tests.

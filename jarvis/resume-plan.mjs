@@ -52,6 +52,14 @@ export const STAPLES = ['amat.vision-fixture'];
  */
 export const OPTIONAL_ORGS = ['sae', 'rover'];
 /**
+ * ON ONLY WHEN THE PLAN ASKS FOR IT (his rule, 2026-11-04): the Mars Rover Team
+ * goes on a resume only when it is relevant to the role or the posting asks for
+ * it. The family bases still carry it, so a plan that says nothing about it
+ * used to keep it; now a plan must give it bullets (tailor-llm's brief says
+ * when), and silence leaves it off.
+ */
+export const OPT_IN_ORGS = ['rover'];
+/**
  * The least-protected organisation first, when the page is over budget.
  *
  * The Mars Rover Team (added 2026-09-15) replaced Baja on every family base —
@@ -70,9 +78,12 @@ export const RESERVE_ORDER = ['acme', 'amat', 'makerspace', 'rover', 'sae'];
  * and "combine them when space is tight and you still want to hit cobot
  * work". `cobot-cell` is that combination, so it never sits beside either.
  */
-export const ONE_OF = [['amat.robodk', 'amat.cobot-cell'], ['amat.cobot-rack', 'amat.cobot-cell']];
+// vision-system is the fixture and the Neuro-T model said as one (his call, 2026-10-27).
+export const ONE_OF = [['amat.robodk', 'amat.cobot-cell'], ['amat.cobot-rack', 'amat.cobot-cell'],
+  ['amat.vision-fixture', 'amat.vision-system'], ['amat.neuro-t', 'amat.vision-system']];
 /** Bullets said as one when the page is tight, instead of one being dropped. */
-export const MERGES = [{ parts: ['amat.robodk', 'amat.cobot-rack'], into: 'amat.cobot-cell' }];
+export const MERGES = [{ parts: ['amat.robodk', 'amat.cobot-rack'], into: 'amat.cobot-cell' },
+  { parts: ['amat.vision-fixture', 'amat.neuro-t'], into: 'amat.vision-system' }];
 /**
  * What Applied Materials keeps.
  *
@@ -149,7 +160,13 @@ export function applyPlan(base, proposal, { pool, job } = {}) {
   const notes = [];
   const changed = [];
   const spec = { ...base };
-  const p = proposal && typeof proposal === 'object' ? proposal : {};
+  const p0 = proposal && typeof proposal === 'object' ? proposal : {};
+  // AN UNTAILORED BUILD STILL KEEPS HIS RULE (first mate's call, 2026-11-04):
+  // no plan (tailoring failed, no description, a reach card's base) is read as
+  // a plan that names nothing, so the rover is left off and the page budget
+  // and reserve refill the room. The family bases themselves are unchanged.
+  const untailored = !(p0.experience && typeof p0.experience === 'object');
+  const p = untailored ? { ...p0, experience: {} } : p0;
 
   // ── titles ───────────────────────────────────────────────────────
   spec.experience = base.experience.map((entry) => {
@@ -204,6 +221,9 @@ export function applyPlan(base, proposal, { pool, job } = {}) {
       const orgEntry = pool.orgs[orgKey];
       const baseKeys = entry.bullets.map((b) => b.provenanceKey.split('.')[1]);
       let keys = Array.isArray(p.experience[orgKey]) ? p.experience[orgKey].map(String) : null;
+      // An opt-in org the plan does not name is left off, not kept from the base (his rule, 2026-11-04).
+      const notAsked = !keys && OPT_IN_ORGS.includes(orgKey);
+      if (notAsked) keys = [];
       if (!keys) { next.push(entry); total += entry.bullets.length; continue; }
       const seen = new Set();
       keys = keys.filter((k) => {
@@ -253,8 +273,11 @@ export function applyPlan(base, proposal, { pool, job } = {}) {
         }
       }
       if (!keys.length && OPTIONAL_ORGS.includes(orgKey)) {
-        notes.push(`${orgKey}: left off — nothing it proves is not proven more strongly elsewhere`);
-        changed.push(`experience:${orgKey}`);
+        notes.push(notAsked
+          ? `${orgKey}: left off — on only when relevant to the role or the posting asks for it, and the plan did not ask`
+          : `${orgKey}: left off — nothing it proves is not proven more strongly elsewhere`);
+        // An untailored build is still "the family base" to the report (its NOT TAILORED warning).
+        if (!untailored) changed.push(`experience:${orgKey}`);
         continue;
       }
       if (!keys.length) { keys = baseKeys.slice(0, 1); notes.push(`${orgKey}: every role stays on the page — restored one line`); }
@@ -477,8 +500,25 @@ export function protectedPhrases(spec, proposed = []) {
   return out;
 }
 
-/** Bullet keys the plan did not use, for filling a short page — in pool order, protected pairs respected. */
-export function reserveFor(spec, pool, proposed = []) {
+/**
+ * Lines that read as small work (2026-10-26: "too many niche details or
+ * unimpressive work hurts a lot"). On a tailored page they go on only when the
+ * plan itself asked for them; the filler never reaches for them on its own.
+ */
+export const SMALL_WORK = ['acme.packaging', 'acme.docs', 'sae.coach'];
+
+/**
+ * Bullet keys the plan did not use, for filling a short page — the plan's own
+ * reserve first, then pool order, protected pairs respected.
+ *
+ * A TAILORED PAGE KEEPS ITS ARGUMENT (2026-10-26). Rebuilding Schindler, the
+ * plan argued Applied Materials down to four ("the posting asks for no machine
+ * vision, so neuro-t gives its line away") and the filler put Neuro-T straight
+ * back, then topped Acme Steel up with the translated guides and packaging. With
+ * `tailored`, the reserve skips SMALL_WORK (a plan that wants one puts it in
+ * the experience it chose), and with `amatCapped` it skips Applied Materials too.
+ */
+export function reserveFor(spec, pool, proposed = [], { tailored = false, amatCapped = false } = {}) {
   const used = new Set(spec.experience.flatMap((e) => e.bullets.map((b) => b.provenanceKey)));
   const out = [];
   const consider = (k) => {
@@ -487,6 +527,9 @@ export function reserveFor(spec, pool, proposed = []) {
     if (!pool.orgs[o]?.bullets?.[b]) return;
     for (const pair of ONE_OF) if (pair.includes(k) && pair.some((x) => x !== k && used.has(x))) return;
     if (b === 'surplus') return;   // never used — his call, 2026-08-02
+    // The model's own reserve is no exception: rebuilding Schindler it argued
+    // Neuro-T off and listed it as the first line to add back.
+    if (tailored && (SMALL_WORK.includes(k) || (amatCapped && o === 'amat'))) return;
     out.push(k);
   };
   for (const k of proposed) consider(String(k));
@@ -585,22 +628,80 @@ export function mergeInsteadOf(spec, dropping, pool) {
   return null;
 }
 
-export function withoutOneBullet(spec) {
-  for (const orgKey of trimOrderFor(spec)) {
-    const e = spec.experience.find((x) => x.orgKey === orgKey);
-    if (!e) continue;
-    const floor = orgKey === 'amat' ? MIN_AMAT : (OPTIONAL_ORGS.includes(orgKey) ? 0 : 1);
-    if (e.bullets.length <= floor) continue;
-    if (e.bullets.length === 1 && floor === 0) {
-      // The optional organisation goes whole: a heading with no line under it
-      // is not a resume.
-      return { spec: { ...spec, experience: spec.experience.filter((x) => x !== e) }, dropped: e.bullets[0].provenanceKey };
+/**
+ * Drop one bullet to make room. `protect` holds the keys the posting's
+ * checklist cites as proof of a duty or must-have (jd-checklist.mjs): every
+ * other bullet goes first, and a protected one only when nothing else can.
+ */
+export function withoutOneBullet(spec, protect = null) {
+  const pass = (guard) => {
+    for (const orgKey of trimOrderFor(spec)) {
+      const e = spec.experience.find((x) => x.orgKey === orgKey);
+      if (!e) continue;
+      const floor = orgKey === 'amat' ? MIN_AMAT : (OPTIONAL_ORGS.includes(orgKey) ? 0 : 1);
+      if (e.bullets.length <= floor) continue;
+      if (e.bullets.length === 1 && floor === 0) {
+        if (guard && guard.has(e.bullets[0].provenanceKey)) continue;
+        // The optional organisation goes whole: a heading with no line under it
+        // is not a resume.
+        return { spec: { ...spec, experience: spec.experience.filter((x) => x !== e) }, dropped: e.bullets[0].provenanceKey };
+      }
+      for (let i = e.bullets.length - 1; i >= 0; i--) {
+        if (STAPLES.includes(e.bullets[i].provenanceKey)) continue;
+        if (guard && guard.has(e.bullets[i].provenanceKey)) continue;
+        const bullets = e.bullets.filter((_, j) => j !== i);
+        return { spec: { ...spec, experience: spec.experience.map((x) => (x === e ? { ...e, bullets } : x)) }, dropped: e.bullets[i].provenanceKey };
+      }
     }
-    for (let i = e.bullets.length - 1; i >= 0; i--) {
-      if (STAPLES.includes(e.bullets[i].provenanceKey)) continue;
-      const bullets = e.bullets.filter((_, j) => j !== i);
-      return { spec: { ...spec, experience: spec.experience.map((x) => (x === e ? { ...e, bullets } : x)) }, dropped: e.bullets[i].provenanceKey };
-    }
+    return null;
+  };
+  return (protect && protect.size ? pass(protect) : null) || pass(null) || { spec, dropped: null };
+}
+
+/**
+ * EVERY LINE CITED AS PROOF IS ON THE PAGE (2026-10-27). The planner names, for
+ * each numbered requirement, the bullet or project that proves it — and then
+ * sometimes leaves that very line off its page (Coherent's CAM requirement,
+ * proved only by the CNC card-holder project). Cited bullets of a duty or
+ * must-have are added to their organisation; a cited project takes the place
+ * of an uncited one. Returns the spec, what was added, and the protected keys.
+ */
+export function ensureProofs(spec, coverage, pool, jd = '') {
+  const added = [];
+  const bullets = new Set(), projects = new Set();
+  for (const c of coverage || []) {
+    if (!c || c.need === 'nice') continue;
+    const p = String(c.proof || '').trim();
+    const pm = p.match(/^project:\s*(.+)$/i);
+    if (pm) projects.add(pm[1].trim());
+    else if (/^[a-z]+\.[a-z0-9-]+$/i.test(p)) bullets.add(p);
   }
-  return { spec, dropped: null };
+  // A PROJECT THAT IS THE ONLY PROOF OF WHAT THE POSTING NAMES. The pool says
+  // which posting words a project alone answers (`provesWhen`); the planner was
+  // told and still put piston FEA on Coherent's page, which asks for CAM and
+  // equipment programming that only the CNC card holder proves (2026-10-27).
+  for (const [key, proj] of Object.entries(pool?.projects || {})) {
+    if (!proj?.provesWhen || !jd) continue;
+    try { if (new RegExp(proj.provesWhen, 'i').test(jd)) projects.add(key); } catch { /* a bad pattern proves nothing */ }
+  }
+  let out = spec;
+  const onPage = () => new Set((out.experience || []).flatMap((e) => (e.bullets || []).map((b) => b.provenanceKey)));
+  for (const key of bullets) {
+    if (onPage().has(key)) continue;
+    const [o, b] = key.split('.');
+    if (!pool?.orgs?.[o]?.bullets?.[b] || !(out.experience || []).some((e) => e.orgKey === o)) continue;
+    out = withBullet(out, key, pool);
+    added.push(key);
+  }
+  for (const key of projects) {
+    if (!pool?.projects?.[key] || (out.projects || []).some((p) => p.key === key)) continue;
+    const list = [...(out.projects || [])];
+    const spare = list.map((p, i) => ({ p, i })).reverse().find(({ p }) => !projects.has(p.key));
+    if (list.length < 2) list.push(projectFor(key, pool));
+    else if (spare) list[spare.i] = projectFor(key, pool);
+    else continue;
+    out = { ...out, projects: list };
+    added.push(`project:${key}`);
+  }
+  return { spec: out, added, protect: bullets };
 }

@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
-import { pageCompanyKeys, pageTitleHints, tabOrPage, titleParts, employerKey } from './page-company.mjs';
+import { pageCompanyKeys, pageTitleHints, tabOrPage, titleParts, employerKey, sameEmployer, namesEmployer } from './page-company.mjs';
 
 const APPLIED_MEDICAL = 'https://engineering-appliedmedical.icims.com/jobs/14341/machine-design-engineer%2c-automation/candidate?from=login&eem=x&code=y';
 
@@ -60,7 +60,7 @@ test('F-633 Intel stands: a look-alike matched only by its heading does not take
 
 test('serve.mjs finds a LinkedIn copy through these, not the first path segment', () => {
   const src = readFileSync(new URL('./serve.mjs', import.meta.url), 'utf-8');
-  assert.match(src, /import \{ pageCompanyKeys, pageTitleHints, tabOrPage, titleParts, employerKey, sameEmployer \} from '\.\/page-company\.mjs';/);
+  assert.match(src, /import \{ pageCompanyKeys, pageTitleHints, tabOrPage, titleParts, employerKey, sameEmployer, namesEmployer \} from '\.\/page-company\.mjs';/);
   assert.match(src, /keys\.some\(\(k\) => sameEmployer\(k, row\.company\)\)/, 'the Eightfold lookup asks sameEmployer (F-726)');
   assert.match(src, /tabOrPage\(remembered, onPage, page\.pageUrl\) === 'tab'/, 'jobForRequest asks tabOrPage');
   assert.match(src, /function findLinkedInCopy\(pageUrl, headings\)/);
@@ -87,4 +87,25 @@ test('sameEmployer: a blank or one-letter company names no employer (F-726)', as
   assert.equal(sameEmployer('appliedmaterials', 'App'), false, 'too short to be the employer');
   assert.equal(sameEmployer('appliedmaterials', 'Applied Medical'), false);
   assert.equal(sameEmployer('', 'Anything'), false);
+});
+
+// F-1023 (2026-11-06, "not a posting???"): GeekPlus's own MokaHR form for the "Geek+" row he had in his Inbox.
+test('a MokaHR address names its employer in the second path segment', () => {
+  const keys = pageCompanyKeys('https://hire-r1.mokahr.com/social-recruitment/geekplusamerica/100008811#/job/e4b8f198-b824-4c20-8cad-b157f2b552f7/apply');
+  assert.deepEqual(keys, ['geekplusamerica']);
+});
+
+test('"+" is "plus" and a trailing region goes: Geek+ is geekplusamerica', () => {
+  assert.equal(namesEmployer('geekplusamerica', 'Geek+'), true);
+  assert.equal(namesEmployer('geekplus', 'GeekPlus America'), false, 'the company side keeps its words');
+  assert.equal(sameEmployer('geekplusamerica', 'Geek+'), true);
+  assert.equal(sameEmployer('siemensusa', 'Siemens'), true);
+});
+
+test('two employers that share a word never match', () => {
+  assert.equal(namesEmployer('bankofamerica', 'Bank of the West'), false, 'the regionless key is exact, never a prefix');
+  assert.equal(sameEmployer('bankofamerica', 'Bank of the West'), false);
+  assert.equal(sameEmployer('appliedmedical', 'Applied Materials'), false);
+  assert.equal(namesEmployer('appliedmedical', 'Applied Materials'), false);
+  assert.equal(namesEmployer('americanairlines', 'American Express'), false);
 });

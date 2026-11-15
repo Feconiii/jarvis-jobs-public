@@ -191,6 +191,32 @@ check('JSON-LD organisations are still read', parseA16zPayload(
   '<script type="application/ld+json">{"@type":"Organization","name":"Astranis","url":"https://astranis.com"}</script>'
 ).map(c => c.name), ['Astranis']);
 
+// The fourth strategy (2026-10-19): the restyled page embeds the whole
+// portfolio, as an entity-encoded `data-companies` attribute and as a script
+// array. Both shapes below are cut from the live page.
+const a16zAttr = '<div data-companies="[{&quot;id&quot;:&quot;371055&quot;,&quot;name&quot;:&quot;Hadrian&quot;,'
+  + '&quot;status&quot;:&quot;Active&quot;,&quot;stages&quot;:[&quot;Venture&quot;],&quot;url&quot;:&quot;https:\\/\\/hadrian.co\\/&quot;,'
+  + '&quot;tags&quot;:[&quot;stg_venture&quot;,&quot;american dynamism&quot;,&quot;manufacturing &amp; robotics&quot;],'
+  + '&quot;verticals&quot;:&quot;American Dynamism&quot;,&quot;overview&quot;:&quot;Precision components for rockets.&quot;},'
+  + '{&quot;id&quot;:&quot;372153&quot;,&quot;name&quot;:&quot;Airbnb&quot;,&quot;status&quot;:&quot;Exits&quot;,&quot;url&quot;:&quot;https:\\/\\/airbnb.com&quot;}]"></div>';
+const fromAttr = parseA16zPayload(a16zAttr);
+check('a16z: the data-companies attribute is read', fromAttr.map(c => c.name), ['Hadrian', 'Airbnb']);
+check('a16z: its tags lose the filter keys and keep the words',
+  fromAttr[0].tags, ['american dynamism', 'manufacturing & robotics']);
+check('a16z: an exited company says so', fromAttr.map(c => c.status), ['Active', 'Exited']);
+check('a16z: a16z\'s own tag makes it a hardware seed', looksHardware(fromAttr[0]), true);
+// Envoy, cut from the live page: "workspace" in its blurb used to pass "space".
+check('a16z: marketing copy in the blurb does not make a software company hardware',
+  looksHardware(parseA16zPayload('<div data-companies="[{&quot;name&quot;:&quot;Envoy&quot;,&quot;status&quot;:&quot;Active&quot;,'
+    + '&quot;tags&quot;:[&quot;enterprise&quot;,&quot;saas&quot;],&quot;verticals&quot;:&quot;Enterprise&quot;,'
+    + '&quot;overview&quot;:&quot;Envoy is a workplace platform for the hybrid workspace.&quot;}]"></div>')[0]), false);
+const a16zScript = '<script>window.a16z_portfolio_companies = [{"id":"15189","title":"Anduril",'
+  + '"web":"https://www.anduril.com","overview":"Defense technology.","acquirer":"","ticker_symbol":""},'
+  + '{"id":"1","title":"Oculus","web":"https://oculus.com","acquirer":"Facebook"}];</script>';
+check('a16z: the script array is the fallback',
+  parseA16zPayload(a16zScript).map(c => [c.name, c.url, c.status]),
+  [['Anduril', 'https://www.anduril.com', 'Active'], ['Oculus', 'https://oculus.com', 'Exited']]);
+
 
 console.log('\n🧪 discover-ats: reading a board out of a careers page');
 
@@ -201,6 +227,10 @@ const { boardLinksIn, workdayLinksIn } = await import('./discover-ats.mjs');
 check('finds a Lever board behind an unguessable slug',
   boardLinksIn('<a href="https://jobs.lever.co/cfsenergy">Open roles</a>'),
   [{ provider: 'lever', slug: 'cfsenergy' }]);
+// Review, 2026-11-04: jobs.jobvite.com/search is a page, not an employer.
+check('a Jobvite page path is not taken for an employer',
+  boardLinksIn('<a href="https://jobs.jobvite.com/search?q=x">x</a> <a href="https://jobs.jobvite.com/jobs">y</a> <a href="https://jobs.jobvite.com/mini-circuits/jobs">z</a>'),
+  [{ provider: 'jobvite', slug: 'mini-circuits' }]);
 check('reads the embed form of a Greenhouse board',
   boardLinksIn('<iframe src="https://boards.greenhouse.io/embed/job_board?for=acme"></iframe>'),
   [{ provider: 'greenhouse', slug: 'acme' }]);
@@ -418,5 +448,142 @@ console.log('\n🧪 discover-ats: websites a company published, for --names (F-6
   check('looked up by lower-cased name, reduced to the origin',
     [...m], [['nasa jet propulsion laboratory', 'https://www.jpl.nasa.gov'], ['vertex pharmaceuticals', 'https://www.vrtx.com']]);
   check('a file that is not JSON is no websites, not a crash', parseSitesFile('not json').size, 0);
+}
+
+console.log('\n🧪 discover-ats: Workable holds and the slow lane (F-634) — offline, fetch stubbed');
+{
+  const { mkdtempSync, readFileSync: rf, rmSync } = await import('fs');
+  const os = await import('os');
+  const pathMod = await import('path');
+  const ats = await import('./discover-ats.mjs');
+  const H = await import('./ats-holds.mjs');
+  const dir = mkdtempSync(pathMod.join(os.tmpdir(), 'holds-'));
+  const holdsFile = pathMod.join(dir, 'discover-holds.json');
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  let route = () => ({ status: 404, body: '' });
+  globalThis.fetch = async (url) => {
+    sent.push(String(url));
+    const { status, body = '', headers = {} } = route(String(url));
+    return new Response(body, { status, headers });
+  };
+  const sleeps = [];
+  ats._setClock({ sleep: async (ms) => { sleeps.push(ms); } });
+  const toWorkable = () => sent.filter((u) => u.includes('workable.com')).length;
+  try {
+    // Retry-After forms.
+    check('Retry-After in seconds', H.parseRetryAfter('70647'), 70647);
+    check('Retry-After as a date', H.parseRetryAfter(new Date(Date.now() + 3_600_000).toUTCString()) >= 3598, true);
+    check('a Workable 429 always holds, even with no header', !!H.holdDeadline('workable.com', 429, null), true);
+    check('a 403 never holds', H.holdDeadline('workable.com', 403, '70000'), null);
+    check('another host\'s short 429 is an ordinary refusal', H.holdDeadline('recruitee.com', 429, '30'), null);
+    check('…but a long one holds that host too', !!H.holdDeadline('recruitee.com', 429, '3600'), true);
+
+    // 1. The fast pass sends no Workable guess at all; the probes go on the lost list.
+    ats._configureHolds({ file: holdsFile });
+    sent.length = 0;
+    const { result, lost } = await ats.resolveCompanyTracked({ name: 'Acme Robotics', skipWorkday: true, seeded: true });
+    check('fast pass: nothing sent to Workable', toWorkable(), 0);
+    check('fast pass: the name is still a miss', !!result.miss, true);
+    check('fast pass: its Workable slugs wait for the slow lane',
+      lost.filter((l) => l.provider === 'workable').map((l) => [l.cand.slug, l.how]),
+      [['acmerobotics', 'deferred'], ['acme-robotics', 'deferred'], ['acme', 'deferred']]);
+
+    // 2. The slow lane's first 429 holds Workable for its Retry-After, persisted, and nothing else goes.
+    sent.length = 0;
+    route = (u) => (u.includes('workable.com') ? { status: 429, headers: { 'retry-after': '70000' } } : { status: 404 });
+    const t0 = Date.now();
+    const out = await H.runSlowLane([
+      { name: 'Acme Robotics', provider: 'workable', service: 'workable.com', cand: { slug: 'acmerobotics', strong: true } },
+      { name: 'Beta Motors', provider: 'workable', service: 'workable.com', cand: { slug: 'betamotors', strong: true } },
+      { name: 'Gamma Space', provider: 'workable', service: 'workable.com', cand: { slug: 'gammaspace', strong: true } },
+    ], { probe: ats.slowProbe, isHeld: (s) => !!H.heldUntil(ats._holdState(), s), sleep: async (ms) => { sleeps.push(ms); } });
+    check('Workable 429: exactly one request sent', toWorkable(), 1);
+    check('Workable 429: the other two names are held for a later run, not retried', out.deferred.map((d) => d.name), ['Acme Robotics', 'Beta Motors', 'Gamma Space']);
+    const saved = JSON.parse(rf(holdsFile, 'utf8'));
+    const until = Date.parse(saved.holds['workable.com']?.until || 0);
+    check('the deadline is written to the hold file (≈ now + Retry-After)', until >= t0 + 69_990_000 && until <= Date.now() + 70_010_000, true);
+
+    // 3. Inside the hold nothing goes — not a guess, not the company's own link, not the slow lane.
+    sent.length = 0;
+    const r1 = await ats.slowProbe({ name: 'Delta', provider: 'workable', cand: { slug: 'delta', strong: true } });
+    const r2 = await ats.slowProbe({ name: 'Slip Robotics', provider: 'workable', cand: { slug: 'slip-robotics', strong: true }, speculative: false });
+    check('held: no request of any kind reaches Workable', toWorkable(), 0);
+    check('held: the probe says so', [r1.held, r2.held], [true, true]);
+
+    // 4. A NEW run reads the hold from the file and still sends nothing.
+    ats._configureHolds({ file: holdsFile });
+    sent.length = 0;
+    await ats.slowProbe({ name: 'Delta', provider: 'workable', cand: { slug: 'delta', strong: true } });
+    check('next run: the persisted hold still stops Workable', toWorkable(), 0);
+
+    // 5. Once the deadline has passed the slow lane asks, paced.
+    const expired = { holds: { 'workable.com': { until: new Date(Date.now() - 1000).toISOString(), status: 429 } }, pending: [] };
+    ats._configureHolds({ file: '', state: expired });
+    sent.length = 0;
+    sleeps.length = 0;
+    route = (u) => (u.includes('/accounts/acmerobotics')
+      ? { status: 200, body: JSON.stringify({ name: 'Acme Robotics', jobs: [{ title: 'Mechanical Engineer' }, { title: 'Test Engineer' }] }) }
+      : { status: 404 });
+    const ok = await H.runSlowLane([
+      { name: 'Acme Robotics', provider: 'workable', service: 'workable.com', cand: { slug: 'acmerobotics', strong: true } },
+      { name: 'Acme Robotics', provider: 'workable', service: 'workable.com', cand: { slug: 'acme-robotics', strong: true } },
+      { name: 'Beta Motors', provider: 'workable', service: 'workable.com', cand: { slug: 'betamotors', strong: true } },
+    ], { probe: ats.slowProbe, isHeld: (s) => !!H.heldUntil(ats._holdState(), s), sleep: async (ms) => { sleeps.push(ms); } });
+    check('expired hold: the board is found in the slow lane', ok.found.map((f) => [f.item.name, f.hit.entry.careers_url, f.hit.count]),
+      [['Acme Robotics', 'https://apply.workable.com/acmerobotics', 2]]);
+    check('…a name already found is not asked on its other slug', toWorkable(), 2);
+    check('…and the requests were spaced 2.5 s apart', sleeps.includes(2500), true);
+
+    // 6. Recruitee refusing: one 60 s back-off, the same probe once more.
+    ats._configureHolds({ file: '', state: H.emptyState() });
+    let n = 0;
+    sleeps.length = 0;
+    const fake = async () => (++n === 1 ? { refused: 'recruitee.com', status: 403 } : { hit: null, refused: '' });
+    const rec = await H.runSlowLane([
+      { name: 'Acme', provider: 'recruitee', service: 'recruitee.com', cand: { slug: 'acme', strong: true } },
+      { name: 'Beta', provider: 'recruitee', service: 'recruitee.com', cand: { slug: 'beta', strong: true } },
+    ], { probe: fake, sleep: async (ms) => { sleeps.push(ms); } });
+    check('Recruitee 403: backs off 60 s, re-asks, both answered', [sleeps.includes(60_000), n, rec.clean.length, rec.deferred.length], [true, 3, 2, 0]);
+    check('…paced 0.7 s apart', sleeps.includes(700), true);
+    const stubborn = await H.runSlowLane([
+      { name: 'Acme', provider: 'recruitee', service: 'recruitee.com', cand: { slug: 'acme' } },
+      { name: 'Beta', provider: 'recruitee', service: 'recruitee.com', cand: { slug: 'beta' } },
+    ], { probe: async () => ({ refused: 'recruitee.com', status: 403 }), sleep: async () => {}, maxBackoffs: 3 });
+    check('a host that keeps refusing: three back-offs, then the names are kept, not lost', stubborn.deferred.length, 2);
+    const capped = await H.runSlowLane([1, 2, 3].map((i) => ({ name: `N${i}`, provider: 'recruitee', service: 'recruitee.com', cand: { slug: `n${i}` } })),
+      { probe: async () => ({ hit: null }), sleep: async () => {}, budget: 2 });
+    check('the budget caps requests per host; the rest are kept', [capped.sent['recruitee.com'], capped.deferred.map((d) => d.name)], [2, ['N3']]);
+    const perHost = await H.runSlowLane([
+      ...[1, 2, 3].map((i) => ({ name: `W${i}`, provider: 'workable', service: 'workable.com', cand: { slug: `w${i}` } })),
+      ...[1, 2, 3].map((i) => ({ name: `R${i}`, provider: 'recruitee', service: 'recruitee.com', cand: { slug: `r${i}` } })),
+    ], { probe: async () => ({ hit: null }), sleep: async () => {}, budget: { 'workable.com': 1, default: 5 } });
+    check('Workable gets its own, smaller budget', [perHost.sent['workable.com'], perHost.sent['recruitee.com']], [1, 3]);
+    check('the default Workable budget is the small one', H.SLOW_LANE_BUDGET['workable.com'] < H.SLOW_LANE_BUDGET.default, true);
+
+    // 7. Pending: deduped, pruned by age.
+    const st = H.emptyState();
+    H.addPending(st, [{ name: 'A', provider: 'workable', cand: { slug: 'a' } }, { name: 'A', provider: 'workable', cand: { slug: 'a' } }]);
+    H.addPending(st, [{ name: 'Old', provider: 'workable', cand: { slug: 'old' }, added: '2020-01-01T00:00:00Z' }]);
+    check('pending: one entry per name/slug, stale ones dropped', st.pending.map((p) => p.name), ['A']);
+    H.removePending(st, [{ name: 'a', provider: 'workable', cand: { slug: 'a' } }]);
+    check('pending: removed once asked', st.pending.length, 0);
+
+    // 8. Linked probes before guesses (2026-11-03).
+    const full = H.emptyState();
+    full.pending = Array.from({ length: H.PENDING_MAX }, (_, i) => ({ name: `G${i}`, provider: 'workable', service: 'workable.com', cand: { slug: `g${i}` }, speculative: true, added: new Date().toISOString() }));
+    H.addPending(full, [{ name: 'Linked', provider: 'workable', service: 'workable.com', cand: { slug: 'linked' } }]);
+    check('a full queue trims a guess, not a linked probe', [full.pending.length, full.pending.some((p) => p.name === 'Linked')], [H.PENDING_MAX, true]);
+    const order = [];
+    await H.runSlowLane([
+      { name: 'Guess', provider: 'workable', service: 'workable.com', cand: { slug: 'guess' }, speculative: true },
+      { name: 'Link', provider: 'workable', service: 'workable.com', cand: { slug: 'link' } },
+    ], { probe: async (i) => { order.push(i.name); return { hit: null }; }, sleep: async () => {}, budget: 1 });
+    check('the slow lane asks the linked probe first', order, ['Link']);
+  } finally {
+    globalThis.fetch = realFetch;
+    ats._configureHolds({ file: '', state: H.emptyState() });
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 process.exit(fail ? 1 : 0);

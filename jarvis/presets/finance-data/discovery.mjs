@@ -105,6 +105,11 @@ export default {
   museCategories: ['Accounting and Finance', 'Data and Analytics', 'Business Operations'],
   hnTerms: ['finance', 'financial analyst', 'data analyst', 'analytics', 'fp&a', 'accounting'],
 
+  // ── discover-radar.mjs ────────────────────────────────────────────
+  /** LinkedIn "(HIRING LIST)" searches. None yet for this field: the source is skipped. */
+  radarQueries: [],
+  radarListRe: /\b(?:fintech|finance|financial|banking|insurance|payments?|data|analytics)\b/i,
+
   // ── universe.mjs ──────────────────────────────────────────────────
   sampleTitle: 'financial analyst',
   /** Hiring evidence, not field evidence: a bare "analyst" does not pass trackTitleRe. */
@@ -149,4 +154,9 @@ export default {
   auditNoFamilyWhy: (n, total) => `${n} of ${total} titles are business, finance or analyst work`,
   auditNoFieldWhy: (total, n) => `0 of ${total} titles are finance or data work (${n} business or office roles, none of them finance) — a same-name board, or not an employer of analysts`,
   auditOkNoun: 'employers of analysts',
+  // The hardware audit's "software or IT only" check (F-635) does not apply:
+  // data and BI titles are this field's own work. Null keeps it off.
+  auditOffFieldRe: null,
+  auditStrongFieldRe: null,
+  auditOnlyOffFieldWhy: null,
 };

@@ -38,7 +38,8 @@ const MONEY = String.raw`\$?\s?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s?([
 // which allowed only whitespace before the dash — could not see it.
 const UNIT = String.raw`(?:\s*(?:USD|CAD|EUR|GBP|AUD|SGD|INR|MXN|JPY)\b)?(?:\s*(?:\/\s*(?:hr|hour|yr|year|mo|month)\b|per\s+(?:hour|year|annum|month)\b|hourly\b|annually\b|an\s+hour\b|a\s+year\b))?`;
 
-const SEP = String.raw`\s*(?:-|–|—|to|through|and)\s*`;
+// "Min: $40,000 – Max: $80,000" (Boeing) names its upper bound.
+const SEP = String.raw`\s*(?:-|–|—|to|through|and)\s*(?:max(?:imum)?\s*:?\s*)?`;
 
 // Contexts that mean "this number is pay".
 const PAY_WORD = /\b(salary|salaries|pay|paid|pays|compensation|base pay|base salary|hiring range|pay range|pay rate|wage|earnings|remuneration|per hour|hourly|annually|per year|\/\s?(?:hr|yr))\b/i;
@@ -50,7 +51,9 @@ const NOT_PAY_WIDE = /\b(series\s+[a-f]\b|valuation|raised|funding round|venture
 // Disqualifying only when they LEAD INTO the number — "401(k) match up to
 // $5,000", "an annual bonus of $9,000". Everything here is a thing a company
 // pays that is not the salary, and it is always named before the figure.
-const NOT_PAY_BEFORE = /\b(savings|saved|budget|grant|scholarship|tuition|reimburs\w*|401\s?\(?k\)?|bonus|sign[- ]?on|signing|referral|stipend|allowance|per diem|award|prize|match(?:ing)?\s+up\s+to|discount|equity|revenue|cost)\b/i;
+// Etched (F-959): "Housing subsidy of $2,500 per month" was stored as the pay
+// on every posting of its board, so the pay floor failed jobs paying $150k+.
+const NOT_PAY_BEFORE = /\b(savings|saved|budget|grant|scholarship|tuition|reimburs\w*|401\s?\(?k\)?|bonus|sign[- ]?on|signing|referral|stipend|allowance|subsid(?:y|ies|ized)|per diem|award|prize|match(?:ing)?\s+up\s+to|discount|equity|revenue|cost)\b/i;
 
 // Disqualifying when they TRAIL the number — "$57,000 in annual material
 // savings". Deliberately excludes "bonus": "$120,000 - $150,000 plus bonus" is
@@ -120,6 +123,35 @@ function intervalFor(window, lo) {
   return 'year';
 }
 
+/**
+ * The period word NEAREST the range, from the sentence around it. The old
+ * order (hour, then month, then year anywhere in 280 characters) read Hyundai's
+ * "$75,400 - $104,000 annual base salary / Monthly vehicle lease allowance" as
+ * monthly, and ~250 open rows showed twelve times their pay (F-959). Inside
+ * the match, intervalFor still decides.
+ */
+const PERIOD_WORDS = [
+  ['hour', /\b(?:per hour|hourly|an hour|hour)\b|\/\s?hr\b/gi],
+  ['month', /\b(?:per month|monthly)\b|\/\s?mo\b/gi],
+  ['year', /\b(?:annually|per year|per annum|a year|annual|yearly)\b|\/\s?yr\b/gi],
+];
+function nearestInterval(plain, at, end, lo) {
+  const from = Math.max(0, at - 140);
+  const window = plain.slice(from, end + 140);
+  let best = null;
+  for (const [interval, re] of PERIOD_WORDS) {
+    re.lastIndex = 0;
+    for (let m; (m = re.exec(window));) {
+      const s = from + m.index, e = s + m[0].length;
+      // After the range is read slightly closer: "$X - $Y annual base salary".
+      const d = e <= at ? at - e + 1 : s >= end ? s - end : 0;
+      if (!best || d < best.d) best = { interval, d };
+    }
+  }
+  if (best) return best.interval;
+  return lo < 1000 ? 'hour' : 'year';
+}
+
 function annualise(v, interval) {
   if (interval === 'hour') return v * HOURS_PER_YEAR;
   if (interval === 'month') return v * MONTHS;
@@ -145,17 +177,63 @@ function looksLikeMoney(matchText, window) {
   return /[$€£¥₹]/.test(matchText) || /\b(USD|CAD|EUR|GBP|AUD|SGD|INR|MXN|JPY)\b/.test(window) || PAY_WORD.test(window);
 }
 
+/**
+ * A FIGURE IS JUDGED BY ITS OWN CLAUSE (F-959 review, 2026-11-03). A fixed
+ * 55-character look-back crossed sentence breaks ("Per diem of $75. Salary
+ * range $90,000 - $110,000" lost the salary) and read one figure's words onto
+ * the next ("$5,000 monthly stipend plus $90,000 base"). The clause runs from
+ * the last sentence end, bullet, semicolon, "plus", "and" or comma before the
+ * figure to the next one after it.
+ * `lead`: the clause before the figure. `trail`: the clause after it.
+ */
+const CLAUSE_BREAK = /[.!?;•\n](?=\s|$)|,(?=\s)|\s(?:plus|and|with)\s/gi;
+function ownClause(plain, at, end) {
+  const back = plain.slice(Math.max(0, at - 80), at);
+  let cut = 0;
+  for (const m of back.matchAll(CLAUSE_BREAK)) cut = m.index + m[0].length;
+  const fwd = plain.slice(end, end + 60);
+  const stop = fwd.search(CLAUSE_BREAK);
+  return { lead: back.slice(cut), trail: stop < 0 ? fwd : fwd.slice(0, stop) };
+}
+// Named right after a figure (a period word may sit between): "$500 per month
+// credit", "$5,000 - $6,000 monthly stipend", "$9,000 bonus". Not "$90k - $110k
+// Housing subsidy" or "$94,900 - $135,600 Bonus eligible: No" (Cardinal
+// Health), where a capital letter begins the next item. Case-sensitive on purpose.
+const NOT_PAY_TRAIL = /^\s*(?:(?:per\s+)?(?:month|monthly|year|yearly|annual|hour|hourly|week|weekly)\s+)?(?:stipend|subsid(?:y|ies)|allowance|credit|per\s+diem|reimbursement|bonus(?:es)?|sign[- ]?on|relocation|award|grant|scholarship)\b/;
+// A pay word in the figure's own clause, after any not-pay word: "•
+// Relocation assistance Salary: $65k-$90k base" (CaptiveAire) is the salary.
+const BASE_WORD = /\b(?:base|salary|salaries|pay|compensation|wage|hiring range|pay range|earnings|remuneration)\b/i;
+// What NOT_PAY_BEFORE names, plus money for a place to live or a move.
+const NOT_PAY_LEAD = new RegExp(`${NOT_PAY_BEFORE.source}|\\b(?:housing|relocation|rent|commut\\w*)\\b`, 'gi');
+function notPayClause(lead, trail, sentenceLead = lead) {
+  // A pay word in the figure's own clause, or earlier in its sentence with no
+  // other amount between, keeps it (review): "Base salary with housing
+  // subsidy: $90k - $110k". "Housing subsidy of $2,500 per month" names no
+  // pay; "Base salary $120k plus housing subsidy of $2,500" has its own figure.
+  const before = [...lead.matchAll(NOT_PAY_LEAD)].pop();
+  const saysPay = BASE_WORD.test(lead) || (BASE_WORD.test(sentenceLead) && !/[$€£¥₹]\s?\d/.test(sentenceLead));
+  if (before && !saysPay) return true;
+  return NOT_PAY_TRAIL.test(trail);
+}
+
 function rejected(matchText, plain, at, end) {
   if (SCALE_SUFFIX.test(matchText)) return true;
   const wide = plain.slice(Math.max(0, at - 140), end + 140);
   if (NOT_PAY_WIDE.test(wide)) return true;
-  // A few words either side, not a whole paragraph — the paragraph is where
-  // every posting keeps its benefits sentence.
-  if (NOT_PAY_BEFORE.test(plain.slice(Math.max(0, at - 55), at))) return true;
+  const { lead, trail } = ownClause(plain, at, end);
+  const back = plain.slice(Math.max(0, at - 120), at);
+  const sentenceLead = back.slice(Math.max(...[...back.matchAll(/[.!?;•\n](?=\s|$)/g)].map((m) => m.index + 1), 0));
+  if (notPayClause(lead, trail, sentenceLead)) return true;
   if (NOT_PAY_AFTER.test(plain.slice(end, end + 45))) return true;
   // What follows the number tells you what it counted.
   if (COUNTED_THING.test(plain.slice(end, end + 24))) return true;
   return false;
+}
+
+/** Does the figure's own clause call it pay? */
+function ownClauseSaysPay(plain, at, end) {
+  const { lead, trail } = ownClause(plain, at, end);
+  return BASE_WORD.test(lead) || BASE_WORD.test(trail);
 }
 
 /**
@@ -254,7 +332,7 @@ export function parseSalaryFromText(text) {
     // it twice inside itself — and only then from the wider sentence.
     const fromMatch = intervalFor(m[0], lo);
     let interval = (fromMatch === 'year' && !/\/|per|hour|annual/i.test(m[0]))
-      ? intervalFor(window, lo)
+      ? nearestInterval(plain, at, end, lo)
       : fromMatch;
     // The surrounding sentence is WEAKER evidence than the numbers themselves.
     // "This is a full-time, 40 hour per week position. The salary range for this
@@ -265,6 +343,12 @@ export function parseSalaryFromText(text) {
     // window-derived interval cannot hold these magnitudes, believe the
     // magnitudes and fall back to inferring from them.
     if (interval !== fromMatch && interval === 'hour' && (lo < MIN_HOURLY || hi > MAX_HOURLY)) {
+      interval = lo < 1000 ? 'hour' : 'year';
+    }
+    // The same for "per month" borrowed from a benefits line beside it
+    // (Etched's housing subsidy): $250,000 a month is not a wage, and a range
+    // starting at $20,000 with no period of its own is a year's pay.
+    if (interval !== fromMatch && interval === 'month' && lo >= 20_000) {
       interval = lo < 1000 ? 'hour' : 'year';
     }
     if (interval === 'hour' && (lo < MIN_HOURLY || hi > MAX_HOURLY)) continue;
@@ -282,12 +366,14 @@ export function parseSalaryFromText(text) {
       source: 'description', raw: raw.trim(),
       // A range sitting next to the words "salary"/"pay range" is far more
       // trustworthy than two bare numbers, so it wins ties.
-      confident: PAY_WORD.test(window),
+      // Its own clause naming it pay beats pay words merely nearby (F-959 review).
+      confident: ownClauseSaysPay(plain, at, end) ? 2 : PAY_WORD.test(window) ? 1 : 0,
     });
   }
 
   if (candidates.length) {
-    const confident = candidates.filter(c => c.confident);
+    const top = Math.max(...candidates.map(c => c.confident));
+    const confident = candidates.filter(c => c.confident === top && top > 0);
     const pool = confident.length ? confident : candidates;
     // Widest plausible range wins: postings often quote a narrow location-
     // specific band first and the full band later.
@@ -320,6 +406,38 @@ export function parseSalaryFromText(text) {
       min: annual, max: annual, currency: currencyIn(window), interval,
       rate: { min: v, max: v }, source: 'description', raw: m[0].trim(),
     });
+  }
+  // A LONE ANNUAL FIGURE ITS OWN CLAUSE CALLS PAY: "$5,000 monthly stipend
+  // plus $90,000 base" (F-959 review). No period word is needed when the
+  // clause says base/salary and the figure is a year's pay in size.
+  // Labelled pairs the range pattern cannot see are spanned: "Minimum Salary:
+  // $ 71500 Maximum Salary: $ 135800" (Boston Scientific), "Pay Range Max USD
+  // $115,336.00 Pay Range Min USD $69,909.00" (CDM Smith), "between ($75,000)
+  // and ($112,800)" (Boehringer). Figures within one passage of the first.
+  if (!singles.length) {
+    const found = [];
+    for (const m of plain.matchAll(/[$€£¥₹]\s?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s?([kK])?\b/g)) {
+      const at = m.index ?? 0;
+      const end = at + m[0].length;
+      const v = num(m[1], m[2]);
+      if (v == null || v < 20_000 || v > MAX_ANNUAL) continue;
+      // One end of a range the range pass already turned down is not a lone figure.
+      if (/^\s*(?:-|–|—|to|through|and)\s*[$€£¥₹\d]/i.test(plain.slice(end, end + 12))
+        || /[\d$kK]\s*(?:-|–|—|to|through|and)\s*$/i.test(plain.slice(Math.max(0, at - 12), at))) continue;
+      if (rejected(m[0], plain, at, end)) continue;
+      if (found.length && at - found[0].at > 300) break;
+      // The first figure must be called pay by its own clause; one after it in
+      // the same sentence belongs to it ("between ($75,000) and ($112,800)").
+      const sameSentence = found.length && !/[.!?](?=\s)/.test(plain.slice(found[found.length - 1].at, at));
+      if (!ownClauseSaysPay(plain, at, end) && !sameSentence) continue;
+      found.push({ at, v, raw: m[0].trim(), window: plain.slice(Math.max(0, at - 140), end + 140) });
+    }
+    if (found.length) {
+      const lo = Math.min(...found.map((f) => f.v));
+      const near = found.filter((f) => f.v <= lo * 3);
+      const hi = Math.max(...near.map((f) => f.v));
+      singles.push({ min: lo, max: hi, currency: currencyIn(found[0].window), interval: 'year', rate: { min: lo, max: hi }, source: 'description', raw: near.map((f) => f.raw).slice(0, 2).join(' … ') });
+    }
   }
   if (!singles.length) return null;
   // Two lone rates in one posting are usually a floor and a ceiling written in

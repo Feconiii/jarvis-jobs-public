@@ -15,7 +15,20 @@ import { resumeForJob, auditName, personFile, tailorReport } from './resume-for-
 import { buildTailorPrompt, parseRewrites, condenseJd } from './tailor-llm.mjs';
 
 const JOB = { company: 'Applied Materials', title: 'Automation Engineer', url: 'https://example.test/1' };
-const JD = 'Seeking an automation engineer with vision systems and fixture design experience.';
+const JD = 'Seeking an automation engineer with vision systems and fixture design experience. '
+  + 'Responsibilities: design and validate automation cells, integrate collaborative robots and machine-vision inspection, '
+  + 'develop fixtures for repeatable part location, run qualification testing, and document results for production handoff. '
+  + 'Qualifications: Bachelor degree in Mechanical Engineering or a related field; experience with CAD (SolidWorks or Inventor), '
+  + 'robot programming, root cause analysis and hands-on fabrication. New graduates with relevant internships are encouraged to apply. '
+  + 'This role works closely with manufacturing, quality and controls teams to bring new equipment from concept to production.';
+
+test('a teaser or a cookie notice is not tailored to (F-935)', async () => {
+  const { thinDescription } = await import('./resume-for-job.mjs');
+  assert.match(thinDescription('Honda is hiring a Manufacturing Engineer in Marysville, Ohio. Apply now.'), /teaser/);
+  assert.match(thinDescription('We use cookies to improve your experience. Accept all cookies or manage your privacy settings. ' + 'x '.repeat(400)), /cookie/);
+  assert.equal(thinDescription(JD), null);
+  assert.equal(thinDescription(null), null);
+});
 
 const dir = () => mkdtempSync(path.join(tmpdir(), 'jarvis-tailored-'));
 
@@ -348,4 +361,21 @@ test('a renamed resume keeps his name, cleaned, for that posting only', async ()
   assert.equal(getResumeName('job2', { file }), '', 'another posting keeps its own name');
   setResumeName('job1', '', { file });
   assert.equal(getResumeName('job1', { file }), '', 'emptied: back to the default');
+});
+
+test('the layout reads a person\'s skill and course rules from their pool, and holds none of its own (2026-10-27)', async () => {
+  const { rulesOf } = await import('./resume-polish.mjs');
+  const pool = {
+    skills: { code: { lead: 'Software', items: ['Rust', 'Go'] }, cad: { lead: 'CAD', items: ['SolidWorks', 'Niche CAD'] } },
+    rules: { onlyIfAsked: ['Niche CAD'], backedBy: { Rust: 'acme.compiler' }, languages: ['Rust', 'Go'], courseAskedWhen: { 'Robotics (Fall 2030)': '\brobot' } },
+  };
+  const R = rulesOf(pool);
+  assert.ok(R.onlyIfAsked.has('Niche CAD'));
+  assert.equal(R.backedBy.Rust, 'acme.compiler');
+  assert.deepEqual(R.languages, ['Rust', 'Go']);
+  assert.equal(R.codeKey, 'code', 'the line holding the languages is found by its items, not by a key name');
+  assert.equal(R.codeLead, 'Software');
+  const none = rulesOf({ skills: { cad: { lead: 'CAD', items: ['SolidWorks'] } } });
+  assert.deepEqual([none.languages, none.codeKey, Object.keys(none.backedBy)], [[], null, []], 'a pool without rules gates nothing of its own');
+  assert.ok(!none.onlyIfAsked.has('Niche CAD'));
 });

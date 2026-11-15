@@ -339,3 +339,61 @@ test('a page that is not in the store is told so, not sent to the dashboard', ()
   assert.match(handler, /it will attach when the form reaches the upload step/,
     'and a build in progress must say what happens next');
 });
+
+test('F-879: a heading naming another requisition drops the tab\'s remembered job; a look-alike title keeps it (career5, Veeco)', () => {
+  const src = readFileSync(path.join(HERE, 'serve.mjs'), 'utf-8');
+  const start = src.indexOf('function headingContradicts');
+  const end = src.indexOf('\nfunction jobForRequest');
+  assert.ok(start > 0 && end > start, 'headingContradicts sits just before jobForRequest');
+  const contradicts = new Function(`${src.slice(start, end)}; return headingContradicts;`)();
+  assert.equal(contradicts({ title: 'Engineer, Manufacturing Process 1 (138250)', url: 'x' }, 'Automation Engineer (76244)'), true, 'career5: a different number');
+  assert.equal(contradicts({ title: 'Automation Engineer (76244)', url: 'x' }, 'Automation Engineer (76244)'), false);
+  assert.equal(contradicts({ title: 'San Jose Manufacturing Equipment Engineer CA', url: 'https://x/San-Jose-Manufacturing-Equipment-Engineer' }, 'Manufacturing Equipment Engineer (20277)'), false, 'Veeco: no number of its own, same title');
+  assert.equal(contradicts({ title: 'Process Engineer II', url: 'x' }, 'Automation Engineer (76244)'), true, 'no number, another title');
+  assert.equal(contradicts({ title: 'Process Engineer II', url: 'x' }, 'My Information'), false, 'a heading with no number says nothing');
+  assert.equal(contradicts({ title: 'Automation Engineer', url: 'https://x/job/76244' }, 'Something Else (76244)'), false);
+  assert.match(src, /if \(headingContradicts\(remembered, page\.heading\)\)/, 'jobForRequest asks before falling back to the tab');
+});
+
+test('F-914: a SuccessFactors portal row found by URL alone needs the page\'s title AND its tenant (Lincoln LEPROD → West Pharmaceutical)', () => {
+  const src = readFileSync(path.join(HERE, 'serve.mjs'), 'utf-8');
+  const start = src.indexOf('function jobForPageUncached');
+  const body = src.slice(start, src.indexOf('\n}\n', start));
+  assert.match(body, /SF_PORTAL_RE\.test\(String\(pageUrl\)\) && !\(hint\.heading \|\| hint\.pageTitle\)\) byUrl = null/, 'no title on the page → no URL-only portal match');
+  assert.match(body, /if \(mine && tenant\(byUrl\.url\) !== mine\) byUrl = null/, 'another tenant, or none, → no match');
+  // The tenant rule itself, run on the two URLs from 2026-10-25.
+  const tenant = (u) => { try { return (new URL(String(u)).searchParams.get('company') || '').toLowerCase(); } catch { return ''; } };
+  assert.equal(tenant('https://career2.successfactors.eu/portalcareer?company=LEPROD&rmk_user_preference=x'), 'leprod');
+  assert.equal(tenant('https://career2.successfactors.eu/portalcareer?_s.crb=VnlmpmVj'), '', 'West\'s scrap row names no tenant');
+});
+
+test('F-890: on a shared SuccessFactors host, another employer\'s row the page never names does not beat the tab (Schindler on career5 → "LANXESS")', () => {
+  const src = readFileSync(path.join(HERE, 'serve.mjs'), 'utf-8');
+  // The guard sits in jobForRequest, after the same-id check and before the look-alike rule.
+  const start = src.indexOf('function jobForRequest');
+  const body = src.slice(start, src.indexOf('\n}\n', start));
+  assert.match(body, /SF_PORTAL_RE\.test\(String\(page\.pageUrl\)\) \|\| onPage\.source === 'extension'/, 'a portal page, or a row recorded from a page');
+  assert.match(body, /!sameEmployer\(remembered\.company, onPage\.company\) && !sameEmployer\(onPage\.company, remembered\.company\)/, 'only when the employers differ');
+  assert.match(body, /!pageMentionsCompany\(onPage\.company, page\)/, 'and the page never names the other employer');
+  assert.ok(body.indexOf('F-890') < body.indexOf('tabOrPage('), 'asked before the look-alike rule');
+  // companyForPage no longer names a SuccessFactors page by its host's biggest employer.
+  const cfp = src.slice(src.indexOf('function companyForPage'), src.indexOf('function pageReadPostingIsRecordable'));
+  assert.match(cfp, /successfactors\|sapsf/, 'SuccessFactors hosts are tenant-keyed');
+  assert.match(cfp, /searchParams\.get\('company'\)/, 'by the company= parameter');
+  assert.match(cfp, /if \(!tenant\) return fallback;/, 'and a portal URL without one names nobody');
+  // …and the context matcher treats .eu SuccessFactors as a shared host.
+  const line = src.split('\n').find((l) => l.startsWith('const SHARED_ATS_HOST'));
+  const SHARED = new Function(`${line}; return SHARED_ATS_HOST;`)();
+  for (const h of ['career5.successfactors.eu', 'career8.successfactors.com', 'career2.sapsf.eu']) assert.ok(SHARED.test(h), h);
+  assert.ok(!SHARED.test('jobs.schindler.com'));
+});
+
+test('the Apply press asks the platform whether the posting is open before any tab or resume (2026-11-04)', () => {
+  const src = readFileSync(path.join(HERE, 'serve.mjs'), 'utf-8');
+  const apply = handlerFor(src, '/api/apply');
+  const api = apply.indexOf('checkLivenessViaApi(job.url)');
+  assert.ok(api > 0, 'the API check is in the handler');
+  assert.ok(api < apply.indexOf('definitelyGone(job.url)'), 'the platform first, the page second');
+  assert.ok(api < apply.indexOf('startResumeBuild('), 'before a resume is started');
+  assert.match(apply, /api\?\.result === 'expired'/, 'only a definite "closed" stops it; inconclusive goes on');
+});

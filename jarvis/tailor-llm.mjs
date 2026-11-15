@@ -21,6 +21,7 @@
  * source-of-truth rules as the rest of the project.
  */
 import { coverage as termCoverage } from './jd-terms.mjs';
+import { requirementLines } from './jd-checklist.mjs';
 import { spawn } from 'child_process';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
@@ -211,11 +212,18 @@ export function buildTailorPrompt({ spec, job, jd, familyLabel = null, pool = nu
       + `   - ON THE DRAFT, NOT ASKED FOR: ${cov.unmatched.slice(0, 18).join(', ') || '(none)'}`
     : '(This posting names no concrete tools or methods, so there is nothing to measure — '
       + 'choose on the work it describes instead.)';
+  // EVERY REQUIREMENT SENTENCE, NUMBERED (2026-10-27, his ask: "check against
+  // every sentence in jd and make checklist"). Split mechanically so the
+  // coverage list cannot quietly skip a line the planner found inconvenient.
+  const reqs = jd ? requirementLines(jd) : [];
+  const reqBrief = reqs.length
+    ? reqs.map((r) => `   ${r.id} [${r.need}] ${r.text}`).join('\n')
+    : '   (no requirement lines could be read from this posting — list them yourself, ids R1, R2, …)';
 
   // Everything below names HIS organisations, bullets and history. Anyone else
   // gets the same method with none of it (see buildFieldTailorPrompt).
   if (!ownsExamples()) {
-    return buildFieldTailorPrompt({ job, jd, request, framing, menu, bullets, base, termBrief, familyLabel: familyLabel || spec?.familyLabel || 'standing' });
+    return buildFieldTailorPrompt({ job, jd, request, framing, menu, bullets, base, termBrief, reqBrief, familyLabel: familyLabel || spec?.familyLabel || 'standing' });
   }
 
   return `You are tailoring Alex Rivera's one-page engineering resume to ONE job posting: what goes on
@@ -237,7 +245,23 @@ process language every time.
 
 EVERY LINE MUST ADD one of: new technical evidence, a meaningful quantified result, a highly
 relevant tool or skill, evidence of engineering ownership, or evidence of hands-on capability.
-A line that adds none of those does not belong, however "relevant" its topic. The eye should
+A line that adds none of those does not belong, however "relevant" its topic.
+
+A TRADITIONAL PAGE (his words, 2026-10-26: "dont make it too non traditional, too many niche
+details or unimpressive work hurts a lot"). The page reads like a strong conventional
+engineering resume, not a keyword map:
+- Fewer, stronger lines beat covering every minor requirement. A nice-to-have is never worth a
+  weak line; leave it uncovered and say so in "notes".
+- Niche names a recruiter will not know (Neuro-T, Tulip, Node-RED, part numbers, internal team
+  names) appear only where the posting names them or the line is already one of the strongest
+  on the page; in a rewrite, say what the thing IS ("a machine-vision model") rather than its
+  product name, where the approved wording allows.
+- Work that reads small — documentation, translation, packaging, coordination, a spreadsheet
+  macro on its own — goes on only when the posting asks for exactly that, and never above a
+  line that shows design, build, test or a measured result.
+- Mirror the posting's own words for the same work (SOP, yield, cycle time, bring-up,
+  equipment qualification, reverse engineering, DOE) wherever the approved wording supports
+  them. That is how both a recruiter and a screening model see the match. The eye should
 land on: Applied Materials, semiconductor equipment, designed physical hardware, tolerance
 analysis, robotic end effectors, Universal Robots, RoboDK, AMRs, machine vision, cleanroom, Haas
 CNC, welding, 70%, $57,000, the robotic arm, FEA.
@@ -268,11 +292,20 @@ YOUR JOB
 1. Read the whole posting. Extract its core responsibilities, required and preferred tools, the
    industry's terminology, and the main engineering function. Decide the role type:
    mechanical | manufacturing | process | automation | equipment | npi | quality | other.
-1b. COVERAGE — do this BEFORE you choose a single bullet, and return it. List every REQUIREMENT
-   the posting states, must-have and nice-to-have, in its own words. Against each, name the ONE
-   thing on your page that proves it — a bullet key, "coursework: <course>", "skills: <item>",
-   "project: <key>", or "none". This is the step that stops a page from quietly ignoring a
-   stated requirement while looking well tailored:
+1b. COVERAGE — do this BEFORE you choose a single bullet, and return it. Below is EVERY requirement
+   sentence of the posting, numbered — its duties [duty], must-haves [must] and nice-to-haves [nice].
+   Answer EVERY id, in order, with the ONE thing on your page that proves it — a bullet key,
+   "coursework: <course>", "skills: <item>", "project: <key>", or "none". Prefer a bullet or a
+   project over a skills item whenever one proves it: a bullet shows the work, a skill only names
+   it. Whatever you cite as proof of a [duty] or [must] line WILL be kept on the page, so cite the
+   strongest real evidence and put it on your page. Rate each answer's "strength" honestly:
+   "direct" only when the cited line shows that very work, tool or domain (a pressure-decay tester
+   integration directly proves "integrate test equipment"); "partial" when it is adjacent evidence
+   (Fluid Mechanics coursework for "pumps, chillers and abatement systems"; a lumber-savings figure
+   for "automation projects requiring coding"); "none" when nothing proves it. A recruiter will
+   read the page, not your rating, so a generous rating helps nothing. This is the step that stops
+   a page from quietly ignoring a stated requirement while looking well tailored:
+${reqBrief}
    - A requirement the posting NAMES and he genuinely has EVIDENCE for must be covered. If your
      draft leaves it at "none" and something in the menu could prove it, change the draft.
    - A requirement he has no evidence for stays "none". Never bridge to it, never imply it, and
@@ -295,6 +328,21 @@ YOUR JOB
      tool with no connection to this kind of work.
    - A line earns its place when a stranger, reading only this page against only this
      posting, is more likely to call him because of it.
+1d. THE LEAD FOLLOWS THE JOB (2026-10-26). Graded against their postings, his last 30 resumes
+   averaged 58/100 for one reason above all: every page opened with the same Applied Materials
+   block in nearly the same order, while the proof the job wanted sat mid-page — Acme Steel's 70%
+   and $57,000 for process and manufacturing roles, Makerspace's CNC, welding and training for
+   prototype and fabrication roles, the robotic arm for robotics hardware roles. So:
+   - Write down the posting's THREE main day-to-day responsibilities (what the person DOES,
+     not the nice-to-haves). The first bullet under EACH employer is that employer's strongest
+     proof of one of them. amat.vision-fixture stays on the page, but it leads Applied
+     Materials only when the job is mechanical design, fixtures or tooling; a robotics or
+     integration job leads with the cobot cell, an equipment job with the deployment and
+     qualification work.
+   - An Applied Materials line that proves none of the three and is not one of its two
+     strongest technical lines gives its place to a Acme Steel or Makerspace line that proves one.
+   - The section order never changes (Education, Experience newest first, Projects, Skills):
+     the page stays a conventional resume. Only what leads INSIDE each section moves.
 2. TITLES. For each internship (amat, acme) pick ONE clean recruiter-facing title from that
    org's "titles" list — the one that best matches the job, no hybrids, no ampersands.
    ${applyingToOwn ? `THIS POSTING IS AT ${ownCompany.org.toUpperCase()} ITSELF: the amat title must be exactly the
@@ -318,6 +366,10 @@ YOUR JOB
      that amat cannot. Without that sentence the floor stays at 5 and your plan is restored.
      amat.neuro-t is a strong default, not a fixture: it proves machine vision, which most
      postings do not ask for. Spend its line when the posting pays better elsewhere.
+     The FIFTH and SIXTH Applied Materials lines must each prove a responsibility or requirement
+     of this posting. amat.neuro-t, amat.iiot and amat.amr are the usual passengers: where the
+     posting asks for none of machine vision, data logging / test integration, or mobile robots,
+     argue amat down to four in "whyFewerAmat" and give the lines to Acme Steel and Makerspace.
    - Never choose a bullet that describes an ASSUMED part of engineering work — collaborated,
      coordinated, presented, participated, attended reviews, supported, completed documentation —
      over one that shows mechanism design, tolerance decisions, fixture architecture, testing,
@@ -332,15 +384,17 @@ YOUR JOB
      requirement. Give it two, put "sae" in "emphasise", and consider moving it above makerspace.
      Redundant evidence is not relevance; neither is under-answering a requirement the posting
      put in its own list.
-   - rover (Lakeside Robotics Club – Mars Rover Team, added 2026-09-15) is his build-team
-     evidence of choice, and it is on every family base in Baja's old place: a pneumatic gripper
-     for the rover manipulator (gripping geometry, actuator integration, mounting interface) and
-     suspension plates designed in CAD and plasma-cut in-house. For robotics, mechatronics,
-     end-effector, pneumatics, mechanical design or hardware roles keep it — gripper first — and
-     prefer it over sae; a posting that names a student build team is answered by rover before
-     Baja. It is OPTIONAL: on a process, quality or data role where it proves nothing the page
-     lacks, return "rover": []. Where the posting names a build team AND vehicles or
-     automotive specifically, sae may join it.
+   - rover (Lakeside Robotics Club – Mars Rover Team): a pneumatic gripper for the rover
+     manipulator (gripping geometry, actuator integration, mounting interface) and suspension
+     plates designed in CAD and plasma-cut in-house. HIS RULE (2026-11-04): it goes on ONLY when
+     it is relevant to the role or the posting asks for it — otherwise leave it off, "rover": [].
+     Relevant: the work is what these lines prove — robot manipulators, grippers or end-effectors,
+     pneumatics, mobile or field robots, rovers or space robotics, suspension or chassis. Asked
+     for: the posting names student build teams, club or competition projects, or hands-on
+     project work outside jobs. When it goes on, gripper first, and it is answered before sae.
+     A general mechanical design, process, quality, test or data role is NOT a reason by itself.
+     Leaving "rover" out of "experience" also leaves it off. Where the posting names a build team
+     AND vehicles or automotive specifically, sae may join it.
    - makerspace is serious manufacturing experience, not a student job: he is the Manufacturing Lead
      who manages end-to-end production, proves out CNC programs, inspects, runs Haas mills,
      lathes, MIG/TIG welders, plasma cutters and 3D printers, and trains 50+ people. For any
@@ -356,7 +410,7 @@ YOUR JOB
 4. PROJECTS. One or two keys, by INCREMENTAL VALUE. robotic-arm adds evidence nothing else on
    the page has — a 6-DOF manipulator, serial-bus servo actuation, a parallel-jaw gripper,
    inverse kinematics, joint torque sizing, ROS 2/MoveIt motion planning, embedded control, a
-   420 mm working reach — so it is the choice for any robotics, mechatronics, hardware,
+   65 cm working reach — so it is the choice for any robotics, mechatronics, hardware,
    automation or controls company. piston-fea adds reverse engineering from measurements and FEA
    under thermal and shear loading — the choice for mechanical design and analysis roles.
    cnc-cardholder mostly repeats what Makerspace already proves; choose it only when the posting is
@@ -374,6 +428,18 @@ YOUR JOB
    when the posting itself uses the phrase, and let the bullets carry them otherwise. Keep
    Soldering, welding, CNC and 3D printing for any hardware or robotics role: they say he can
    physically build the thing.
+   WHICH CATEGORIES, per posting, not per family (2026-10-26):
+   - "process" (Process/Quality) only for manufacturing, process, quality, NPI or equipment
+     roles, and then only the methods the posting names plus Root Cause Analysis, PFMEA/DFMEA
+     and Six Sigma. A design, robotics, R&D or integration page does not print a list of
+     improvement methods (Kaizen, 5S and Pareto were on the Figure hands resume).
+   - "ai" (AI Tools) only when the posting asks for AI tools, AI-assisted or agentic work.
+   - "data" only when the posting names one of its items (SAP, MES, Tableau, data analysis).
+   - Programming languages the menu holds (Python, C++, MATLAB) print on any page whose posting
+     names coding, scripting, automation or data — three of the graded Micron and Field AI
+     pages asked and had none.
+   - A tool the posting names and the menu holds goes FIRST in its category, every time:
+     SAP for Schindler, DOE wherever a posting asks for designed experiments.
 7. REWRITES. For bullets you keep, reword toward the posting's vocabulary where it genuinely
    describes the same work. Shape: action + technical method + engineering context + outcome.
    Strong verbs (designed, developed, validated, deployed, qualified, integrated, programmed,
@@ -459,7 +525,7 @@ the second fails, change the plan.
 
 ANSWER
 Return ONLY a JSON object, no prose, no code fence, of this exact shape:
-{"roleType":"...","coverage":[{"req":"the posting's words","need":"must|nice","proof":"amat.vision-fixture|coursework: Heat Transfer|skills: SolidWorks|project: piston-fea|none"}],"titles":{"amat":"...","acme":"..."},"experience":{"amat":["key",...],"acme":[...],"makerspace":[...],"rover":[...],"sae":[...]},"whyFewerAmat":"only if amat keeps fewer than 5 — what the freed lines prove instead","emphasise":["sae"],"projects":["key"],"coursework":["..."],"skills":[{"key":"cad","items":["..."]}],"rewrites":{"amat.vision-fixture":"sentence"},"mustKeep":["parallel-jaw gripper"],"reserve":["acme.docs"],"notes":["an uncovered requirement, or what of his note could not be honoured"]}
+{"roleType":"...","coverage":[{"id":"R1","req":"the posting's words","need":"duty|must|nice","strength":"direct|partial|none","proof":"amat.vision-fixture|coursework: Heat Transfer|skills: SolidWorks|project: piston-fea|none"}],"titles":{"amat":"...","acme":"..."},"experience":{"amat":["key",...],"acme":[...],"makerspace":[...],"rover":[...],"sae":[...]},"whyFewerAmat":"only if amat keeps fewer than 5 — what the freed lines prove instead","emphasise":["sae"],"projects":["key"],"coursework":["..."],"skills":[{"key":"cad","items":["..."]}],"rewrites":{"amat.vision-fixture":"sentence"},"mustKeep":["parallel-jaw gripper"],"reserve":["acme.docs"],"notes":["an uncovered requirement, or what of his note could not be honoured"]}
 Every key must come from the menu. An empty rewrites object is a valid answer.
 
 LAST CHECK, against your own coverage list: is there a requirement marked "none" that something
@@ -472,7 +538,7 @@ plan you would defend.`;
  * method and the same answer shape, worded from the person's profile and the
  * field's preset, with no organisation, bullet, figure or rule of his in it.
  */
-function buildFieldTailorPrompt({ job, jd, request, framing, menu, bullets, base, termBrief, familyLabel }) {
+function buildFieldTailorPrompt({ job, jd, request, framing, menu, bullets, base, termBrief, reqBrief = '', familyLabel }) {
   const w = writing;
   const name = person.fullName;
   const first = person.firstName;
@@ -521,9 +587,13 @@ YOUR JOB
 1. Read the whole posting. Extract its core responsibilities, required and preferred tools, the
    industry's terminology, and the main function. Decide the role type:
    ${w.roleTypes || 'other'}.
-1b. COVERAGE — before choosing a single bullet. List every REQUIREMENT the posting states, must-have
-   and nice-to-have, in its own words. Against each, name the ONE thing on your page that proves it —
-   a bullet key, "coursework: <course>", "skills: <item>", "project: <key>", or "none".
+1b. COVERAGE — before choosing a single bullet. Below is EVERY requirement sentence of the posting,
+   numbered. Answer EVERY id with the ONE thing on your page that proves it — a bullet key,
+   "coursework: <course>", "skills: <item>", "project: <key>", or "none". Prefer a bullet or project
+   over a skills item. Whatever you cite for a [duty] or [must] line WILL be kept on the page.
+   Rate each "strength": "direct" only when the line shows that very work, tool or domain;
+   "partial" for adjacent evidence; "none" when nothing proves it. Never round up.
+${reqBrief}
    - A requirement the posting names and the menu has evidence for must be covered.
    - A requirement with no evidence stays "none". Never bridge to it or imply it; say so in "notes".
    - Where the evidence is only in a bullet's FULL wording, put that exact phrase in "mustKeep".
@@ -575,7 +645,7 @@ BEFORE YOU ANSWER, run the two tests on your plan. If JD FIT passes and IMPRESSI
 
 ANSWER
 Return ONLY a JSON object, no prose, no code fence, of this exact shape:
-{"roleType":"...","coverage":[{"req":"the posting's words","need":"must|nice","proof":"<bullet key>|coursework: <course>|skills: <item>|project: <key>|none"}],"titles":{"<org key>":"..."},"experience":{"<org key>":["key",...]},"emphasise":["<org key>"],"projects":["key"],"coursework":["..."],"skills":[{"key":"<skill key>","items":["..."]}],"rewrites":{"<bullet key>":"sentence"},"mustKeep":["..."],"reserve":["<bullet key>"],"notes":["an uncovered requirement, or what of the note could not be honoured"]}
+{"roleType":"...","coverage":[{"id":"R1","req":"the posting's words","need":"duty|must|nice","strength":"direct|partial|none","proof":"<bullet key>|coursework: <course>|skills: <item>|project: <key>|none"}],"titles":{"<org key>":"..."},"experience":{"<org key>":["key",...]},"emphasise":["<org key>"],"projects":["key"],"coursework":["..."],"skills":[{"key":"<skill key>","items":["..."]}],"rewrites":{"<bullet key>":"sentence"},"mustKeep":["..."],"reserve":["<bullet key>"],"notes":["an uncovered requirement, or what of the note could not be honoured"]}
 Every key must come from the menu. An empty rewrites object is a valid answer.`;
 }
 
@@ -735,13 +805,16 @@ export function parsePlan(raw) {
   // and before this it had nowhere to say it (F-437).
   if (Array.isArray(parsed.coverage)) {
     plan.coverage = parsed.coverage
-      .filter((c) => c && typeof c === 'object' && typeof c.req === 'string' && c.req.trim())
+      .filter((c) => c && typeof c === 'object' && ((typeof c.req === 'string' && c.req.trim()) || c.id))
       .map((c) => ({
-        req: String(c.req).trim().slice(0, 300),
-        need: /^must/i.test(String(c.need || '')) ? 'must' : 'nice',
+        ...(c.id ? { id: String(c.id).trim().toUpperCase().slice(0, 6) } : {}),
+        req: String(c.req || '').trim().slice(0, 300),
+        need: /^must/i.test(String(c.need || '')) ? 'must' : /^duty/i.test(String(c.need || '')) ? 'duty' : 'nice',
         proof: String(c.proof || 'none').trim().slice(0, 120),
+        strength: /^none$/i.test(String(c.proof || 'none').trim()) ? 'none'
+          : /^direct/i.test(String(c.strength || '')) ? 'direct' : 'partial',
       }))
-      .slice(0, 40);
+      .slice(0, 45);
   }
   // The phrases the layout may not spend. Reduced against his own wordings by
   // resume-plan.mjs; anything invented here protects nothing.
@@ -808,8 +881,14 @@ export async function tailorWithClaude({ spec, job, jd, familyLabel, pool = null
 export const CLI_MODELS = String(process.env.JARVIS_CLI_MODEL || 'sonnet,haiku')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
-/** The CLI's own way of saying "not this model" — it prints this and exits 1. */
-export const LIMIT_MESSAGE = /reached your .{0,40}limit|usage limit|manage usage credits|switch to another model/i;
+/**
+ * The CLI's own way of saying "not this model" — it prints this and exits 1.
+ * Since 2026-11 it says "You've hit your 5-hour limit · resets 2am" (and the
+ * weekly one the same way), which the old "reached your … limit" missed: the
+ * 11-11 seven-day limit made every daily-search read fail as a bare "exit 1",
+ * 60 a run, and nothing stopped the run (F-1040).
+ */
+export const LIMIT_MESSAGE = /(?:reached|hit) your .{0,40}limit|usage limit|manage usage credits|switch to another model/i;
 
 const isClaudeCli = (bin) => /^claude(\.cmd|\.exe|\.ps1)?$/i.test(String(bin).split(/[\\/]/).pop() || '');
 
@@ -894,6 +973,11 @@ async function runCodex(claudeArgs, opts = {}) {
 export function run(bin, args, opts = {}) {
   // A machine with Codex instead of Claude Code: the same call, asked of Codex.
   if (isClaudeCli(bin) && llmProvider() === 'codex') return runCodex(args, opts);
+  // A one-shot call keeps no transcript. Every reader, writer and lead search
+  // used to save one, and 8,000 of them made his /resume picker crawl (F-776).
+  if (isClaudeCli(bin) && args.includes('-p') && !args.includes('--no-session-persistence')) {
+    args = [...args, '--no-session-persistence'];
+  }
   if (!isClaudeCli(bin) || args.includes('--model')) return runOnce(bin, args, opts);
   // THE LADDER IS THE CALLER'S CHOICE, not one global setting.
   //
@@ -934,6 +1018,15 @@ export function run(bin, args, opts = {}) {
       if (LIMIT_MESSAGE.test(said) && i + 1 < ladder.length) {
         tried.push({ model: model || '(default)', why: LIMIT_MESSAGE.test(said) ? 'out of credit' : 'call failed' });
         return tryModel(i + 1);
+      }
+      // THE LAST MODEL ON THE LADDER IS SPENT (F-1040): said as such, with the
+      // CLI's own sentence ("resets 2am"), so a caller that stops on "out of
+      // credit" stops, instead of reading on through a bare "exit 1".
+      if (LIMIT_MESSAGE.test(said)) {
+        const line = (said.match(/[^\n]*(?:hit|reached) your[^\n]*|[^\n]*usage limit[^\n]*/i)?.[0] || '').trim().slice(0, 120);
+        const spent = new Error(`every model is out of credit${line ? ` (${line})` : ''}`);
+        spent.code = e.code; spent.stdout = e.stdout; spent.stderr = e.stderr;
+        throw spent;
       }
       throw e;
     }

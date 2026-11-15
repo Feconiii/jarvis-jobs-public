@@ -50,12 +50,20 @@ export function vendorOf(url, source = '') {
 /** The status a fault's own heading gives it, the LAST heading with that id winning (ids are reused). */
 export function faultStatuses(text) {
   const out = new Map();
-  for (const line of String(text).split('\n')) {
+  // \r?\n: an editor on Windows can save the file with CRLF, and "." never
+  // matches \r, so every heading but the last stopped parsing (2026-10-21).
+  for (const line of String(text).split(/\r?\n/)) {
     const m = line.match(/^##\s+(F-\d+)\s+·\s+(.*)$/);
     if (!m) continue;
     const parts = m[2].split(' · ').map((s) => s.trim());
     const status = parts.slice(2).join(' · ').replace(/`/g, '') || parts.slice(1).join(' · ').replace(/`/g, '');
-    const open = /\b(open|unverified|diagnosed|measured|recorded|user|partly|not fixed|raised)\b/i.test(status)
+    // A status that STARTS by closing it ("fixed (replay later measured 96%)",
+    // "closed … (recorded as a note)", "NOT A FAULT, recorded…") is closed
+    // unless it still says open or unverified; the other words mean open only
+    // when nothing closed it (2026-10-18 heading audit).
+    const closedFirst = /^(fixed|closed|resolved|decision|not a fault|done|shipped)\b/i.test(status);
+    const open = (/\bopen\b|\bunverified\b/i.test(status)
+      || (!closedFirst && /\b(diagnosed|measured|recorded|user|partly|not fixed|raised)\b/i.test(status)))
       && !/\bverified in his\b/i.test(status);
     out.set(m[1], { title: parts[0], status: status || '(no status in heading)', open });
   }
@@ -69,6 +77,49 @@ const median = (a) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 const pct = (n, d) => (d ? Math.round((100 * n) / d) : null);
+
+const WALL_RE = /sign in|signed in|create an account|human-verification|verification check|email/i;
+const END_RE = /Submit is yours|last step before Submit|application submitted|this application is done/i;
+
+/**
+ * THE SAME NUMBERS PER APPLICATION, NOT PER RUN (F-841).
+ *
+ * One application is many runs: the press, a follow-along run per step, the
+ * run that meets the sign-in and the one after it. The resume goes in on one
+ * of them, so "runs that attached the resume" read 35% on SmartRecruiters
+ * while every application since the F-563 fix had its resume; ADP's 45% walls
+ * were mostly one employer's sign-ins counted once per retry. Grouped by job:
+ * - seen: some run met the form (filled, uploaded, left something, or reached the end)
+ * - uploaded: any run attached the resume
+ * - clean: the LAST run that met the form left nothing and stopped at the end
+ * - walled: no run ever met the form, and one stopped at a sign-in or email step
+ */
+export function applicationRates(reports) {
+  const apps = new Map();
+  for (const r of Array.isArray(reports) ? reports : []) {
+    let key = r.jobId || '';
+    if (!key) { try { const u = new URL(r.pageUrl); key = `${u.origin}${u.pathname}`; } catch { key = String(r.pageUrl || ''); } }
+    if (!key) continue;
+    if (!apps.has(key)) apps.set(key, []);
+    apps.get(key).push(r);
+  }
+  let seen = 0, uploaded = 0, clean = 0, walled = 0;
+  for (const runs of apps.values()) {
+    runs.sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+    const left = (r) => (Array.isArray(r.left) ? r.left.length : 0);
+    const metForm = (r) => (Number(r.filled) || 0) > 0 || r.uploaded || left(r) > 0 || r.reachedReview || END_RE.test(String(r.stoppedBecause || ''));
+    const formRuns = runs.filter(metForm);
+    if (!formRuns.length) {
+      if (runs.some((r) => WALL_RE.test(String(r.stoppedBecause || '')))) walled += 1;
+      continue;
+    }
+    seen += 1;
+    if (runs.some((r) => r.uploaded)) uploaded += 1;
+    const last = formRuns[formRuns.length - 1];
+    if (!left(last) && (last.reachedReview || END_RE.test(String(last.stoppedBecause || '')))) clean += 1;
+  }
+  return { applications: apps.size, seen, uploadPct: pct(uploaded, seen), cleanPct: pct(clean, seen), walledPct: pct(walled, apps.size) };
+}
 
 export function buildReport({ dbPath = path.join(ROOT, 'data/jarvis/jobs.db'), logPath = path.join(ROOT, 'data/jarvis/answer-log.jsonl'), faultsPath = path.join(HERE, 'FAULTS.md') } = {}) {
   const V = new Map(compiled.map((v) => [v.key, {
@@ -124,7 +175,12 @@ export function buildReport({ dbPath = path.join(ROOT, 'data/jarvis/jobs.db'), l
     const walled = R.filter((r) => WALL.test(String(r.stoppedBecause || ''))).length;
     const clean = R.filter((r) => !(Array.isArray(r.left) && r.left.length) && !WALL.test(String(r.stoppedBecause || '')) && (Number(r.filled) || 0) > 0).length;
     const fl = (reg.faults || []).map((id) => ({ id, ...(faults.get(id) || { title: '(not in FAULTS.md)', status: '', open: false }) }));
+    const per = applicationRates(R);
     rows.push({
+      applications: per.applications,
+      appUploadPct: per.uploadPct,
+      appCleanPct: per.cleanPct,
+      appWallPct: per.walledPct,
       key: reg.key, name: reg.name,
       difficulty: reg.difficulty || '', automation: reg.automation || '',
       hosts: reg.hosts || [], scanner: reg.scanner || '', apply: reg.apply || '',
@@ -171,11 +227,11 @@ function toMarkdown(rep) {
   }
   out.push('## Overview');
   out.push('');
-  out.push('| Platform | Difficulty | Automation | Live postings | Companies | Applied | Runs | Median filled | Upload | Clean run | Wall | Unknown | Corrected | Open faults |');
-  out.push('|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|');
+  out.push('| Platform | Difficulty | Automation | Live postings | Companies | Applied | Runs | Apps | Median filled | Upload | App upload | Clean run | App clean | Wall | Unknown | Corrected | Open faults |');
+  out.push('|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|');
   const shown = rep.vendors.filter((v) => v.livePostings || v.runs || v.appliedByHim || v.key !== 'other');
   for (const v of shown.sort((a, b) => b.livePostings - a.livePostings)) {
-    out.push(`| ${v.name} | ${D[v.difficulty] || '–'} | ${v.automation || '–'} | ${v.livePostings} | ${v.liveCompanies} | ${v.appliedByHim} | ${v.runs} | ${n(v.medianFilled)} | ${n(v.uploadPct, '%')} | ${n(v.cleanRunPct, '%')} | ${n(v.wallPct, '%')} | ${n(v.unknownPct, '%')} | ${n(v.correctedPct, '%')} | ${v.openFaults.join(', ') || '–'} |`);
+    out.push(`| ${v.name} | ${D[v.difficulty] || '–'} | ${v.automation || '–'} | ${v.livePostings} | ${v.liveCompanies} | ${v.appliedByHim} | ${v.runs} | ${n(v.applications)} | ${n(v.medianFilled)} | ${n(v.uploadPct, '%')} | ${n(v.appUploadPct, '%')} | ${n(v.cleanRunPct, '%')} | ${n(v.appCleanPct, '%')} | ${n(v.wallPct, '%')} | ${n(v.unknownPct, '%')} | ${n(v.correctedPct, '%')} | ${v.openFaults.join(', ') || '–'} |`);
   }
   out.push('');
   out.push('## What the columns mean');
@@ -188,6 +244,7 @@ function toMarkdown(rep) {
   out.push('- **Median filled** — fields filled per run (one run is one page or one walk).');
   out.push('- **Upload** — runs that attached the resume.');
   out.push('- **Clean run** — runs that filled something, left nothing for him and did not stop at a wall. The closest thing to "reliability".');
+  out.push('- **Apps / App upload / App clean** — the same per APPLICATION (one job, all its runs): the resume went in on any run; the last run that met the form left nothing and stopped at the end (F-841). Per-run rates undercount, because a follow-along run per step and every sign-in retry is a run.');
   out.push('- **Wall** — runs that stopped at a sign-in, email or verification step.');
   out.push('- **Unknown** — planned fields the engine could not answer (skips excluded).');
   out.push('- **Corrected** — of the answers Jarvis gave that were read back at Next/Submit, the share he changed, cleared or edited. Only runs since read-back existed count.');
@@ -225,11 +282,11 @@ function toMarkdown(rep) {
 }
 
 function table(rep) {
-  const cols = [['Platform', 30], ['Diff', 7], ['Auto', 12], ['Live', 7], ['Cos', 5], ['Appl', 5], ['Runs', 5], ['Fill', 5], ['Up', 5], ['Clean', 6], ['Wall', 5], ['Unk', 5], ['Corr', 5], ['Open faults', 20]];
+  const cols = [['Platform', 30], ['Diff', 7], ['Auto', 12], ['Live', 7], ['Cos', 5], ['Appl', 5], ['Runs', 5], ['Apps', 5], ['Fill', 5], ['Up', 5], ['AppUp', 6], ['Clean', 6], ['AppCl', 6], ['Wall', 5], ['Unk', 5], ['Corr', 5], ['Open faults', 20]];
   const line = (vals) => vals.map((x, i) => String(x ?? '–').slice(0, cols[i][1]).padEnd(cols[i][1])).join(' ');
   const out = [line(cols.map((c) => c[0]))];
   for (const v of rep.vendors.filter((x) => x.livePostings || x.runs || x.key !== 'other').sort((a, b) => b.livePostings - a.livePostings)) {
-    out.push(line([v.name, v.difficulty, v.automation, v.livePostings, v.liveCompanies, v.appliedByHim, v.runs, n(v.medianFilled), n(v.uploadPct, '%'), n(v.cleanRunPct, '%'), n(v.wallPct, '%'), n(v.unknownPct, '%'), n(v.correctedPct, '%'), v.openFaults.join(',') || '–']));
+    out.push(line([v.name, v.difficulty, v.automation, v.livePostings, v.liveCompanies, v.appliedByHim, v.runs, n(v.applications), n(v.medianFilled), n(v.uploadPct, '%'), n(v.appUploadPct, '%'), n(v.cleanRunPct, '%'), n(v.appCleanPct, '%'), n(v.wallPct, '%'), n(v.unknownPct, '%'), n(v.correctedPct, '%'), v.openFaults.join(',') || '–']));
   }
   return out.join('\n');
 }

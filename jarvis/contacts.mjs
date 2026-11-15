@@ -5,7 +5,7 @@
  * design constraints 4, 5 and 6 are all rules about STATE, and without a record
  * they are just good intentions:
  *
- *   · at most two people per company per role, by default (one until 2026-10-05)
+ *   · as many people per role as are worth it (cap removed 2026-10-26; it was one, then two)
  *   · never the same person twice without a reply
  *   · one follow-up, 5-7 business days later, adding something new — then stop
  *   · honour "don't contact me" instantly and permanently
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   email_conf    TEXT NOT NULL DEFAULT '',
   draft         TEXT NOT NULL DEFAULT '',
   followup_draft TEXT NOT NULL DEFAULT '',
-  -- 'drafted' | 'sent' | 'followed_up' | 'replied' | 'closed'
+  -- 'drafted' | 'sent' | 'followed_up' | 'replied' | 'closed' | 'retired' (his call, reversible)
   status        TEXT NOT NULL DEFAULT 'drafted',
   -- Set the moment he says "don't contact" — checked before anything else.
   do_not_contact INTEGER NOT NULL DEFAULT 0,
@@ -72,7 +72,30 @@ CREATE INDEX IF NOT EXISTS contacts_status  ON contacts(status, sent_at);
 
 // One connection per file, schema applied once (outreach-db.mjs). The rows
 // already in jobs.db are carried across on the first open.
-const db = (dbPath = dbFile()) => outreachDb(dbPath, { ddl: DDL, legacy: ['contacts'] });
+const withSubject = new WeakSet();
+const db = (dbPath = dbFile()) => {
+  const h = outreachDb(dbPath, { ddl: DDL, legacy: ['contacts'] });
+  // The subject line he approved travels with the draft (2026-10-23): a message
+  // waits in this table, not in a filled browser tab, until he sits down to send.
+  if (!withSubject.has(h)) {
+    const cols = h.prepare('PRAGMA table_info(contacts)').all().map((c) => c.name);
+    if (!cols.includes('subject')) h.exec("ALTER TABLE contacts ADD COLUMN subject TEXT NOT NULL DEFAULT ''");
+    // CONNECT FIRST (2026-10-26, out of InMail): the note sent with the
+    // invitation, when it went, and when they accepted. The message itself
+    // stays in `draft` and goes, free, once they are connected.
+    if (!cols.includes('connect_note')) h.exec("ALTER TABLE contacts ADD COLUMN connect_note TEXT NOT NULL DEFAULT ''");
+    if (!cols.includes('invited_at')) h.exec('ALTER TABLE contacts ADD COLUMN invited_at TEXT');
+    if (!cols.includes('connected_at')) h.exec('ALTER TABLE contacts ADD COLUMN connected_at TEXT');
+    // RETIRED (F-977, 2026-11-03): off the open list for a reason of his, and
+    // back with --unretire. Not do-not-contact, which is the person's wish and
+    // permanent; this is his own call about a lead.
+    if (!cols.includes('retired_at')) h.exec('ALTER TABLE contacts ADD COLUMN retired_at TEXT');
+    if (!cols.includes('retired_reason')) h.exec("ALTER TABLE contacts ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''");
+    if (!cols.includes('retired_from')) h.exec("ALTER TABLE contacts ADD COLUMN retired_from TEXT NOT NULL DEFAULT ''");
+    withSubject.add(h);
+  }
+  return h;
+};
 
 /** Stable id so the same person at the same company is one row, not many. */
 export function contactId(company, name) {
@@ -102,16 +125,18 @@ export const FOLLOWUP_BUSINESS_DAYS = 6;
  * @param {object[]} atCompany    every contact already recorded at this company
  * @param {{jobId?:string, now?:Date, perCompanyPerRole?:number}} [opts]
  */
-// Two, not one (his call, 2026-10-05: "be flexible, no hard rules except for
-// date and other obvious stuff"): Riley and Devin each invited contact for
-// the same Tech Deployment team; a second good lead is worth a message. A cap
-// still stands so one posting never becomes a mass mailing.
-export function canContact(existing, atCompany = [], { jobId = '', now = new Date(), perCompanyPerRole = 2 } = {}) {
+// NO CAP since 2026-10-26 (his words: "remove all the damn caps dawg idgaf bout
+// caps"). It was one per role, then two from 2026-10-05. A cap can still be
+// passed in as perCompanyPerRole; nothing passes one.
+export function canContact(existing, atCompany = [], { jobId = '', now = new Date(), perCompanyPerRole = Infinity } = {}) {
   if (existing?.do_not_contact) {
     return { ok: false, why: 'he asked not to be contacted — permanently, and that is the end of it' };
   }
   if (existing?.replied_at) {
     return { ok: false, why: 'they replied; this is a conversation now, not outreach' };
+  }
+  if (isRetired(existing)) {
+    return { ok: false, why: `retired${existing.retired_reason ? `: ${existing.retired_reason}` : ''} (outreach-cli --unretire ${existing.id} brings them back)` };
   }
   if (existing?.status === 'followed_up') {
     return { ok: false, why: 'already followed up once — a second follow-up is where persistent turns into pushy' };
@@ -145,6 +170,22 @@ export function forJob(jobId, { dbPath = dbFile() } = {}) {
   return db(dbPath).prepare('SELECT * FROM contacts WHERE job_id = ? ORDER BY created_at DESC').all(String(jobId || ''));
 }
 
+/**
+ * They accepted his invitation and their saved message has not gone (F-951):
+ * what the after-accept catch-up looks at. { id, name, at } with `at` the accept.
+ */
+export function acceptedUnsent({ dbPath = dbFile() } = {}) {
+  return db(dbPath).prepare(`SELECT id, name, connected_at AS at FROM contacts
+    WHERE invited_at IS NOT NULL AND invited_at != '' AND connected_at IS NOT NULL AND connected_at != ''
+      AND (sent_at IS NULL OR sent_at = '') AND COALESCE(do_not_contact, 0) = 0 AND status <> 'retired'`).all();
+}
+
+/** He took this person off the open list (retireContact). */
+export const isRetired = (c) => c?.status === 'retired';
+
+/** The open list: drafted, not sent, not do-not-contact, not retired. */
+export const isOpen = (c) => !!c && c.status === 'drafted' && !c.sent_at && !c.do_not_contact;
+
 export function allContacts({ dbPath = dbFile(), limit = 500 } = {}) {
   return db(dbPath).prepare('SELECT * FROM contacts ORDER BY COALESCE(sent_at, created_at) DESC LIMIT ?').all(Number(limit) || 500);
 }
@@ -177,23 +218,71 @@ export function saveContact(row, { dbPath = dbFile() } = {}) {
     followed_up_at: row.followed_up_at ?? prev?.followed_up_at ?? null,
     replied_at: row.replied_at ?? prev?.replied_at ?? null,
     note: row.note ?? prev?.note ?? '',
+    subject: row.subject ?? prev?.subject ?? '',
+    connect_note: row.connect_note ?? prev?.connect_note ?? '',
+    invited_at: row.invited_at ?? prev?.invited_at ?? null,
+    connected_at: row.connected_at ?? prev?.connected_at ?? null,
+    retired_at: row.retired_at !== undefined ? row.retired_at : (prev?.retired_at ?? null),
+    retired_reason: row.retired_reason ?? prev?.retired_reason ?? '',
+    retired_from: row.retired_from ?? prev?.retired_from ?? '',
   };
   db(dbPath).prepare(`INSERT INTO contacts
-      (id, job_id, company, name, title, persona, channel, linkedin_url, email, email_conf, draft, followup_draft, status, do_not_contact, created_at, sent_at, followed_up_at, replied_at, note)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      (id, job_id, company, name, title, persona, channel, linkedin_url, email, email_conf, draft, followup_draft, status, do_not_contact, created_at, sent_at, followed_up_at, replied_at, note, subject, connect_note, invited_at, connected_at, retired_at, retired_reason, retired_from)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       job_id=excluded.job_id, company=excluded.company, name=excluded.name, title=excluded.title,
       persona=excluded.persona, channel=excluded.channel, linkedin_url=excluded.linkedin_url,
       email=excluded.email, email_conf=excluded.email_conf, draft=excluded.draft,
       followup_draft=excluded.followup_draft, status=excluded.status,
       do_not_contact=excluded.do_not_contact, sent_at=excluded.sent_at,
-      followed_up_at=excluded.followed_up_at, replied_at=excluded.replied_at, note=excluded.note`)
+      followed_up_at=excluded.followed_up_at, replied_at=excluded.replied_at, note=excluded.note,
+      subject=excluded.subject, connect_note=excluded.connect_note,
+      invited_at=excluded.invited_at, connected_at=excluded.connected_at,
+      retired_at=excluded.retired_at, retired_reason=excluded.retired_reason, retired_from=excluded.retired_from`)
     .run(merged.id, merged.job_id, merged.company, merged.name, merged.title, merged.persona,
       merged.channel, merged.linkedin_url, merged.email, merged.email_conf, merged.draft,
       merged.followup_draft, merged.status, merged.do_not_contact, merged.created_at,
-      merged.sent_at, merged.followed_up_at, merged.replied_at, merged.note);
+      merged.sent_at, merged.followed_up_at, merged.replied_at, merged.note, merged.subject,
+      merged.connect_note, merged.invited_at, merged.connected_at,
+      merged.retired_at, merged.retired_reason, merged.retired_from);
   return merged;
 }
+
+/**
+ * TAKE A LEAD OFF THE OPEN LIST, REVERSIBLY (F-977). Keeps the row, its draft,
+ * its note and every date; records why and the status it had. A do-not-contact
+ * row is already closed for good and is left as it is. Returns the row, or null.
+ */
+export function retireContact(id, { dbPath = dbFile(), why = '', at = new Date().toISOString() } = {}) {
+  const prev = getContact(id, { dbPath });
+  if (!prev || prev.do_not_contact) return null;
+  if (isRetired(prev)) return prev;
+  return saveContact({ id, status: 'retired', retired_at: at, retired_reason: String(why || '').slice(0, 500), retired_from: prev.status || 'drafted' }, { dbPath });
+}
+
+/** Undo retireContact: the status it had before, the reason cleared. */
+export function unretireContact(id, { dbPath = dbFile() } = {}) {
+  const prev = getContact(id, { dbPath });
+  if (!prev || !isRetired(prev)) return null;
+  return saveContact({ id, status: prev.retired_from || 'drafted', retired_at: null, retired_reason: '', retired_from: '' }, { dbPath });
+}
+
+/** The connection request with his note went out (connect mode). Sets the time once. */
+export function markInvited(id, { dbPath = dbFile(), at = new Date().toISOString() } = {}) {
+  const prev = getContact(id, { dbPath });
+  if (!prev) return null;
+  return prev.invited_at ? prev : saveContact({ id, invited_at: at }, { dbPath });
+}
+
+/** They accepted his invitation. Sets the time once; the status is left alone. */
+export function markConnected(id, { dbPath = dbFile(), at = new Date().toISOString() } = {}) {
+  const prev = getContact(id, { dbPath });
+  if (!prev) return null;
+  return prev.connected_at ? prev : saveContact({ id, connected_at: at }, { dbPath });
+}
+
+/** The note travels with the invitation: LinkedIn allows 300 characters. */
+export const CONNECT_NOTE_MAX = 300;
 
 /**
  * Take off a person he has NOT written to, so someone better can take the
@@ -278,6 +367,28 @@ export function outreachStats({ dbPath = dbFile() } = {}) {
     byCompany: by('company'),
     byChannel: by('channel'),
   };
+}
+
+/**
+ * CONNECT FIRST (2026-10-26, out of InMail): the invitations with his note
+ * that are waiting: a saved note, a profile, not invited yet, not sent to,
+ * not do-not-contact. `only` = lowercased names.
+ */
+export function outreachConnectQueue(only = [], { dbPath = dbFile(), contacts = null } = {}) {
+  const people = (contacts || allContacts({ dbPath, limit: 5000 }))
+    .filter((c) => c.connect_note && c.linkedin_url && !c.invited_at && !c.sent_at && !c.do_not_contact && !isRetired(c))
+    .filter((c) => !only.length || only.includes(String(c.name).toLowerCase()))
+    .map((c) => ({ id: c.id, name: c.name, first: String(c.name).split(/\s+/)[0], profile: c.linkedin_url, note: c.connect_note }));
+  return { people, stale: [], noResume: [] };
+}
+
+/** The saved message after an accepted invitation: "Thanks for connecting!" opens it, after the greeting. */
+export function thanksForConnecting(message) {
+  const m = String(message || '');
+  if (/thanks for connecting/i.test(m)) return m;
+  const g = m.match(/^(Hi|Hello|Hey)\b[^\n]*\n+/);
+  if (!g) return `Thanks for connecting!\n\n${m}`;
+  return `${g[0]}Thanks for connecting! ${m.slice(g[0].length)}`;
 }
 
 export { dbFile as contactsDbPath };

@@ -18,8 +18,15 @@
 // OpportunityDetail page (embedded-posting.mjs → ukgPosting), read by enrich.
 //
 // Auto-detects from careers_url; the tenant and board id are the whole config.
+//
+// THE NEWER HOST IS THE SAME BOARD (2026-10-22, F-792). UKG also serves boards
+// at <tenant>.rec.pro.ukg.net (Convergix: convergix.rec.pro.ukg.net/CON1096CVAU/
+// JobBoard/<GUID>/) with the same path and the same search API, measured live:
+// 51 postings. Only recruiting<n>.ultipro.com was accepted, so the ledger said
+// "runs on ukg, which nothing here reads yet" and his form there matched only
+// LinkedIn copies, which is to say nothing.
 
-const UKG_HOST_RE = /^recruiting\d*\.ultipro\.com$/i;
+const UKG_HOST_RE = /^(?:recruiting\d*\.ultipro\.com|[a-z0-9-]+\.rec\.pro\.ukg\.net)$/i;
 const BOARD_RE = /^\/([A-Za-z0-9]+)\/JobBoard\/([0-9a-f-]{36})/i;
 const PAGE = 50;
 const MAX_PAGES = 40;   // 2,000 postings — above any UKG board seen
@@ -36,7 +43,7 @@ export function ukgBase(raw) {
 /** Every UKG board linked from a page. */
 export function ukgBoardsIn(html) {
   const out = new Set();
-  for (const m of String(html || '').matchAll(/https:\/\/recruiting\d*\.ultipro\.com\/[A-Za-z0-9]+\/JobBoard\/[0-9a-fA-F-]{36}/g)) {
+  for (const m of String(html || '').matchAll(/https:\/\/(?:recruiting\d*\.ultipro\.com|[a-z0-9-]+\.rec\.pro\.ukg\.net)\/[A-Za-z0-9]+\/JobBoard\/[0-9a-fA-F-]{36}/g)) {
     const b = ukgBase(m[0]);
     if (b) out.add(b);
   }

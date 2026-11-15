@@ -181,7 +181,22 @@ const pick = (field, fields) => (field === 'title' ? fields.title
   : field === 'company' ? fields.company
   : fields.all);
 
-export function applyPrefs(job, rules) {
+const PROGRAM_TITLE = /\b(?:development|rotation(?:al)?|leadership|graduate|early[- ]career|new[- ]grad\w*)\s+program\b(?!\s+manag)/i;
+const PROGRAM_PATH = /\b(?:R\s?&\s?D|research\s*(?:&|and)\s*development|hardware|mechatronic\w*|mechanical|product\s+development|design)\b/i;
+const ENGINEERING_DEGREE =/\b(?:bachelor\w*|B\.?S\.?(?=\W)|degree)\b[^.\n]{0,60}\bengineering\b/i;
+
+// AN EMPLOYER IN THE FIELD AN EXCEPTION NAMES (audit, 2026-11-12). His field
+// rule spares robotics "in title or company", and the company was read only as
+// a NAME: Tutor Intelligence, a robotics company, had its field roles cut. The
+// employer's own field (what 80% of its described postings are about, from the
+// store) now counts for a `company` exception too. The store registers the
+// lookup when it loads; a caller may pass `{ employerFields }` instead (tests
+// pass their own, so they never read his store). No lookup = name only.
+let employerFieldsOf = null;
+export function setEmployerFieldLookup(fn) { employerFieldsOf = typeof fn === 'function' ? fn : null; }
+
+export function applyPrefs(job, rules, opts = {}) {
+  const fieldsOf = opts.employerFields !== undefined ? opts.employerFields : employerFieldsOf;
   const title = String(job.title || '');
   const location = String(job.location || '');
   const company = String(job.company || '');
@@ -213,8 +228,28 @@ export function applyPrefs(job, rules) {
   // Naming what he DOES want is a list of four things instead of an endless
   // list of what he does not. It stays in his own file, in his own words, and
   // deleting the line turns it off.
+  // A title that abbreviates the word: Amazon's "Robotics Systems Eng II, Tech
+  // Deployment" was hidden as "not one of the roles you asked for" (2026-10-24).
+  // Every title rule reads it spelled out, so "SoftwareDev Eng" still meets
+  // "no software development engineer".
+  const spelled = title
+    .replace(/([a-z])Dev\b/g, '$1 Dev')
+    .replace(/\bDev\b\.?(?=\s+Engr?\b)/gi, 'Development')
+    .replace(/\bEngr?\b\.?/gi, 'Engineer')
+    .replace(/\bEngg\b\.?/gi, 'Engineering');
+  const fields = { title: spelled, location, company, all: `${spelled} ${all}` };
+  // A program is titled by the program, not the job: Schaeffler's "Accelerated
+  // Leadership Development Program - Research & Development Path" asks for a
+  // "Bachelor's Degree in relevant Engineering" and was hidden as not one of
+  // his roles (F-959). Its degree line says what it is; a finance or HR
+  // program names its own field there and stays out.
+  // The title must name the engineering path too: sales, supply-chain and
+  // operations-management programs list "Engineering" among business majors.
+  const engineeringProgram = PROGRAM_TITLE.test(title) && PROGRAM_PATH.test(title)
+    && ENGINEERING_DEGREE.test(String(job.description || ''));
   for (const rule of rules.filter(r => r.verb === 'require')) {
-    const hay = pick(rule.field, { title, location, company, all });
+    const hay = pick(rule.field, fields);
+    if (rule.field === 'title' && engineeringProgram) continue;
     if (!rule.terms.some(t => termRe(t).test(hay))) {
       hard.push(`Not one of the roles you asked for (${rule.terms.slice(0, 3).join(', ')}…)`);
     }
@@ -222,7 +257,7 @@ export function applyPrefs(job, rules) {
 
   for (const rule of rules) {
     if (rule.verb === 'require') continue;
-    const hay = pick(rule.field, { title, location, company, all });
+    const hay = pick(rule.field, fields);
     const matched = rule.terms.filter(t => termRe(t).test(hay));
     if (!matched.length) continue;
     if (rule.except?.length) {
@@ -231,13 +266,18 @@ export function applyPrefs(job, rules) {
       // employer it lists would — otherwise all of Teradyne's chip-test field
       // roles walked back in as robotics.
       const sparedBy = f => {
-        const v = pick(f, { title, location, company, all });
+        const v = pick(f, fields);
         if (f !== 'company') return v;
         const parts = String(company || '').split(/\s+\/\s+/);
         return parts.length > 1 && !parts.every(p => rule.except.some(t => termRe(t).test(p))) ? '' : v;
       };
       const spared = (rule.exceptFields || [rule.field]).map(sparedBy).join(' ');
       if (rule.except.some(t => termRe(t).test(spared))) continue;
+      if (fieldsOf && company && (rule.exceptFields || []).includes('company')) {
+        let own = [];
+        try { own = fieldsOf(company) || []; } catch { own = []; }
+        if (own.some(f => rule.except.some(t => termRe(t).test(String(f))))) continue;
+      }
     }
 
     // Only an exclusion that rules out EVERY site actually rules out the job.
@@ -279,7 +319,7 @@ export function applyPrefs(job, rules) {
       // The scope is the proof: the rule asked to be matched against the
       // company and it was.
       const inTitle = rule.field === 'title' || rule.field === 'location' || rule.field === 'company'
-        || matched.some((t) => termRe(t).test(title));
+        || matched.some((t) => termRe(t).test(spelled));
       if (inTitle) {
         hard.push(`Breaks your rule "${rule.verb} ${label}"`);
       } else {

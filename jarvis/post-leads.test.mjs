@@ -156,12 +156,15 @@ test('no cited post, no fetch', async () => {
 });
 
 test('the Outreach button\'s run checks its posts before saving', async () => {
+  // Ten days old whenever the test runs: a fixed date stops being 'recent' (RECENT_DAYS)
+  // and the label this test checks goes with it (it read 2026-09-28 and failed from 11-09).
+  const posted = new Date(Date.now() - 10 * 86_400_000).toISOString().slice(0, 10);
   const L = await import('./leads.mjs');
   const dir = mkdtempSync(path.join(tmpdir(), 'lead-verify-'));
   const dbPath = path.join(dir, 'outreach.db');
   const url = `https://www.linkedin.com/posts/riley_x-activity-${RILEY_ID}-Zdsc`;
   const html = page({
-    author: 'Riley T Morgan', authorUrl: 'https://www.linkedin.com/in/riley', date: '2026-09-28T00:00:00Z', ownId: RILEY_ID,
+    author: 'Riley T Morgan', authorUrl: 'https://www.linkedin.com/in/riley', date: `${posted}T00:00:00Z`, ownId: RILEY_ID,
     words: 'My team is hiring. Feel free to reach out to me.',
     shared: { author: 'Kai Ortiz', url: 'https://www.linkedin.com/in/kaiortiz', words: "We're Hiring: Robotics Systems Engineers", id: JAI_ID },
   });
@@ -175,9 +178,41 @@ test('the Outreach button\'s run checks its posts before saving', async () => {
     assert.ok(names.includes('Kai Ortiz'), 'the original writer was added');
     const g = run.result.people.find((p) => p.name === 'Riley T Morgan');
     assert.equal(g.signal.kind, 'invited');
-    assert.equal(g.signal.date, '2026-09-28');
+    assert.equal(g.signal.date, posted);
     assert.equal(g.excellent, 'invites messages');
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* still open */ }
   }
+});
+
+test('a video post is a post: its poster is the creator, its words the description (F-783)', () => {
+  // The shape of Sam Ortiza's 2026-09-16 Tutor reshare, a VideoObject.
+  const WILL_ID = '7506026300000000101';
+  const JOSH_ID = '7506025829000000102';
+  const ld = {
+    '@type': 'VideoObject', datePublished: '2026-09-16T16:28:45.265Z',
+    headline: 'Extremely proud of the entire hardware engineering team.',
+    description: 'Extremely proud of the entire hardware engineering team.',
+    creator: { '@type': 'Person', name: 'Sam Ortiza', url: 'https://www.linkedin.com/in/samortiza' },
+    sharedContent: { '@type': 'WebPage', headline: "I'm excited to share Tutor's next generation of robots. We're hiring.", author: { '@type': 'Person', name: 'Dana Whitfield', url: 'https://www.linkedin.com/in/dana-whitfield-0000000' } },
+  };
+  const html = `<html><script type="application/ld+json">${JSON.stringify(ld)}</script><a data-urn="urn:li:activity:${WILL_ID}"></a><div data-urn="urn:li:activity:${JOSH_ID}"></div></html>`;
+  const p = parsePostHtml(html, `https://www.linkedin.com/posts/samortiza_x-activity-${WILL_ID}-Ab3d`);
+  assert.ok(p, 'a video post is read');
+  assert.equal(p.author.name, 'Sam Ortiza');
+  assert.equal(p.author.kind, 'person');
+  assert.equal(p.text, 'Extremely proud of the entire hardware engineering team.');
+  assert.equal(p.shared.author.name, 'Dana Whitfield');
+  assert.equal(p.date, '2026-09-16T16:28:45.265Z');
+});
+
+test('a posting link is lifted off a post for any application platform, never LinkedIn\'s own job list (2026-10-24)', async () => {
+  const { JOB_LINK } = await import('./post-leads.mjs');
+  const html = `<p>Apply: https://boards.greenhouse.io/tutorintelligence/jobs/123 and https://jobs.lever.co/agility/abc-1 and https://tesla.wd5.myworkdayjobs.com/en-US/careers/job/x_R1 and https://www.amazon.jobs/en/jobs/2912345</p>
+    <a href="https://www.linkedin.com/jobs/view/999">Explore jobs</a>`;
+  const got = [...html.matchAll(JOB_LINK)].map((m) => m[0]);
+  assert.equal(got.length, 4);
+  assert.ok(got.every((u) => !/linkedin\.com/.test(u)));
+  const p = parsePostHtml(`<script type="application/ld+json">${JSON.stringify({ '@type': 'SocialMediaPosting', articleBody: 'We are hiring', author: { name: 'A B', url: 'https://www.linkedin.com/in/ab' } })}</script> https://jobs.ashbyhq.com/genesis/abc`, 'https://www.linkedin.com/posts/ab_x-activity-7518854823000000105-Kp4m');
+  assert.deepEqual(p.jobLinks, ['https://jobs.ashbyhq.com/genesis/abc']);
 });

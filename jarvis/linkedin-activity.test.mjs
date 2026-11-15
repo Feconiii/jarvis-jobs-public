@@ -146,3 +146,24 @@ function makeZip(files) {
   end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
   return Buffer.concat([...locals, cd, end]);
 }
+
+test('CONNECT FIRST: an accept marks a person connected only after his invitation with a note went out', () => {
+  const id = C.contactId('OpenAI', 'Mia Chen');
+  C.saveContact({ id, job_id: 'oa-1', company: 'OpenAI', name: 'Mia Chen', linkedin_url: 'https://www.linkedin.com/in/mia-chen', draft: 'Hi Mia,\n\nI recently applied for the role.', connect_note: 'Hi Mia, I saw your post. I applied, so I would love to connect.' });
+  const accept = (gid, at) => ({ id: gid, fromEmail: 'invitations@linkedin.com', subject: 'Mia accepted your invitation, explore their network', snippet: 'See Mia Chen&#39;s connections, experience, and more', body: '', date: at });
+  const before = A.applyLinkedInEmails([accept('g-mia-0', '2026-10-20T17:00:00Z')], { now: new Date('2026-10-26T14:00:00Z') });
+  assert.deepEqual(before.connected, [], 'never invited by the connect pass: nothing scheduled');
+  assert.equal(C.getContact(id).connected_at, null);
+  assert.equal(C.outreachConnectQueue([], { contacts: [C.getContact(id)] }).people.length, 1, 'waiting for its invitation');
+  C.markInvited(id, { at: '2026-10-26T18:00:00Z' });
+  assert.equal(C.outreachConnectQueue([], { contacts: [C.getContact(id)] }).people.length, 0, 'invited once, never twice');
+  const after = A.applyLinkedInEmails([accept('g-mia-1', '2026-10-27T17:00:00Z')], { now: new Date('2026-10-27T18:00:00Z') });
+  assert.deepEqual(after.connected, [{ id, name: 'Mia Chen', at: '2026-10-27T17:00:00Z' }], 'with the accept time, so the message waits 30-40 min from it');
+  assert.equal(C.getContact(id).connected_at, '2026-10-27T17:00:00Z');
+});
+
+test('the saved message after an accept opens "Thanks for connecting!" after the greeting, once', () => {
+  assert.equal(C.thanksForConnecting('Hi Chris,\n\nI saw your post about the roles.'), 'Hi Chris,\n\nThanks for connecting! I saw your post about the roles.');
+  assert.equal(C.thanksForConnecting('Hi Chris,\n\nThanks for connecting! I saw it.'), 'Hi Chris,\n\nThanks for connecting! I saw it.');
+  assert.equal(C.thanksForConnecting('I saw your post.'), 'Thanks for connecting!\n\nI saw your post.');
+});

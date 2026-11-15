@@ -161,6 +161,60 @@ export function phenomPosting(html) {
   };
 }
 
+/**
+ * The inner HTML of the element whose opening tag contains position `at`,
+ * read by depth over that element's own tag name, or ''.
+ */
+function innerOf(html, at) {
+  const open = html.lastIndexOf('<', at);
+  const name = /^<([a-zA-Z][\w-]*)/.exec(html.slice(open))?.[1];
+  const start = html.indexOf('>', at);
+  if (!name || start < 0) return '';
+  const tags = new RegExp(`<(/?)${name}(?=[\\s>/])[^>]*>`, 'gi');
+  tags.lastIndex = start + 1;
+  let depth = 1;
+  for (let m; (m = tags.exec(html));) {
+    if (m[1]) { if (--depth === 0) return html.slice(start + 1, m.index); }
+    else if (!m[0].endsWith('/>')) depth++;
+  }
+  return '';
+}
+
+//   Microdata  <div itemscope itemtype="http://schema.org/JobPosting"> with
+//           itemprop="title" / "description" / "datePosted" and a PostalAddress
+//           of <meta> tags — what SAP SuccessFactors career sites (the "RMK"
+//           job page) publish instead of JSON-LD. Teradyne, Qorvo and Veeco
+//           are read through their sitemaps, and 1,783 of their rows had never
+//           been read: every attempt ended "page had no JobPosting data" while
+//           the posting sat on the page in this form (2026-10-18).
+export function microdataPosting(html) {
+  const s = String(html || '');
+  const scope = s.search(/itemtype="https?:\/\/schema\.org\/JobPosting"/i);
+  if (scope < 0) return null;
+  const body = s.slice(scope);
+  const propAt = (name) => {
+    const m = new RegExp(`itemprop="${name}"`, 'i').exec(body);
+    return m ? m.index : -1;
+  };
+  const metaOf = (name) => {
+    const m = new RegExp(`<meta[^>]*itemprop="${name}"[^>]*content="([^"]*)"`, 'i').exec(body)
+      || new RegExp(`<meta[^>]*content="([^"]*)"[^>]*itemprop="${name}"`, 'i').exec(body);
+    return m ? m[1].trim() : '';
+  };
+  const d = propAt('description');
+  const description = d >= 0 ? innerOf(body, d) : '';
+  if (!description.trim()) return null;
+  const t = propAt('title');
+  const title = t >= 0 ? innerOf(body, t).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+  return {
+    '@type': 'JobPosting',
+    ...(title ? { title } : {}),
+    description,
+    datePosted: metaOf('datePosted') || undefined,
+    jobLocation: [asAddress(metaOf('addressLocality'), metaOf('addressRegion'), metaOf('addressCountry'))],
+  };
+}
+
 export function embeddedPosting(html) {
-  return applePosting(html) || googlePosting(html) || ukgPosting(html) || phenomPosting(html);
+  return applePosting(html) || googlePosting(html) || ukgPosting(html) || phenomPosting(html) || microdataPosting(html);
 }

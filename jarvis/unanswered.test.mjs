@@ -126,8 +126,13 @@ console.log('\n🧪 unanswered: ours to fix, or genuinely his');
   // probed as text it answered with his portfolio URL and was ranked as a
   // matcher bug somebody could go and fix. Nobody can — a file input does not
   // take a URL — so the row belonged under "genuinely his" the whole time.
+  // A profile with no portfolio PDF, so the URL alone is on offer. Once the
+  // PDF is built the slot is answered by the file (F-904), which his real
+  // profile now finds under the name he goes by.
   eq('a file upload is not answered by a URL',
-    verdict({ label: 'Portfolio - File upload', kind: 'file', options: [] }), 'his');
+    answerability({ label: 'Portfolio - File upload', kind: 'file', options: [] }, { planForm, profile: { ...profile, portfolioPdf: null } }).verdict, 'his');
+  eq('…but a built portfolio PDF answers it (F-904)',
+    answerability({ label: 'Portfolio - File upload', kind: 'file', options: [] }, { planForm, profile: { ...profile, portfolioPdf: 'Alex Rivera Portfolio.pdf' } }).verdict, 'answerable-now');
 }
 
 // ── a sighting that cannot teach anything ────────────────────────────

@@ -38,9 +38,9 @@ const COUNTRIES = [
   ['AF', 'AFG', 'afghanistan'], ['AL', 'ALB', 'albania'], ['DZ', 'DZA', 'algeria'],
   ['AD', 'AND', 'andorra'], ['AO', 'AGO', 'angola'], ['AG', 'ATG', 'antigua'],
   ['AR', 'ARG', 'argentina'], ['AM', 'ARM', 'armenia'], ['AU', 'AUS', 'australia'],
-  ['AT', 'AUT', 'austria'], ['AZ', 'AZE', 'azerbaijan'], ['BS', 'BHS', 'bahamas'],
+  ['AT', 'AUT', 'austria', 'osterreich'], ['AZ', 'AZE', 'azerbaijan'], ['BS', 'BHS', 'bahamas'],
   ['BH', 'BHR', 'bahrain'], ['BD', 'BGD', 'bangladesh'], ['BB', 'BRB', 'barbados'],
-  ['BY', 'BLR', 'belarus'], ['BE', 'BEL', 'belgium'], ['BZ', 'BLZ', 'belize'],
+  ['BY', 'BLR', 'belarus'], ['BE', 'BEL', 'belgium', 'belgique', 'belgie'], ['BZ', 'BLZ', 'belize'],
   ['BJ', 'BEN', 'benin'], ['BT', 'BTN', 'bhutan'], ['BO', 'BOL', 'bolivia'],
   ['BA', 'BIH', 'bosnia', 'bosnia and herzegovina', 'herzegovina'],
   ['BW', 'BWA', 'botswana'], ['BR', 'BRA', 'brazil', 'brasil'],
@@ -53,23 +53,23 @@ const COUNTRIES = [
   ['CO', 'COL', 'colombia'], ['KM', 'COM', 'comoros'],
   ['CG', 'COG', 'republic of the congo'], ['CD', 'COD', 'democratic republic of the congo'],
   ['CR', 'CRI', 'costa rica'], ['CI', 'CIV', "cote d'ivoire", 'ivory coast'],
-  ['HR', 'HRV', 'croatia'], ['CY', 'CYP', 'cyprus'],
+  ['HR', 'HRV', 'croatia', 'hrvatska'], ['CY', 'CYP', 'cyprus'],
   ['CU', 'CUB', 'cuba'], // weak: Cuba, NY/MO.
-  ['CZ', 'CZE', 'czech republic', 'czechia'],
-  ['DK', 'DNK', 'denmark'], // weak: Denmark, SC.
+  ['CZ', 'CZE', 'czech republic', 'czechia', 'cesko', 'ceska republika'],
+  ['DK', 'DNK', 'denmark', 'danmark'], // weak: Denmark, SC.
   ['DJ', 'DJI', 'djibouti'], ['DM', 'DMA', 'dominica'],
   ['DO', 'DOM', 'dominican republic'], ['EC', 'ECU', 'ecuador'],
   ['EG', 'EGY', 'egypt'], // weak: Egypt, TX.
   ['SV', 'SLV', 'el salvador'], ['GQ', 'GNQ', 'equatorial guinea'],
   ['ER', 'ERI', 'eritrea'], ['EE', 'EST', 'estonia'], ['SZ', 'SWZ', 'eswatini'],
-  ['ET', 'ETH', 'ethiopia'], ['FJ', 'FJI', 'fiji'], ['FI', 'FIN', 'finland'],
+  ['ET', 'ETH', 'ethiopia'], ['FJ', 'FJI', 'fiji'], ['FI', 'FIN', 'finland', 'suomi'],
   ['FR', 'FRA', 'france'], ['GA', 'GAB', 'gabon'], ['GM', 'GMB', 'gambia'],
   ['GE', 'GEO', null], // Georgia the country vs. Georgia the state.
   ['DE', 'DEU', 'germany', 'deutschland'],
   ['GH', 'GHA', 'ghana'], ['GR', 'GRC', 'greece'], ['GD', 'GRD', 'grenada'],
   ['GT', 'GTM', 'guatemala'], ['GN', 'GIN', 'guinea'], ['GW', 'GNB', 'guinea-bissau'],
   ['GY', 'GUY', 'guyana'], ['HT', 'HTI', 'haiti'], ['HN', 'HND', 'honduras'],
-  ['HK', 'HKG', 'hong kong'], ['HU', 'HUN', 'hungary'], ['IS', 'ISL', 'iceland'],
+  ['HK', 'HKG', 'hong kong'], ['HU', 'HUN', 'hungary', 'magyarorszag'], ['IS', 'ISL', 'iceland'],
   ['IN', 'IND', 'india'], ['ID', 'IDN', 'indonesia'], ['IR', 'IRN', 'iran'],
   ['IQ', 'IRQ', 'iraq'], ['IE', 'IRL', 'ireland'], ['IL', 'ISR', 'israel'],
   ['IT', 'ITA', 'italy', 'italia'], ['JM', 'JAM', 'jamaica'], ['JP', 'JPN', 'japan'],
@@ -88,19 +88,21 @@ const COUNTRIES = [
   ['MD', 'MDA', 'moldova'], ['MC', 'MCO', 'monaco'], ['MN', 'MNG', 'mongolia'],
   ['ME', 'MNE', 'montenegro'], ['MA', 'MAR', 'morocco'], ['MZ', 'MOZ', 'mozambique'],
   ['MM', 'MMR', 'myanmar'], ['NA', 'NAM', 'namibia'], ['NP', 'NPL', 'nepal'],
+  // "Nederland" is NOT an alias here: Nederland, TX is real ("Renal Center of
+  // Nederland"). It counts after a comma, in FOREIGN_TRAILING_REGION_RE.
   ['NL', 'NLD', 'netherlands', 'holland'], ['NZ', 'NZL', 'new zealand'],
   ['NI', 'NIC', 'nicaragua'], ['NE', 'NER', 'niger'], ['NG', 'NGA', 'nigeria'],
   ['KP', 'PRK', 'north korea'], ['MK', 'MKD', 'north macedonia', 'macedonia'],
-  ['NO', 'NOR', 'norway'], // weak: Norway, MI.
+  ['NO', 'NOR', 'norway', 'norge'], // weak: Norway, MI.
   ['OM', 'OMN', 'oman'], ['PK', 'PAK', 'pakistan'],
   ['PA', 'PAN', 'panama'], // weak: Panama City, FL.
   ['PG', 'PNG', 'papua new guinea'], ['PY', 'PRY', 'paraguay'],
   ['PE', 'PER', 'peru'], // weak: Peru, IN.
   ['PH', 'PHL', 'philippines'],
-  ['PL', 'POL', 'poland'], // weak: Poland, OH.
+  ['PL', 'POL', 'poland', 'polska'], // weak: Poland, OH.
   ['PT', 'PRT', 'portugal'], ['QA', 'QAT', 'qatar'], ['RO', 'ROU', 'romania'],
   ['RU', 'RUS', 'russia', 'russian federation'], ['RW', 'RWA', 'rwanda'],
-  ['SA', 'SAU', 'saudi arabia'], ['SN', 'SEN', 'senegal'], ['RS', 'SRB', 'serbia'],
+  ['SA', 'SAU', 'saudi arabia'], ['SN', 'SEN', 'senegal'], ['RS', 'SRB', 'serbia', 'srbija'],
   ['SC', 'SYC', 'seychelles'], ['SL', 'SLE', 'sierra leone'],
   ['SG', 'SGP', 'singapore'], ['SK', 'SVK', 'slovakia'], ['SI', 'SVN', 'slovenia'],
   ['SO', 'SOM', 'somalia'], ['ZA', 'ZAF', 'south africa'],
@@ -108,8 +110,8 @@ const COUNTRIES = [
   ['ES', 'ESP', 'spain', 'espana'], ['LK', 'LKA', 'sri lanka'],
   ['SD', 'SDN', null], // SD = South Dakota.
   ['SR', 'SUR', 'suriname'],
-  ['SE', 'SWE', 'sweden'], // weak: Sweden, ME/NY.
-  ['CH', 'CHE', 'switzerland'], ['SY', 'SYR', 'syria'],
+  ['SE', 'SWE', 'sweden', 'sverige'], // weak: Sweden, ME/NY.
+  ['CH', 'CHE', 'switzerland', 'schweiz', 'suisse', 'svizzera'], ['SY', 'SYR', 'syria'],
   ['TW', 'TWN', 'taiwan'], ['TJ', 'TJK', 'tajikistan'], ['TZ', 'TZA', 'tanzania'],
   ['TH', 'THA', 'thailand'], ['TG', 'TGO', 'togo'],
   ['TT', 'TTO', 'trinidad', 'trinidad and tobago'], ['TN', 'TUN', 'tunisia'],
@@ -150,6 +152,25 @@ const allNames = COUNTRIES.flatMap(c => c.slice(2).filter(Boolean));
 const STRONG_NAME_RE = buildNameRe(allNames.filter(n => !WEAK_NAMES.has(n)));
 const WEAK_NAME_RE = buildNameRe([...WEAK_NAMES]);
 
+// Every country name and alias, mapped to its alpha-2 code. Used by the
+// "City, ST" rule below (F-759) to tell "Holland, MI" (a Michigan town that
+// shares the Netherlands' nickname) from "Germany, DE" (a country beside its
+// own code, which happens to be Delaware's too).
+const NAME_TO_ISO2 = new Map(COUNTRIES.flatMap(c => c.slice(2).filter(Boolean).map(n => [n, c[0]])));
+const ANY_NAME_RE_G = new RegExp(buildNameRe(allNames).source, 'gi');
+// Country names that are ALSO the whole name of a US town, so "<name>, ST" is
+// the town: Holland MI/OH, Grenada MS, Macedonia OH, Canada KY, Jamaica NY
+// (Queens), Angola IN, Brazil IN, Mexico MO/NY, Peru IN/IL, Poland OH/ME,
+// Lebanon PA/OH/NH/TN/IN/MO, Jordan MN, Cuba MO/NY, Denmark WI/SC, Norway ME/MI,
+// China ME/TX, Chile NM, Panama OK/IA, Sweden ME, Egypt TX, Turkey NC/TX,
+// Italy TX, Wales WI, Scotland CT/SD, England AR, Guinea VA, Togo MN.
+const US_TOWN_COUNTRY_NAMES = new Set([
+  'holland', 'grenada', 'macedonia', 'canada', 'jamaica', 'angola', 'brazil',
+  'mexico', 'peru', 'poland', 'lebanon', 'jordan', 'cuba', 'denmark', 'norway',
+  'china', 'chile', 'panama', 'sweden', 'egypt', 'turkey', 'italy', 'wales',
+  'scotland', 'england', 'guinea', 'togo',
+]);
+
 // ── United States ───────────────────────────────────────────────────
 
 // Postal abbreviations, plus DC and the territories whose residents and
@@ -175,7 +196,7 @@ const US_COUNTRY_RE = /\b(u\.?\s?s\.?a?|usa|united states(\s+of\s+america)?|stat
 // attached. Every entry here is a place whose name is not also a major foreign
 // city — "Cambridge", "Manchester", "Birmingham", "Vancouver" and "Waterloo"
 // are deliberately absent and stay `unknown`, which means they stay on screen.
-const US_CITY_RE = /\b(santa clara|san jose|sunnyvale|milpitas|fremont|folsom|livermore|benicia|pleasanton|santa cruz|san francisco|palo alto|mountain view|menlo park|redwood city|cupertino|hayward|san mateo|emeryville|el segundo|torrance|irvine|carlsbad|oceanside|chula vista|escondido|thousand oaks|simi valley|santa monica|pasadena|burbank|glendale|long beach|anaheim|riverside|bakersfield|sacramento|roseville|rocklin|hillsboro|beaverton|tualatin|wilsonville|gresham|chandler|tempe|mesa|gilbert|glendale az|scottsdale|goodyear|peoria az|phoenix|tucson|boise|meridian|nampa|austin|round rock|pflugerville|georgetown tx|richardson|sherman|plano|allen|frisco|mckinney|garland|irving|carrollton|arlington tx|fort worth|lubbock|amarillo|el paso|corpus christi|san antonio|dallas|houston|katy|sugar land|the woodlands|spring tx|conroe|temple tx|waco|killeen|san diego|poway|vista ca|albuquerque|rio rancho|lehi|orem|provo|sandy ut|draper|ogden|logan ut|salt lake|manassas|chantilly|herndon|reston|ashburn|sterling va|leesburg|fairfax|arlington va|alexandria va|richmond va|virginia beach|newport news|chesapeake|norfolk|essex junction|hopewell junction|fishkill|poughkeepsie|malta ny|kalispell|bozeman|missoula|billings|springfield|everett|redmond|kirkland|bellevue|renton|kent wa|tukwila|olympia|tacoma|bloomington|eden prairie|maple grove|plymouth mn|brooklyn park|shakopee|chaska|rochester mn|st\.? paul|saint paul|minneapolis|memphis|nashville|knoxville|chattanooga|murfreesboro|smyrna|franklin tn|mahwah|parsippany|bridgewater|somerset nj|piscataway|edison nj|princeton|rahway|raritan|branchburg|whippany|andover|billerica|chelmsford|marlborough|hudson ma|wilmington ma|westford|littleton ma|north reading|bedford ma|burlington ma|woburn|lexington ma|waltham|needham|newton ma|framingham|natick|devens|lowell|lawrence ma|haverhill|beverly ma|peabody|danvers|wakefield ma|stoneham|canton ma|norwood|foxborough|attleboro|taunton|fall river|new bedford|plymouth ma|quincy|braintree|weymouth|dedham|watertown ma|somerville|medford ma|malden|revere|chelsea ma|everett ma|charlestown|allston|brighton ma|roxbury|dorchester|jamaica plain|hyde park ma|west roxbury|roslindale|mattapan|brookline|allentown|bethlehem pa|easton pa|reading pa|lancaster pa|harrisburg|york pa|scranton|wilkes-barre|erie pa|altoona|johnstown|state college|malvern|wayne pa|king of prussia|conshohocken|plymouth meeting|blue bell|fort washington|horsham|warminster|doylestown|newtown pa|langhorne|levittown|bensalem|bristol pa|morrisville|yardley|exton|downingtown|west chester pa|kennett square|coatesville|phoenixville|pottstown|collegeville|limerick pa|royersford|spring city|norristown|bridgeport pa|chadds ford|garnet valley|glen mills|media pa|springfield pa|drexel hill|upper darby|havertown|broomall|newtown square|villanova|bryn mawr|ardmore|narberth|merion|gladwyne|villanova pa|radnor|paoli|berwyn|frazer|immokalee|melbourne fl|palm bay|titusville|cocoa|rockledge|merritt island|cape canaveral|kennedy space center|orlando|kissimmee|sanford fl|altamonte springs|winter park|maitland|apopka|ocoee|winter garden|clermont|leesburg fl|tavares|eustis|mount dora|deland|daytona|ormond beach|palm coast|st\.? augustine|jacksonville|gainesville fl|ocala|the villages|tampa|st\.? petersburg|clearwater|largo fl|pinellas park|brandon fl|riverview|lakeland|winter haven|sarasota|bradenton|venice fl|port charlotte|fort myers|naples fl|bonita springs|estero|boca raton|delray beach|boynton beach|west palm beach|jupiter fl|stuart fl|port st\.? lucie|vero beach|fort pierce|okeechobee|belle glade|pahokee|clewiston|labelle|arcadia fl|wauchula|sebring|avon park|lake placid fl|frostproof|bartow|mulberry|plant city|zephyrhills|dade city|wesley chapel|lutz|odessa fl|land o lakes|new port richey|hudson fl|spring hill|brooksville|homosassa|crystal river|inverness|beverly hills fl|dunnellon|williston|chiefland|cedar key|trenton fl|lake city|live oak|jasper fl|madison fl|monticello fl|tallahassee|quincy fl|marianna|chipley|bonifay|defuniak springs|crestview|niceville|fort walton beach|destin|panama city beach|pensacola|milton fl|pace fl|gulf breeze|navarre|santa rosa beach|freeport fl|bloomington il|schaumburg|naperville|aurora il|elgin|joliet|rockford|peoria il|springfield il|champaign|urbana|decatur il|normal il|warsaw indiana|fort wayne|kokomo|lafayette in|west lafayette|elkhart|goshen in|south bend|mishawaka|valparaiso|merrillville|hammond in|gary in|columbus in|greenwood in|carmel in|fishers|noblesville|westfield in|zionsville|avon in|plainfield in|brownsburg|danville in|mooresville in|martinsville in|bloomington in|terre haute|evansville|jeffersonville|new albany|clarksville in|sellersburg|charlestown in)\b/i;
+const US_CITY_RE = /\b(seattle|los angeles|pittsburgh|chicago|milwaukee|silicon valley|santa clara|san jose|sunnyvale|milpitas|fremont|folsom|livermore|benicia|pleasanton|santa cruz|san francisco|palo alto|mountain view|menlo park|redwood city|cupertino|hayward|san mateo|emeryville|el segundo|torrance|irvine|carlsbad|oceanside|chula vista|escondido|thousand oaks|simi valley|santa monica|pasadena|burbank|glendale|long beach|anaheim|riverside|bakersfield|sacramento|roseville|rocklin|hillsboro|beaverton|tualatin|wilsonville|gresham|chandler|tempe|mesa|gilbert|glendale az|scottsdale|goodyear|peoria az|phoenix|tucson|boise|meridian|nampa|austin|round rock|pflugerville|georgetown tx|richardson|sherman|plano|allen|frisco|mckinney|garland|irving|carrollton|arlington tx|fort worth|lubbock|amarillo|el paso|corpus christi|san antonio|dallas|houston|katy|sugar land|the woodlands|spring tx|conroe|temple tx|waco|killeen|san diego|poway|vista ca|albuquerque|rio rancho|lehi|orem|provo|sandy ut|draper|ogden|logan ut|salt lake|manassas|chantilly|herndon|reston|ashburn|sterling va|leesburg|fairfax|arlington va|alexandria va|richmond va|virginia beach|newport news|chesapeake|norfolk|essex junction|hopewell junction|fishkill|poughkeepsie|malta ny|kalispell|bozeman|missoula|billings|springfield|everett|redmond|kirkland|bellevue|renton|kent wa|tukwila|olympia|tacoma|bloomington|eden prairie|maple grove|plymouth mn|brooklyn park|shakopee|chaska|rochester mn|st\.? paul|saint paul|minneapolis|memphis|nashville|knoxville|chattanooga|murfreesboro|smyrna|franklin tn|mahwah|parsippany|bridgewater|somerset nj|piscataway|edison nj|princeton|rahway|raritan|branchburg|whippany|andover|billerica|chelmsford|marlborough|hudson ma|wilmington ma|westford|littleton ma|north reading|bedford ma|burlington ma|woburn|lexington ma|waltham|needham|newton ma|framingham|natick|devens|lowell|lawrence ma|haverhill|beverly ma|peabody|danvers|wakefield ma|stoneham|canton ma|norwood|foxborough|attleboro|taunton|fall river|new bedford|plymouth ma|quincy|braintree|weymouth|dedham|watertown ma|somerville|medford ma|malden|revere|chelsea ma|everett ma|charlestown|allston|brighton ma|roxbury|dorchester|jamaica plain|hyde park ma|west roxbury|roslindale|mattapan|brookline|allentown|bethlehem pa|easton pa|reading pa|lancaster pa|harrisburg|york pa|scranton|wilkes-barre|erie pa|altoona|johnstown|state college|malvern|wayne pa|king of prussia|conshohocken|plymouth meeting|blue bell|fort washington|horsham|warminster|doylestown|newtown pa|langhorne|levittown|bensalem|bristol pa|morrisville|yardley|exton|downingtown|west chester pa|kennett square|coatesville|phoenixville|pottstown|collegeville|limerick pa|royersford|spring city|norristown|bridgeport pa|chadds ford|garnet valley|glen mills|media pa|springfield pa|drexel hill|upper darby|havertown|broomall|newtown square|villanova|bryn mawr|ardmore|narberth|merion|gladwyne|villanova pa|radnor|paoli|berwyn|frazer|immokalee|melbourne fl|palm bay|titusville|cocoa|rockledge|merritt island|cape canaveral|kennedy space center|orlando|kissimmee|sanford fl|altamonte springs|winter park|maitland|apopka|ocoee|winter garden|clermont|leesburg fl|tavares|eustis|mount dora|deland|daytona|ormond beach|palm coast|st\.? augustine|jacksonville|gainesville fl|ocala|the villages|tampa|st\.? petersburg|clearwater|largo fl|pinellas park|brandon fl|riverview|lakeland|winter haven|sarasota|bradenton|venice fl|port charlotte|fort myers|naples fl|bonita springs|estero|boca raton|delray beach|boynton beach|west palm beach|jupiter fl|stuart fl|port st\.? lucie|vero beach|fort pierce|okeechobee|belle glade|pahokee|clewiston|labelle|arcadia fl|wauchula|sebring|avon park|lake placid fl|frostproof|bartow|mulberry|plant city|zephyrhills|dade city|wesley chapel|lutz|odessa fl|land o lakes|new port richey|hudson fl|spring hill|brooksville|homosassa|crystal river|inverness|beverly hills fl|dunnellon|williston|chiefland|cedar key|trenton fl|lake city|live oak|jasper fl|madison fl|monticello fl|tallahassee|quincy fl|marianna|chipley|bonifay|defuniak springs|crestview|niceville|fort walton beach|destin|panama city beach|pensacola|milton fl|pace fl|gulf breeze|navarre|santa rosa beach|freeport fl|bloomington il|schaumburg|naperville|aurora il|elgin|joliet|rockford|peoria il|springfield il|champaign|urbana|decatur il|normal il|warsaw indiana|fort wayne|kokomo|lafayette in|west lafayette|elkhart|goshen in|south bend|mishawaka|valparaiso|merrillville|hammond in|gary in|columbus in|greenwood in|carmel in|fishers|noblesville|westfield in|zionsville|avon in|plainfield in|brownsburg|danville in|mooresville in|martinsville in|bloomington in|terre haute|evansville|jeffersonville|new albany|clarksville in|sellersburg|charlestown in)\b/i;
 
 // Foreign cities, for the postings that give a city and nothing else.
 //
@@ -209,16 +230,26 @@ const FOREIGN_CITY_RE = /\b((?<!new )london|cork|dresden|paris|milan|munich|lisb
 // appear in a location field. Anything not listed falls through to the US
 // reading, which is the safe direction: a US job is never hidden.
 const COLLIDING_COUNTRY_CITIES = {
-  IN: /\b(mumbai|navi mumbai|thane|new delhi|delhi|bengaluru|bangalore|hyderabad|chennai|kolkata|ahmedabad|surat|jaipur|lucknow|kanpur|nagpur|indore|bhopal|visakhapatnam|vadodara|coimbatore|kochi|thiruvananthapuram|mysuru|mysore|gurgaon|gurugram|noida|greater noida|faridabad|ghaziabad|chandigarh|mohali|ludhiana|amritsar|dehradun|bhubaneswar|ranchi|guwahati|pune|hosur|manesar|sanand|halol|pithampur|jamshedpur|sriperumbudur|oragadam|whitefield|electronic city|hinjewadi|chakan|talegaon|ranjangaon|neemrana)\b/,
+  IN: /\b(mumbai|navi mumbai|thane|new delhi|delhi|bengaluru|bangalore|hyderabad|chennai|kolkata|ahmedabad|surat|jaipur|lucknow|kanpur|nagpur|indore|bhopal|visakhapatnam|vadodara|coimbatore|kochi|thiruvananthapuram|trivandrum|mysuru|mysore|gurgaon|gurugram|noida|greater noida|faridabad|ghaziabad|chandigarh|mohali|ludhiana|amritsar|dehradun|bhubaneswar|ranchi|guwahati|pune|hosur|manesar|sanand|halol|pithampur|jamshedpur|sriperumbudur|oragadam|whitefield|electronic city|hinjewadi|chakan|talegaon|ranjangaon|neemrana)\b/,
   CA: /\b(toronto|montreal|vancouver|calgary|edmonton|ottawa|winnipeg|quebec|kitchener|halifax|mississauga|brampton|markham|vaughan|richmond hill|oakville|scarborough|etobicoke|north york|laval|longueuil|gatineau|saskatoon|regina|kelowna|barrie|guelph|kanata|abbotsford|moncton|nanaimo|brantford|thunder bay|sherbrooke|trois rivieres)\b/,
-  DE: /\b(berlin|hamburg|munich|munchen|cologne|koln|frankfurt|stuttgart|dusseldorf|dortmund|essen|leipzig|bremen|dresden|hannover|nuremberg|nurnberg|duisburg|bochum|wuppertal|bielefeld|bonn|munster|karlsruhe|mannheim|augsburg|wiesbaden|braunschweig|chemnitz|aachen|magdeburg|freiburg|krefeld|lubeck|erfurt|mainz|rostock|kassel|potsdam|heidelberg|darmstadt|regensburg|ingolstadt|ulm|erlangen|jena|garching|sindelfingen|boblingen|esslingen|ludwigsburg)\b/,
+  DE: /\b(berlin|hamburg|munich|munchen|cologne|koln|frankfurt|stuttgart|dusseldorf|dortmund|essen|leipzig|bremen|dresden|hannover|nuremberg|nurnberg|duisburg|bochum|wuppertal|bielefeld|bonn|munster|karlsruhe|mannheim|augsburg|wiesbaden|braunschweig|chemnitz|aachen|magdeburg|freiburg|krefeld|lubeck|erfurt|mainz|rostock|kassel|potsdam|heidelberg|darmstadt|regensburg|ingolstadt|ulm|erlangen|jena|garching|sindelfingen|boblingen|esslingen|ludwigsburg|kiel|kempten|nuernberg|muenchen|koeln|lindau|weimar|bergkamen|dormagen|monheim|eschweiler|unna|fellbach|ennepetal|glinde|warstein)\b/,
   IL: /\b(tel aviv|jerusalem|haifa|yokneam|rehovot|petah tikva|herzliya|netanya|beer sheva|kiryat gat|migdal haemek|ramat gan|holon|ashdod|ashkelon|raanana|kfar saba|nazareth)\b/,
   ID: /\b(jakarta|surabaya|bandung|medan|semarang|makassar|batam|bekasi|tangerang|depok|bogor|cikarang|karawang|cilegon)\b/,
   AR: /\b(buenos aires|cordoba argentina|rosario|mendoza)\b/,
   CO: /\b(bogota|medellin|cali colombia|barranquilla|cartagena)\b/,
   MA: /\b(casablanca|rabat|marrakech|tangier)\b/,
   PA: /\b(ciudad de panama|panama city)\b/,
-  TN: /\b(tunis)\b/,
+  // TN is also Tamil Nadu, which Indian tenants write exactly like a state:
+  // "Chennai, TN" was 76 rows in the US bucket. Dresden, TN and Paris, TN are
+  // not on this list and stay in Tennessee.
+  TN: /\b(tunis|sfax|chennai|coimbatore|hosur|sriperumbudur|oragadam|madurai|tiruchirappalli|trichy|tirupur|vellore|padappai|ambattur|guindy|siruseri|kanchipuram)\b/,
+  // More Indian state codes that are US ones too: Assam, Odisha (formerly
+  // Orissa, OR), Madhya Pradesh, Goa. And NH is Noord-Holland: "Amsterdam, NH"
+  // and "Hilversum, NH" are Dutch, while Amsterdam, NY stays American.
+  AS: /\b(guwahati|dibrugarh|silchar)\b/,
+  OR: /\b(bhubaneswar|cuttack|rourkela)\b/,
+  MP: /\b(indore|bhopal|pithampur|jabalpur|gwalior)\b/,
+  NH: /\b(amsterdam|hilversum|haarlem|alkmaar|zaandam|hoofddorp|schiphol|amstelveen|purmerend|den helder|velsen|ijmuiden)\b/,
   SD: /\b(khartoum)\b/,
   ME: /\b(podgorica)\b/,
   AL: /\b(tirana)\b/,
@@ -226,7 +257,7 @@ const COLLIDING_COUNTRY_CITIES = {
   MT: /\b(valletta)\b/,
   MN: /\b(ulaanbaatar)\b/,
   NE: /\b(niamey)\b/,
-  GA: /\b(libreville)\b/,
+  GA: /\b(libreville|port gentil|panaji|panjim|margao|vasco da gama)\b/,
   SC: /\b(victoria seychelles)\b/,
   VA: /\b(vatican)\b/,
   NC: /\b(noumea)\b/,
@@ -263,6 +294,76 @@ const EURO_TITLE_RE = /\((?:[fmwdxh]\s*\/\s*){1,2}[fmwdxh]\)|\bm\s*\/\s*w\s*\/\s
  * "Hampshire", because New Hampshire.
  */
 const FOREIGN_TOWN_RE = /\b(noventa di piave|cassina de pecchi|taubate|taubaté|itajuba|itajubá|tres rios|três rios|dzierzoniow|dzierżoniów|kwidzyn|elblag|elbląg|bromont|westmount|aix[ -]les[ -]bains|belfort|veresegyhaz|veresegyház|pallavaram|haina|san cristobal|san cristóbal|villeneuve[ -]sur[ -]lot|boulogne[ -]billancourt|quebec|québec|kirkkonummi|feldkirchen|agrate brianza|bernin|roznov|tiszaujvaros|ashalim|castlebar|harley street|marsa malta|pattaya|chuping|pasir gudang|taicang|wujiang|zhongshan|chitose|shonai|yamanashi|hitachi naka|hitachinaka|central luzon|king abdullah economic city|tyne[ -]and[ -]wear|pengerang|sungai petani|southampton hampshire)\b/i;
+
+/**
+ * Foreign cities that arrive with no country and were bucketed `unknown`, which
+ * kept them in the deck among US postings (F-764: PwC "Cairo - ETIC", PwC
+ * "Warszawa", BlackRock "Edinburgh"). Taken from the distinct unknown-bucket
+ * locations in the store on 2026-10-18 plus the native spellings tenants use.
+ *
+ * Written in FLATTENED form (lowercase, no accents, hyphen and apostrophe as a
+ * space) because that is what it is tested against.
+ *
+ * The same bar as FOREIGN_CITY_RE: the foreign reading has to dominate a BARE
+ * mention, and a stated US state is decided before this list is read ("Cairo,
+ * GA", "Glasgow, KY", "Leeds, AL" stay American). Deliberately NOT here, because
+ * a US twin is written bare often enough to hide a real job: Liverpool (NY),
+ * Rome (NY/GA), Parma (OH/MI), Lima (OH), Valencia (CA), Victoria (TX), Warwick
+ * (RI), Warrington (PA), Swansea (SC/MA), Bristol, Derby, Durham, Reading,
+ * Norwich, Portsmouth, Waterford, Cheltenham, Coventry, Baden, Cali, Guadalupe,
+ * Rio Bravo, Sussex, Aberdeen.
+ *
+ * This list decides BARE mentions only. It is not consulted beside a state
+ * code: "Sales Supervisor, Leeds, AL" is Alabama, whatever Leeds is on its own.
+ */
+const FOREIGN_CITY_EXTRA_RE = /\b(cairo|new cairo|el tagamoa|warszawa|bucuresti|geneve|genf|athina|moskva|edinburgh|glasgow|belfast|leeds|crawley|rugby|nottingham|cardiff(?! by)|solihull|sheffield(?! village| lake)|leicester|stevenage|swindon|farnborough|basingstoke|guildford|bracknell|slough|milton keynes|luton|wolverhampton|stoke on trent|newcastle upon tyne|sunderland|middlesbrough|dundee|wrexham|welwyn|filton|cheadle|loughborough|eastleigh|havant|burgess hill|heanor|templecombe|farringdon|uxbridge|heathrow|hemel hempstead|harlow|droitwich|tewkesbury|surrey|perth(?! amboy)|goettingen|muenchen|koeln|duesseldorf|nuernberg|zuerich|den bosch|s hertogenbosch|rijswijk|veghel|geleen|boxmeer|roermond|lichtenvoorde|rijssen|kaiseraugst|visp|rotkreuz|zofingen|evionnaz|schaftenau|kundl|velizy|villacoublay|limours|gennevilliers|cholet|meudon|marcy l etoile|colomiers|tarbes|cornebarrieu|marignane|suresnes|sophia antipolis|montbonnot|gemenos|douvrin|chatellerault|huningue|val de reuil|brive la gaillarde|cahors|bourogne|etaples|le haillan|montoir de bretagne|noisy le sec|ambares|etrelles|alcobendas|zamudio|martos|el masnou|monselice|montecchio maggiore|herstal|puurs|kontich|geel|wommelgem|tubize|grace hollogne|bornem|skawina|zielonka|czechowice|chrzanow|zabki|rakovnik|usti nad labem|potvorice|veszprem|mateszalka|nyiregyhaza|menges|voluntari|targu mures|bagsvaerd|horsholm|molndal|segeltorp|upplands vasby|guxhagen|nordenham|weinheim|kharkov|sanchong|xinzhuang|yixing|jiangyin|nansha|huiyang|qingzhou|changzhi|nanxun|toranomon|chiyoda|kwun tong|taikoo|cyberjaya|putrajaya|batu caves|nilai|gelang patah|subang|cabuyao|sikhiu|toa payoh|bulim|songdo|almaty|trivandrum|chhatrapati sambhaji nagar|padappai|savli|morinda|gandhinagar|taleigao|turbhe|santiago|juarez|cajamar|jundiai|barueri|varginha|sorocaba|valinhos|guarulhos|londrina|betim|sao bernardo do campo|araucaria|insurgentes|miguel hidalgo|apodaca|piedras negras|cuautitlan|huixquilucan|ocoyoacac|matehuala|torreon|sandton|richards bay|conakry|rydalmere|parramatta|benalla|mulwala|fortitude valley|boisbriand|lachine|saint eustache|baie d urfe|labrador city|la pocatiere)\b/;
+
+/**
+ * Provinces, states and regions of other countries. None is a US place name,
+ * and each is decisive wherever it appears: "Chennai, Tamil Nadu", "Red Hill,
+ * Queensland", "Cali, Valle del Cauca".
+ */
+const FOREIGN_REGION_RE = /\b(cairo governorate|giza governorate|al qahirah|british columbia|maharashtra|karnataka|telangana|tamil nadu|gujarat|uttar pradesh|haryana|kerala|andhra pradesh|west bengal|madhya pradesh|rajasthan|punjab|odisha|uttarakhand|queensland|new south wales|nsw|qld|western australia|tasmania|nuevo leon|coahuila|jalisco|guanajuato|tamaulipas|estado de mexico|edomex|cdmx|valle del cauca|selangor|johor|kanagawa|aichi|hokkaido|guangdong|jiangsu|zhejiang|shandong|shaanxi|sichuan|hubei|henan|anhui|fujian|liaoning|shanxi|hebei|gyeonggi|bavaria|bayern|baden wurttemberg|nordrhein westfalen|north rhine westphalia|niedersachsen|hessen|thuringen|lombardia|lombardy|piemonte|veneto|emilia romagna|catalonia|cataluna|andalucia|ile de france|occitanie|normandie|bretagne|overijssel|noord brabant|gelderland|zuid holland|noord holland)\b/;
+
+/**
+ * Regions whose name is ALSO a US place when it leads the string — Ontario, CA
+ * and Ontario, OR are real cities, New Brunswick is in New Jersey, Berkshire is
+ * a Massachusetts county — so these count only AFTER the first comma, where
+ * they are the region of the city before them: "Alliston, Ontario", "Reading,
+ * Berkshire", "Moncton, New Brunswick".
+ */
+const FOREIGN_TRAILING_REGION_RE = /\b(nederland|ontario|quebec|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland|prince edward island|berkshire|wiltshire|lancashire|worcestershire|hertfordshire|oxfordshire|gloucestershire|west yorkshire|greater manchester|west midlands|merseyside|derbyshire|nottinghamshire|leicestershire|warwickshire|staffordshire|cambridgeshire|buckinghamshire|county antrim|county cork|county dublin|county galway)\b/;
+
+// Canadian province and territory postal codes. None is a US state code, so a
+// comma part that is exactly one of them is Canada: "Ottawa, ON", "Mount
+// Royal, QC", "Saint-Bruno, QC, CA" (182 rows read as California before F-764),
+// "CA - Woodbridge, ON".
+const CA_PROVINCE_CODES = new Set(['ON', 'QC', 'BC', 'AB', 'MB', 'SK', 'NS', 'NB', 'NL', 'PE', 'NT', 'YT', 'NU']);
+
+// Country codes seen leading a location as "XX - City". None is a US state code.
+// Left out on purpose, because the same two capitals lead US sites or job
+// titles: PH ("PH - Philadelphia"), LV ("LV - Henderson"), IT ("IT — Service
+// Desk Analyst"), HR, SE (Sales Engineer), EE, PT, AT, SA, GN.
+const SPACED_LEAD_CODES = new Set([
+  'CH', 'NL', 'FR', 'CN', 'PL', 'BE', 'ES', 'GB', 'UK', 'IE', 'CZ', 'HU', 'SK',
+  'DK', 'FI', 'NO', 'RO', 'BG', 'SI', 'RS', 'GR', 'TR', 'JP', 'KR', 'TW', 'SG',
+  'MY', 'TH', 'VN', 'MX', 'BR', 'CL', 'LT', 'LU', 'ZA', 'AU', 'NZ',
+]);
+
+/**
+ * The gazetteers above are tested against FLATTENED text (hyphens and
+ * apostrophes become spaces, accents are folded), but many of their entries were
+ * written hyphenated or accented — "vitry-sur-seine", "issy-les-moulineaux",
+ * "saint-etienne", "wilkes-barre" — and so could never match anything. This
+ * rewrites a pattern into the same flattened alphabet as its input.
+ */
+function flatRe(re) {
+  const src = re.source.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[-']/g, ' ');
+  return new RegExp(src, re.flags);
+}
+const US_CITY_FLAT_RE = flatRe(US_CITY_RE);
+const FOREIGN_CITY_FLAT_RE = flatRe(FOREIGN_CITY_RE);
+const FOREIGN_TOWN_FLAT_RE = flatRe(FOREIGN_TOWN_RE);
 
 const REMOTE_RE = /\b(remote|work\s+from\s+home|wfh|virtual|telecommute|distributed|anywhere)\b/i;
 const US_REMOTE_RE = /\b(us|usa|u\.s\.|united states|domestic|nationwide|national)\b/i;
@@ -321,17 +422,28 @@ function explicitUs(seg) {
 function stateCodeSignal(seg) {
   const src = fold(seg);
   const tokens = tokensOf(seg);
+  // CASE MATTERS. Location fields capitalise state codes; a lowercase "de"
+  // is the French preposition. Without this, "Le Pont-de-Claix, Auvergne-
+  // Rhône-Alpes, France" read as Delaware and 454 French postings landed in
+  // the deck as American ones.
+  const cased = (t) => new RegExp(`(^|[^A-Za-z])${t[0]}${t[1]}(?![a-z])`).test(src)
+    || new RegExp(`(^|[^A-Za-z])${t[0]}${t[1].toLowerCase()}(?![a-z])`).test(src);
+  // The TRAILING code first. Read left to right, "La Palma, CA" found the
+  // title-cased "La" (Louisiana, and Laos) before the CA at the end, and the
+  // Laos reading then sent a California job abroad; "Pithampur, MP, IN" found
+  // MP (Madhya Pradesh, read as the Northern Mariana Islands) before the IN
+  // that the India city table resolves. The code a string ENDS on is the one
+  // its writer meant as the state or country.
+  const last = tokens[tokens.length - 1];
+  if (last && last.length === 2 && US_STATE_CODES.has(last) && cased(last)) return last;
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t.length !== 2 || !US_STATE_CODES.has(t)) continue;
-    // CASE MATTERS. Location fields capitalise state codes; a lowercase "de"
-    // is the French preposition. Without this, "Le Pont-de-Claix, Auvergne-
-    // Rhône-Alpes, France" read as Delaware and 454 French postings landed in
-    // the deck as American ones.
-    const cased = new RegExp(`(^|[^A-Za-z])${t[0]}${t[1]}(?![a-z])`).test(src)
-      || new RegExp(`(^|[^A-Za-z])${t[0]}${t[1].toLowerCase()}(?![a-z])`).test(src);
-    if (!cased) continue;
+    if (!cased(t)) continue;
     if (i === tokens.length - 1) return t;
+    // Before the end, only in capitals: "La Piedad" (Bosch, Mexico) is a
+    // Spanish article, not Louisiana; "LA - Baton Rouge" is the state.
+    if (!new RegExp(`(^|[^A-Za-z])${t}(?![A-Za-z])`).test(src)) continue;
     const next = tokens[i + 1];
     if (next === 'US' || next === 'USA') return t;
     if (new RegExp(`(^|[,\\-–—/(])\\s*${t}\\s*($|[^A-Za-z])`).test(src.toUpperCase())) return t;
@@ -349,7 +461,75 @@ function stateCodeSignal(seg) {
  */
 function explicitForeign(seg) {
   if (STRONG_NAME_RE.test(flatten(seg))) return true;
-  return positionalIso3(seg) || positionalIso2(seg);
+  return positionalIso3(seg) || positionalIso2(seg) || provinceCode(seg);
+}
+
+/**
+ * A comma part after the first that is a Canadian province code: exactly
+ * ("Ottawa, ON"), or followed by a site name the way Air Liquide writes it
+ * ("Bonnyville, AB - 50 Ave (Lakeland)", "Maitland, ON (N2O) (I)") (F-1042).
+ */
+function provinceCode(seg) {
+  return commaParts(seg).slice(1).some(p => {
+    const m = /^([A-Z]{2})(?:\s*[-–—(]|$)/.exec(p);
+    return !!m && CA_PROVINCE_CODES.has(m[1]);
+  });
+}
+
+function commaParts(seg) {
+  return fold(seg).split(',').map(p => p.trim()).filter(Boolean);
+}
+
+/**
+ * Trailing postal codes that are not American: UK ("LS19 6JY"), Canadian
+ * ("K2K 3G4"), Dutch ("1082 VA") and Irish Eircodes ("F26 F3X5"). They sit
+ * after the country code and hide it — "Leeds, GB, LS19 6JY" ended on the token
+ * "JY", so its GB was never in the trailing position the country test reads,
+ * and "Amsterdam, NH, NL, 1082 VA" ended on VA, which is Virginia. A US
+ * "TX 78701" matches none of these shapes.
+ */
+const FOREIGN_POSTCODE_RE = /^(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}|[A-Z]\d[A-Z]\s?\d[A-Z]\d|\d{4}\s?[A-Z]{2}|[A-Z]\d{2}\s?[A-Z\d]{4})$/i;
+function stripPostcode(seg) {
+  const parts = String(seg).split(',');
+  while (parts.length > 1 && FOREIGN_POSTCODE_RE.test(parts[parts.length - 1].trim())) parts.pop();
+  return parts.join(',');
+}
+
+/**
+ * The canonical American address — "Holland, MI", "Grenada, MS 38901" — whose
+ * only foreign evidence is a country NAME inside the city part (F-759).
+ *
+ * Holland (MI, OH), Grenada (MS), Macedonia (OH), Canada (KY), Jamaica (NY),
+ * Mexico (MO), South Holland (IL): a trailing state code after a comma says
+ * where the town is, and the country tier used to outrank it, so CONVERGIX,
+ * LG Energy Solution, Yanfeng, Lennox and Amphenol were filed as foreign and no
+ * screen, view or curation pass served them.
+ *
+ * The state wins only when nothing else on the line is foreign: every middle
+ * part must be free of a country ("Perth, AU, Australia, WA", "Bangalore,
+ * India, IN" stay abroad; a street line like "2008 India St." is skipped), and
+ * the country named in the city part must not be the one whose own code ends
+ * the line — "Germany, DE", "India, IN", "Panama City, PA" name a country and
+ * then its code, which happens to be a state's as well.
+ */
+function usStateAddress(seg) {
+  const parts = commaParts(seg);
+  if (parts.length < 2) return false;
+  const m = /^([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/.exec(parts[parts.length - 1]);
+  if (!m || !US_STATE_CODES.has(m[1])) return false;
+  const code = m[1];
+  const middle = parts.slice(1, -1).filter(p => !/^\d+\s/.test(p));
+  if (middle.some(p => CA_PROVINCE_CODES.has(p) || explicitForeign(p))) return false;
+  if (positionalIso3(parts[0])) return false;
+  // A city part that is NOTHING but a country name is that country unless the
+  // name is also a real US town: "Holland, MI" and "Angola, IN" are towns,
+  // "Australia, WA" is Western Australia.
+  const city = flatten(parts[0]);
+  if (NAME_TO_ISO2.has(city) && !US_TOWN_COUNTRY_NAMES.has(city)) return false;
+  for (const hit of city.matchAll(ANY_NAME_RE_G)) {
+    if (NAME_TO_ISO2.get(hit[1].toLowerCase()) === code) return false;
+  }
+  return true;
 }
 
 /**
@@ -439,6 +619,12 @@ function positionalIso2(seg) {
   const upper = fold(seg).toUpperCase();
   const lead = upper.match(/^([A-Z]{2})[\-–—:,/]/);
   if (lead && ISO2_NONUS.has(lead[1]) && !US_STATE_CODES.has(lead[1])) return true;
+  // "CH - Visp", "NL - Geleen", "PL - Warszawa", "FR - Huningue": the same
+  // prefix with spaces round the dash (F-764). Only for the codes tenants
+  // actually write this way: "GN - SONG - MT - …" is an Accenture unit code,
+  // not Guinea, and "SA - San Antonio" is a site code, not Saudi Arabia.
+  const spaced = fold(seg).match(/^([A-Z]{2})\s+[\-–—]\s+\S/);
+  if (spaced && SPACED_LEAD_CODES.has(spaced[1]) && !usCity(seg)) return true;
   const tokens = tokensOf(seg);
   const last = tokens[tokens.length - 1];
   if (last && last.length === 2 && ISO2_NONUS.has(last) && !US_STATE_CODES.has(last)) return true;
@@ -459,10 +645,45 @@ function spaceLeadIso2(seg) {
 }
 
 /** Weakest tier: a city with no country attached. */
-function usCity(seg) { return US_CITY_RE.test(flatten(seg)); }
-function foreignCity(seg) {
+function usCity(seg) { return US_CITY_FLAT_RE.test(flatten(seg)); }
+
+/**
+ * The same tier for a whole segment, read the way an address is written
+ * (F-1042). A US address puts the state AFTER the town; what follows a plain
+ * town name after a comma is its region. "Thetford, Norfolk" is Multimatic's
+ * English site, and Norfolk being a Virginia city put it in the US deck. So a
+ * US city counts only in the first part, or when the first part is not a
+ * plain town name (a street, an office label, a site code: "GLOBAL CUSTOM
+ * COMMERCE/BLINDS OFFICE, HOUSTON - 2140").
+ */
+//
+// A big US metro after the town is the town's metro, not its region, and
+// stays American: "Bothell, Seattle", "Kent, Seattle area", "Lancaster, Los
+// Angeles", "Oakland, Chicago" (review, 2026-11-12). So does any US city
+// written as an area ("…, Norfolk area"). Norfolk alone is a county as often
+// as a city, and is not a metro.
+const US_METRO_RE = /\b(seattle|los angeles|chicago|pittsburgh|milwaukee|silicon valley|san francisco|san jose|san diego|sacramento|houston|dallas|fort worth|austin|san antonio|el paso|phoenix|tucson|minneapolis|st paul|saint paul|salt lake|orlando|tampa|jacksonville|nashville|memphis|albuquerque|boise|springfield|tacoma)\b/;
+const AREA_RE = /\b(area|metro|metropolitan|greater|region)\b/;
+function usCityEvidence(seg) {
+  const parts = commaParts(seg);
+  if (parts.length < 2) return usCity(seg);
+  if (usCity(parts[0])) return true;
+  const plainTown = /^[A-Za-z][A-Za-z.' -]*$/.test(parts[0]) && parts[0].split(/\s+/).length <= 3
+    && parts[0] !== parts[0].toUpperCase();
+  if (!plainTown) return usCity(seg);
+  const rest = flatten(parts.slice(1).join(' '));
+  return usCity(rest) && (US_METRO_RE.test(rest) || AREA_RE.test(rest));
+}
+// `bare` admits FOREIGN_CITY_EXTRA_RE, which is only for a city standing alone.
+function foreignCity(seg, bare = false) {
   const flat = flatten(seg);
-  return FOREIGN_CITY_RE.test(flat) || FOREIGN_TOWN_RE.test(flat);
+  return FOREIGN_CITY_FLAT_RE.test(flat) || FOREIGN_TOWN_FLAT_RE.test(flat) || (bare && FOREIGN_CITY_EXTRA_RE.test(flat));
+}
+/** A foreign province or region: anywhere, or after the first comma for the ones with US twins. */
+function foreignRegion(seg) {
+  if (FOREIGN_REGION_RE.test(flatten(seg))) return true;
+  const rest = commaParts(seg).slice(1).join(' ');
+  return !!rest && FOREIGN_TRAILING_REGION_RE.test(flatten(rest));
 }
 
 /**
@@ -473,18 +694,54 @@ function foreignCity(seg) {
  *   2. an unambiguous foreign country                "Costa Rica, San Jose"
  *   3. a state postal code                           "Austin, TX" · "Dublin OH"
  *   4. a country whose name is also a US town        "Lysaker, Norway"
+ *      or a foreign province/region                  "Alliston, Ontario"
  *   5. a US city on its own                          "San Francisco"
- *   6. a foreign city on its own                     "Sao Paulo"
+ *   6. a foreign city on its own                     "Sao Paulo" · "Edinburgh"
+ *
+ * Tier 2 does not apply to a canonical "Town, ST" whose only foreign evidence
+ * is a country name inside the town ("Holland, MI", "Canada, KY") — see
+ * usStateAddress. A trailing UK/Canadian/Dutch/Irish postcode is dropped first.
  *
  * Tier 3 sitting between the two country tiers is the whole trick. Above the
  * weak names it keeps "Norway, MI" in Michigan and "Poland, OH" in Ohio; below
  * the strong ones it keeps "Amsterdam, NH, Netherlands" out of New Hampshire.
  */
-function segmentVerdict(seg) {
+/**
+ * "X, DE": DELAWARE ONLY WHEN IT IS IN DELAWARE (2026-11-03). DE is Delaware
+ * and Germany, and the state reading won on shape alone: "Lindenberg im
+ * Allgäu, DE" (185 rows), "Neuenstein, DE", "Bensheim, DE, 64625" and
+ * "Schwaikheim, DE, 71409" were all American. Delaware is small: its places
+ * fit in one list and its ZIP codes all start 197-199. So, with no "US" or
+ * state name beside it (explicitUs runs first): a ZIP decides, then a
+ * Delaware place, and anything else is Germany. A bare "DE" is unknown.
+ */
+const DELAWARE_PLACE_RE = /\b(wilmington|newark|dover|middletown|smyrna|milford|seaford|georgetown|elsmere|new castle|millsboro|laurel|harrington|camden|clayton|lewes|milton|selbyville|townsend|bridgeville|delmar|delaware city|ocean view|rehoboth(?: beach)?|bethany beach|south bethany|fenwick island|frederica|greenwood|felton|cheswold|wyoming|dagsboro|frankford|millville|blades|newport|bellefonte|arden|ardentown|ardencroft|bear|glasgow|hockessin|pike creek|claymont|brookside|edgemoor|talleyville|north star|greenville|christiana|yorklyn|montchanin|winterthur|rockland|kirkwood|port penn|st\.? georges|odessa|magnolia|little creek|leipsic|kenton|hartly|houston|ellendale|lincoln|slaughter beach|long neck|wilmington manor|minquadale|stanton|marshallton|red lion|summit bridge|delaware)\b/;
+function delawareOrGermany(rawSeg, seg) {
+  // Only a "DE" standing on its own: "DE005 Greentree - Clinic" is a Fresenius
+  // North America site code and keeps the older reading.
+  if (!/(?:^|[^A-Za-z0-9])DE(?:[^A-Za-z0-9]|$)/.test(String(rawSeg))) return null;
+  const zip = /(?:^|[^\d])(?:D-)?(\d{5})(?:-\d{4})?(?:[^\d]|$)/.exec(String(rawSeg));
+  if (zip) return /^19[7-9]/.test(zip[1]) ? 'us' : 'non-us';
+  const rest = flatten(seg).replace(/\bde\b/g, ' ').trim();
+  if (!rest) return null;
+  // "Remote, DE" names no place: it may be Delaware or Germany, so it is not
+  // read as either (review, 2026-11-03). The remote bucket keeps it; the body decides.
+  if (!rest.replace(new RegExp(REMOTE_RE.source, 'gi'), ' ').replace(/[^a-z]+/g, '')) return 'unknown';
+  return DELAWARE_PLACE_RE.test(rest) ? 'us' : 'non-us';
+}
+
+function segmentVerdict(rawSeg) {
+  const seg = stripPostcode(rawSeg);
   if (explicitUs(seg)) return 'us';
-  if (explicitForeign(seg)) return 'non-us';
+  // Tier 2 is skipped for the canonical "Holland, MI" shape, whose only
+  // foreign evidence is a country name inside the town name (F-759).
+  if (!usStateAddress(seg) && explicitForeign(seg)) return 'non-us';
 
   const state = stateCodeSignal(seg);
+  if (state === 'DE') {
+    const de = delawareOrGermany(rawSeg, seg);
+    if (de) return de;
+  }
   if (state) {
     // One exception, in two tiers: a code that is ALSO a country code can be
     // the country rather than the state.
@@ -503,15 +760,26 @@ function segmentVerdict(seg) {
     // Tennessee while "IN Salzburg At Salzburg" stays in Austria; without it,
     // tier one alone would put every foreign city whose country is not in the
     // table above into the US deck.
+    //
+    // A ZIP after the code is still the canonical shape: "Paris, TN 38242",
+    // "Vincennes, IN 47591" and "New Orleans, LA 70123" were read as France
+    // and Laos because "TN 38242" was not exactly "TN".
     const parts = fold(seg).split(/\s*,\s*/).filter(Boolean);
-    const canonicalCityState = parts.length === 2 && new RegExp(`^${state}$`, 'i').test(parts[1]);
-    if (!canonicalCityState && ISO2_NONUS.has(state) && foreignCity(seg)) return 'non-us';
+    const canonicalCityState = parts.length === 2 && new RegExp(`^${state}(\\s+\\d{5}(-\\d{4})?)?$`, 'i').test(parts[1]);
+    if (!canonicalCityState && ISO2_NONUS.has(state) && (foreignCity(seg) || foreignRegion(seg))) return 'non-us';
+    // "Fellbach, BW, DE", "Hude-Wüsting, NI, DE", "Warstein, NRW,DE, DE": a
+    // region code that no US state uses, between the city and a code that a
+    // country uses. A US address has no such middle part.
+    const tokens = tokensOf(seg);
+    if (ISO2_NONUS.has(state) && tokens[tokens.length - 1] === state
+      && commaParts(seg).slice(1, -1).some(p => /^[A-Z]{2,3}$/.test(p) && !US_STATE_CODES.has(p) && p !== 'US' && p !== 'USA')) return 'non-us';
     return 'us';
   }
   if (WEAK_NAME_RE.test(flatten(seg))) return 'non-us';
+  if (foreignRegion(seg)) return 'non-us';
   if (spaceLeadIso2(seg)) return 'non-us';
-  if (usCity(seg)) return 'us';
-  if (foreignCity(seg)) return 'non-us';
+  if (usCityEvidence(seg)) return 'us';
+  if (foreignCity(seg, true)) return 'non-us';
   return null;
 }
 
@@ -646,3 +914,13 @@ export function classifyLocation(location, title = '', url = '') {
 // Exported for the tests, which assert on the tables rather than on a handful
 // of hand-picked strings.
 export const _internals = { ISO2_NONUS, ISO3_NONUS, US_STATE_CODES, explicitUs, explicitForeign, segmentVerdict };
+
+/**
+ * Does a stored row's location bucket disagree with the current reading?
+ * After a geo.mjs change this selects the rows to re-triage
+ * (`node jarvis/retriage.mjs --location`), instead of a one-off script.
+ * @param row { location, title, url, location_bucket }
+ */
+export function bucketDrifted(row) {
+  return classifyLocation(row?.location, row?.title, row?.url) !== (row?.location_bucket ?? null);
+}

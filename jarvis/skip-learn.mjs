@@ -381,4 +381,27 @@ export function learnFromApplyForms(prepared = []) {
   }));
 }
 
+/**
+ * A proposal he turned down stays turned down.
+ *
+ * "Not that" only took the card off the page, so the same proposal came back
+ * on the next load and a later click could accept what he had refused. On
+ * 2026-11-12 he declined all ten "safe" hides (ASM, Physical Intelligence,
+ * Hyundai Motor, Form Energy, Impulse Space, Axiom Space, AST SpaceMobile,
+ * Snap-on, titles "summer" and "talent"): "i only skipped the forward
+ * deployment or way too sneior ones so still keep then". A decline is keyed
+ * by what accepting would have done, so the same hide is never offered again
+ * under another headline.
+ *
+ * @param {Array} proposals  as learnFromSkips / learnFromApplyForms return them
+ * @param {Array} declined   {action, target} records, as /api/decline-rule writes them
+ */
+// A stored target is cut to this length, so the key compares that much of both.
+export const DECLINED_TARGET_MAX = 200;
+export const declinedKey = (p) => `${p?.action || ''}:${String(p?.target || p?.rule || '').trim().slice(0, DECLINED_TARGET_MAX).toLowerCase()}`;
+export function withoutDeclined(proposals = [], declined = []) {
+  const keys = new Set((declined || []).map(declinedKey));
+  return (proposals || []).filter((p) => !keys.has(declinedKey(p)));
+}
+
 export const _internals = { words, STOP };

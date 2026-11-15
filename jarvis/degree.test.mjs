@@ -182,5 +182,29 @@ check('a PhD-only req with no bachelor anywhere still blocks',
 check('a preferred FAR discipline does not block either',
   mism('Requirements:\n• 2 years of test experience\n\nPreferred:\n• Degree in Electrical Engineering'), false);
 
+// F-755: Microsoft software is not a Master of Science. Wording from stored rows.
+console.log('\n🧪 degree: "MS Office" is software (F-755)');
+check('"Experience with MS Office, in particular MS Excel"',
+  mism('Basic Qualifications\n- 1+ years of supply chain experience\n- Experience with MS Office, in particular MS Excel'), false);
+check('"Proficiency in MS Office (MS Excel and MS PowerPoint, in particular)"',
+  mism('Proficiency in MS Office (MS Excel and MS PowerPoint, in particular)'), false);
+check('German "MS-Office-Kenntnisse"',
+  mism('Gute MS-Office-Kenntnisse, insbesondere in Excel'), false);
+check('a title naming MS Dynamics', checkDegree('', 'Developer (CRM MS Dynamics)').mismatch, false);
+check('a title naming MS SQL Server', checkDegree('', 'Staff Developer (.NET Core, React, MS SQL Server)').mismatch, false);
+check('…a real MS requirement beside MS Office still blocks',
+  mism('Requirements:\n• MS in Mechanical Engineering required\n• Proficiency in MS Office'), true);
+
+// F-757: other spellings of a bachelor's route.
+console.log('\n🧪 degree: "Baccalaureate" and "Four-year or Graduate Degree" (F-757)');
+check('HP: "Four-year or Graduate Degree in … Mechanical Engineering"',
+  mism('Education and Experience Required:\n• Four-year or Graduate Degree in Manufacturing Engineering, Mechanical Engineering, or any other related discipline or commensurate work experience or demonstrated competence.'), false);
+check('"Baccalaureate degree" beside a Master\'s route',
+  mism("Required: Baccalaureate degree in Engineering, or a Master's degree in Mechanical Engineering."), false);
+check('"4-year degree" is a bachelor route',
+  mism("Master's degree in Mechanical Engineering, or a 4-year degree with 2 years of experience."), false);
+check('…but "post-baccalaureate experience" after a Master\'s is not',
+  mism('Master’s degree in Chemical Engineering, Materials Science and Engineering, a related field, or a foreign equivalent plus 2 years of post-baccalaureate experience in job offered.'), true);
+
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

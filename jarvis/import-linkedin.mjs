@@ -349,6 +349,7 @@ async function main(argv) {
   if (!rows.length) { say(`\n  Nothing to import.\n`); return 0; }
 
   const { added, updated } = upsertJobs(rows);
+  await (await import('./dedupe.mjs')).recheckAfterUpsert();   // F-1028
   say(`\n  Store updated: ${added} added, ${updated} updated.`);
   say(`  Run \`node jarvis/dedupe.mjs\` if any of these also arrive from a board later.\n`);
   return 0;

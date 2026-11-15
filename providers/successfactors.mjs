@@ -26,6 +26,8 @@
 //
 // Override the path with `feed:` if a site publishes it elsewhere.
 
+import { hollowBody } from '../jarvis/text.mjs';
+
 const FEED_PATH = '/sitemap.xml';
 const ALT_FEED_PATH = '/googlejobs.xml';
 
@@ -114,7 +116,12 @@ export function parseSuccessFactorsFeed(xml, companyName) {
     const fn = tag(body, 'g:job_function');
     if (fn) job.team = fn;
     const desc = htmlToPlain(tag(body, 'description'));
-    if (desc) job.description = desc;
+    // A TEMPLATE IS NOT A DESCRIPTION (F-760). CNH lists each US requisition
+    // again in Italian, French, German and Portuguese, and those copies carry
+    // the translated template with every requirement section empty — only the
+    // pay line and the benefits survive. Stored, it reads as a full body to
+    // triage, fit and the curator. Left off, the row is honestly unread.
+    if (desc && !hollowBody(desc)) job.description = desc;
     out.push(job);
   }
   return out;

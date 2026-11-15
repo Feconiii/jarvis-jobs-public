@@ -15,6 +15,13 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   const esc = (x) => String(x ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  /** "slowest step: dropdowns 3.2 s of 7.9 s" (S6), from the run's own timings; empty when there are none. */
+  const PHASE_WORDS = { discover: 'reading the page', plan: 'waiting for the plan', answers: 'written answers', resume: 'the resume', dropdowns: 'dropdowns', entries: 'experience/education', waits: 'fixed waits' };
+  const slowestLine = (t) => {
+    if (!t || !PHASE_WORDS[t.slowest] || !Number.isFinite(t[t.slowest]) || !Number.isFinite(t.total) || t.total < 1000) return '';
+    const s = (ms) => (ms / 1000).toFixed(1);
+    return `<div class="muted">slowest step: ${PHASE_WORDS[t.slowest]} ${s(t[t.slowest])} s of ${s(t.total)} s</div>`;
+  };
 
   const ask = (msg) => new Promise((resolve) => {
     try {
@@ -166,6 +173,8 @@
     ring.style.setProperty('--p', String(score ?? 0));
     ring.style.setProperty('--ring', colour);
     $('#score').textContent = score == null ? '–' : String(score);
+    // Kept for the Fill button: a blocked posting asks once before it fills (F-773).
+    state.blockers = fit?.blockers?.length ? fit.blockers.slice(0, 3) : null;
     $('#band').textContent = fit?.blockers?.length ? 'Blocked' : (fit?.bandLabel || fit?.band || '');
     $('#why').textContent = (fit?.blockers?.length ? fit.blockers : (fit?.reasons || [])).slice(0, 2).join(' · ');
     const sk = $('#skills');
@@ -190,11 +199,27 @@
     const acc = armed?.acc;
     const fill = $('#fill');
     fill.disabled = !!running;
-    fill.textContent = running ? 'Filling…' : (acc && (acc.filled || acc.checked) ? 'Fill this page again' : 'Fill this page');
+    fill.textContent = running ? 'Filling…'
+      : (state.blockers && state.fillAnywayFor === String(state.jobId)) ? 'Fill anyway'
+      : (acc && (acc.filled || acc.checked) ? 'Fill this page again' : 'Fill this page');
     const liveEl = $('#live');
     liveEl.hidden = !live;
     liveEl.textContent = live || '';
     renderAnswers(report);
+    // THE WORKER DID NOT FILL A BARRED POSTING (his "1. ye", 2026-11-12): a
+    // toolbar press or the next page of an armed tab stopped before writing
+    // anything. Said here with the posting's own sentence, and the button is
+    // already "Fill anyway", so one press fills it.
+    const stopped = state.stopped;
+    if (!running && stopped && String(stopped.id) === String(state.jobId)) {
+      const reasons = (stopped.reasons || []).map(String);
+      if (!state.blockers) state.blockers = reasons.slice(0, 3);
+      state.fillAnywayFor = String(state.jobId);
+      fill.textContent = 'Fill anyway';
+      s.innerHTML = `<span class="err"><b>Not filled — this posting is blocked:</b> ${esc(reasons[0] || state.blockers[0] || '')}</span>`
+        + '<br>Nothing was written to the form. Press <b>Fill anyway</b> to fill it regardless.';
+      return;
+    }
     if (!acc || (!acc.filled && !acc.checked && !acc.uploaded && !(acc.unanswered || []).length && !acc.stoppedBecause)) {
       s.innerHTML = running ? '' : (armed ? 'Following this tab.' : '');
       return;
@@ -205,6 +230,10 @@
       + `${written.length ? ` · ${written.length} written for you` : ''}`
       + `${left.length ? ` · <span class="left">${left.length} left for you</span>` : ''}${armed ? ' · following this tab' : ''}</div>`
       + (acc.stoppedBecause ? `<div class="muted">${esc(acc.stoppedBecause)}</div>` : '')
+      // WHERE THIS RUN'S TIME WENT (S6): the slowest phase, from the run's own clock.
+      + slowestLine(report?.timings)
+      // Optional boxes nothing answers: shown, never counted as left (F-803).
+      + ((report?.optionalBlank || []).length ? `<div class="muted">optional, left blank: ${report.optionalBlank.slice(0, 8).map((u) => esc(String(u)).slice(0, 60)).join(' · ')}${report.optionalBlank.length > 8 ? ` · …and ${report.optionalBlank.length - 8} more` : ''}</div>` : '')
       + '<div class="submit">Submit is yours. Nothing here presses it.</div>';
   }
 
@@ -397,7 +426,9 @@
       dl.setAttribute('download', name);
       dl.hidden = false;
       $('#attach-pdf').hidden = false;
-      $('#save-note').textContent = '';
+      // A note about THIS posting stays (F-1013 #13): after a moved page is
+      // read again, its resume lands just after the attach and wiped "Attached …".
+      if (state.noteFor !== jobId) $('#save-note').textContent = '';
       // The name the employer will see, his to change for this posting.
       $('#name-row').hidden = false;
       if (document.activeElement !== $('#file-name')) $('#file-name').value = name;
@@ -547,7 +578,7 @@
     clearTimeout(state.pollTimer);
     if (!state.tabId) return;
     const r = await ask({ type: 'panel-state', tabId: state.tabId });
-    if (r.ok) renderState(r.armed, r.running, r.report || null, r.live || '');
+    if (r.ok) { state.stopped = r.stopped || null; renderState(r.armed, r.running, r.report || null, r.live || ''); }
     // THE WALK IS WHEN A LETTER APPEARS. The filler writes one for a form
     // with a cover-letter slot, and nothing tells the panel — so the card
     // read "None written" beside a form holding it (F-538). This poll already
@@ -572,20 +603,30 @@
 
   async function refresh({ attempt = 0 } = {}) {
     clearTimeout(state.retryTimer);
+    // THE NEWEST ASK WINS (F-1013 #13): two refreshes in flight could land out
+    // of order, and the older page's job overwrote the newer one's.
+    const seq = (state.refreshSeq = (state.refreshSeq || 0) + 1);
     const tab = await activeTab();
-    if (!tab) return;
+    if (!tab || seq !== state.refreshSeq) return;
     const switched = state.tabId !== tab.id;
     state.tabId = tab.id;
     // NOT `state.tab` — that is the panel's OWN tab strip (resume / cover
     // letter / change it), and overwriting it with a Chrome tab hid the whole
     // resume pane.
     state.pageTab = tab;
-    if (switched) { state.jobId = null; state.lastKey = ''; state.report = null; state.reportAt = 0; state.tabChosen = false; $('#answers-body').className = 'muted'; }
-    if (!/^https?:/i.test(tab.url || '')) { showEmpty('Open a job posting or its application form.'); return; }
+    // A NEW PAGE IN THE SAME TAB is a new question too (F-1013 #13, review
+    // 2026-11-05): the job was forgotten only when he switched TABS, so for the
+    // seconds a route change took to read, the Resume chip still attached the
+    // previous posting's PDF to the new posting's slot.
+    const here = String(tab.url || '').replace(/#.*$/, '');
+    const moved = !switched && !!state.jobAt && state.jobAt !== here;
+    if (switched || moved) { state.jobId = null; state.jobAt = ''; state.reading = true; state.lastKey = ''; state.report = null; state.reportAt = 0; state.tabChosen = false; $('#answers-body').className = 'muted'; }
+    $('#files').hidden = !/^https?:/i.test(tab.url || '');
+    if (!/^https?:/i.test(tab.url || '')) { state.reading = false; showEmpty('Open a job posting or its application form.'); return; }
     // Say what it is doing rather than showing the last tab's job or a blank.
     if (switched || (attempt === 0 && !state.jobId)) showEmpty('Reading this page…', { quiet: true });
     const r = await ask({ type: 'panel', tabId: tab.id });
-    if (state.tabId !== tab.id) return;
+    if (state.tabId !== tab.id || seq !== state.refreshSeq) return;
     if (!r.ok) {
       // Still loading, or an ATS that paints its posting after the load event:
       // ask again shortly rather than calling it.
@@ -604,15 +645,27 @@
         : `<b>Jarvis cannot see this page.</b><br>${esc(r.error || '')}`;
       showEmpty(why);
       state.jobId = null;
+      state.reading = false;
       return;
     }
     $('#empty').hidden = true;
     $('#main').hidden = false;
     const { job, fit, application } = r.data;
     state.jobId = String(job.id);
+    state.jobAt = here;
+    state.reading = false;
     renderJob(job);
     renderApplied(r.data.applied);
     renderFit(fit);
+    // The fill stop's reasons (jarvis/fill-stop.mjs) ask before a fill like the
+    // fit's blockers do; an export bar is not one of those, so it is added here.
+    const stopReasons = (r.data.stop?.reasons || []).map(String).filter(Boolean);
+    if (stopReasons.length) {
+      state.blockers = [...new Set([...stopReasons, ...(state.blockers || [])])].slice(0, 3);
+      $('#band').textContent = 'Blocked';
+      $('#why').textContent = stopReasons.slice(0, 2).join(' · ');
+    }
+    state.stopped = r.stopped || null;
     renderApplication(application);
     renderState(r.armed, r.running);
     const changed = state.lastKey !== String(job.id);
@@ -626,9 +679,20 @@
 
   $('#fill').addEventListener('click', async () => {
     if (!state.tabId) return;
+    // A BLOCKED POSTING ASKS ONCE (F-773). Seven blocked postings had their
+    // forms filled with nothing said; the first press now shows the posting's
+    // own sentence and turns the button into "Fill anyway", and a fill past
+    // that is recorded, so the choice is his and visible afterwards.
+    if (state.blockers && state.fillAnywayFor !== String(state.jobId)) {
+      state.fillAnywayFor = String(state.jobId);
+      $('#fill').textContent = 'Fill anyway';
+      $('#status').innerHTML = `<span class="err"><b>This posting is blocked:</b> ${esc(state.blockers[0])}</span><br>Press <b>Fill anyway</b> to fill it regardless.`;
+      return;
+    }
+    const anyway = state.blockers ? { id: state.jobId, reasons: state.blockers } : null;
     $('#fill').disabled = true;
     $('#fill').textContent = 'Filling…';
-    const r = await ask({ type: 'press', tabId: state.tabId });
+    const r = await ask({ type: 'press', tabId: state.tabId, ...(anyway ? { blockedAnyway: anyway } : {}) });
     if (!r.ok) { $('#status').innerHTML = `<span class="err">${esc(r.error || 'could not press')}</span>`; $('#fill').disabled = false; $('#fill').textContent = 'Fill this page'; return; }
     state.pollUntil = Date.now() + 6 * 60_000;
     pollState();
@@ -675,8 +739,14 @@
   async function attachHere(what, noteEl) {
     const note = $(noteEl);
     if (!state.tabId) { note.textContent = 'No page beside the panel.'; return; }
-    note.textContent = what === 'letter' ? 'Attaching the letter…' : 'Attaching the resume…';
+    // ONLY THE FILE FOR THE PAGE THAT IS THERE NOW (F-1013 #13): if the page
+    // moved since its job was read, read it again first.
+    const now = await activeTab().catch(() => null);
+    if (now && state.jobAt && String(now.url || '').replace(/#.*$/, '') !== state.jobAt) await refresh();
+    if (state.reading) { note.textContent = 'Still reading this page — try again in a moment.'; return; }
+    note.textContent = what === 'letter' ? 'Attaching the letter…' : what === 'portfolio' ? 'Attaching the portfolio…' : 'Attaching the resume…';
     const r = await ask({ type: 'attach-file', tabId: state.tabId, what, id: state.jobId, pageUrl: state.pageTab?.url || '' });
+    if (noteEl === '#save-note') state.noteFor = state.jobId;
     note.textContent = r.ok
       ? `Attached "${r.name}" to ${r.label}.`
       : (r.why || r.error || 'could not attach it');
@@ -699,6 +769,36 @@
   $('#save-name').addEventListener('click', saveName);
   $('#file-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveName(); } });
   $('#letter-attach').addEventListener('click', () => attachHere('letter', '#letter-note'));
+
+  /**
+   * THE FILE CHIPS (2026-10-22): Resume and Portfolio, above everything.
+   * A click puts the file in the empty slot for it; a drag drops it on the
+   * upload box he lets go over. The drag carries only a marker — Chrome will
+   * not hand a File from the panel to the page — so the worker arms a
+   * listener in the page at dragstart, and that listener attaches the file
+   * where it was dropped and reports back here.
+   */
+  for (const chipEl of document.querySelectorAll('.filechip')) {
+    const what = chipEl.dataset.what;
+    chipEl.addEventListener('click', () => attachHere(what, '#files-note'));
+    chipEl.addEventListener('dragstart', (e) => {
+      // Not while the page is being read (F-1013 #13): the previous posting's
+      // file would be the one dropped.
+      if (state.reading) { e.preventDefault(); $('#files-note').textContent = 'Still reading this page — try again in a moment.'; return; }
+      try {
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('application/x-jarvis-file', what);
+        e.dataTransfer.setData('text/plain', what === 'portfolio' ? `${PERSON_NAME} Portfolio.pdf` : `${PERSON_NAME} Resume.pdf`);
+      } catch { /* the worker's arming is what matters */ }
+      $('#files-note').textContent = '';
+      ask({ type: 'drag-arm', tabId: state.tabId, what, id: state.jobId, pageUrl: state.pageTab?.url || '' });
+    });
+    // Every frame stands down when the drag ends, wherever it ended, so a
+    // later drag of text on the page is never taken for this one. The frame
+    // that got the drop has already read what it needs.
+    chipEl.addEventListener('dragend', () => ask({ type: 'drag-end', tabId: state.tabId, what }));
+  }
+  chrome.runtime?.onMessage?.addListener((msg) => { if (msg?.type === 'drag-note') $('#files-note').textContent = String(msg.text || ''); });
 
   // Opened from the dashboard's URL, so the viewer's own Save button offers
   // the real filename rather than the blob's UUID (F-412).
@@ -751,6 +851,23 @@
   if (chrome.runtime?.connect) connectPort();
 
   try { $('#ver').textContent = chrome.runtime.getManifest().version; } catch { /* a harness */ }
+  // THE DOWNLOAD LINKS OUTLIVE THEIR TICKET (F-1031 review): a file ticket
+  // lasts 30 minutes, so a panel left open asks for fresh links every 15.
+  async function freshFileLinks() {
+    try {
+      const dl = $('#download-pdf');
+      if (state.fileUrl && state.lastKey && dl && !dl.hidden) {
+        const u = await ask({ type: 'file-url', id: state.lastKey, inline: true });
+        if (u?.ok && u.url) { state.fileUrl = u.url; dl.href = u.url; }
+      }
+      const ld = $('#letter-download');
+      if (ld && !ld.hidden && state.jobId) {
+        const u = await ask({ type: 'file-url', what: 'letter', id: state.jobId });
+        if (u?.ok && u.url) ld.href = u.url;
+      }
+    } catch { /* the links stay as they were */ }
+  }
+  setInterval(freshFileLinks, 15 * 60_000);
   refresh();
-  globalThis.__jarvisPanel = { refresh, state };
+  globalThis.__jarvisPanel = { refresh, state, freshFileLinks };
 })();

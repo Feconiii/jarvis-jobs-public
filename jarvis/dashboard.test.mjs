@@ -432,6 +432,58 @@ test('Applications is one page: the tracker board, then Review & Send', async ()
 });
 
 /**
+ * A SLOW VIEW NEVER PAINTS OVER THE ONE HE CLICKED NEXT (F-1022, 2026-11-06).
+ * "im in curated view and it shows applications i have to reclick for it to
+ * load". The board's pipeline request is held here until he has moved on to
+ * the Inbox and its list is up; when the board's answer is let go, nothing of
+ * the board may appear over the Inbox.
+ */
+test('a slow Applications board does not mount over the Inbox clicked after it', async () => {
+  let release; const held = new Promise((r) => { release = r; });
+  let asked = false;
+  const BOARD = /\/api\/jobs\?limit=1000&sort=fit&roleKey=1/;
+  // The held answer is a stand-in, fulfilled at once on release: the real one
+  // can take longer than any fixed wait here, and a test that passes because
+  // the answer had not arrived yet proves nothing.
+  const reply = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  await page.route(BOARD, async (route) => {
+    asked = true; await held;
+    await route.fulfill(reply({ jobs: [], total: 0, counts: {} })).catch(() => { /* the page gave up on it */ });
+  });
+  // The board waits on three more answers beside its pipeline; on a busy real
+  // store they too outlast any wait, so they are answered at once here.
+  const SIDE = /\/api\/(outreach\/leads\/summary|mail\/status|mail\/events)(\?|$)/;
+  await page.route(SIDE, (route) => route.fulfill(reply(/summary/.test(route.request().url()) ? { jobs: {} }
+    : /status/.test(route.request().url()) ? { configured: false } : { latest: {}, recent: [] })).catch(() => {}));
+  try {
+    await page.evaluate(() => document.querySelector('#view button[data-view="applications"]').click());
+    for (let i = 0; i < 100 && !asked; i += 1) await page.waitForTimeout(100);
+    assert.ok(asked, 'the board asked for its pipeline');
+    await page.evaluate(() => document.querySelector('#view button[data-view="inbox"]').click());
+    await page.waitForFunction(() => currentView() === 'inbox'
+      && getComputedStyle(document.querySelector('#tbl')).display !== 'none', null, { timeout: 30000 });
+    release();
+    await page.waitForTimeout(2000);
+    const r = await page.evaluate(() => ({
+      view: currentView(),
+      board: !!document.querySelector('#board'),
+      mailbar: !!document.querySelector('#mailbar'),
+      hub: getComputedStyle(document.querySelector('#hub')).display !== 'none',
+      table: getComputedStyle(document.querySelector('#tbl')).display !== 'none',
+    }));
+    assert.equal(r.view, 'inbox');
+    assert.equal(r.board, false, 'the late board answer mounted the board over the Inbox');
+    assert.equal(r.mailbar, false, 'the board\'s mail bar came with it');
+    assert.equal(r.hub, false, 'Review & Send filled the hub under the Inbox');
+    assert.equal(r.table, true, 'the Inbox list is what shows');
+  } finally {
+    release();
+    await page.unroute(BOARD);
+    await page.unroute(SIDE);
+  }
+});
+
+/**
  * A HEART MEANS TRACK, AND TRACKED JOBS LIVE ON THE APPLICATIONS BOARD.
  *
  * Hearting a curated row used to keep it in the Inbox but sort it under the
@@ -848,27 +900,47 @@ test('a card whose posting is now work-auth blocked says so, with the reason', a
  */
 test('a finished reading batch does not reload the list while a hide box is open', async () => {
   const kept = await page.evaluate(async () => {
-    let loads = 0;
+    let loads = 0; let polls = 0;
     const realLoad = window.load;
     window.load = () => { loads += 1; };
+    // ONE POLL AT A TIME (F-1022): while the page's own 5-second poll is in
+    // flight, pollProgress returns at once, and both calls below did nothing.
+    // That was the flake (2026-11-13, failed alone in 4.7 ms): "0" reloads,
+    // and a hide-box check that passed without running. The page's poll is
+    // put in flight here on purpose, ending 300 ms later as a slow
+    // /api/progress would, and each call waits for the poll before it.
+    pollProgress.busy = true;
+    setTimeout(() => { pollProgress.busy = false; }, 300);
+    const idle = async () => { for (let i = 0; pollProgress.busy && i < 600; i++) await new Promise((r) => setTimeout(r, 50)); };
     // Pretend a hide box is open, then let a batch "finish".
     HIDE_ASK.id = 'x';
     lastBatchDone = 'earlier';
     const realFetch = window.fetch;
     window.fetch = async (u, o) => (String(u).includes('/api/progress')
-      ? new Response(JSON.stringify({ coverage: { readable: 1, read: 1 }, batch: { completedAt: 'now' } }))
+      ? (polls += 1, new Response(JSON.stringify({ coverage: { readable: 1, read: 1 }, batch: { completedAt: 'now' } })))
       : realFetch(u, o));
+    await idle();
+    const before = polls;
     await pollProgress();
+    const ranWithBox = polls > before;
     const withBox = loads;
     // No box, no recent touch, not the Inbox: the reload still happens.
     HIDE_ASK.id = null; LAST_TOUCH = 0; lastBatchDone = 'earlier';
     const onInbox = currentView() === 'inbox';
+    await idle();
+    const before2 = polls;
     await pollProgress();
+    const ranAfter = polls > before2;
     window.fetch = realFetch; window.load = realLoad;
-    return { withBox, after: loads, onInbox };
+    return { withBox, after: loads, onInbox, ranWithBox, ranAfter, hidden: document.hidden };
   });
+  assert.equal(kept.hidden, false, 'the page is visible, so pollProgress runs at all');
+  assert.ok(kept.ranWithBox && kept.ranAfter, `both polls ran (with the box: ${kept.ranWithBox}, after: ${kept.ranAfter})`);
   assert.equal(kept.withBox, 0, 'not while the hide box is open');
-  if (!kept.onInbox) assert.equal(kept.after, 1, 'and it still refreshes other views when he is not in the middle of something');
+  // At least once: the page's own 5-second poll can land during this test and
+  // see the same fake "batch done", which is a second reload, not a fault
+  // (flaked 1 in 3 under the full suite, 2026-10-26).
+  if (!kept.onInbox) assert.ok(kept.after >= 1, `and it still refreshes other views when he is not in the middle of something (${kept.after})`);
 });
 
 /**

@@ -89,6 +89,7 @@ export async function buildAll({ rasterDpi = 200, families = ALL_FAMILIES.map(f 
     // only the SELECTION differs. `base` keeps the plain filename and is what
     // apply-time routing picks, so nothing downstream has to learn a new name.
     for (const variant of VARIANTS) {
+    if (variant.only && variant.only !== family.key) continue;
     const spec = buildVariantSpec(family.key, variant.key, pool);
     const suffix = variant.label ? ` - ${variant.label}` : '';
     const specPath = path.join(dir, variant.label ? `spec-${variant.key}.json` : 'spec.json');

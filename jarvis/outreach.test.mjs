@@ -23,7 +23,8 @@ import {
 } from './outreach.mjs';
 import {
   contactId, addBusinessDays, canContact, saveContact, getContact, markSent,
-  markReplied, markDoNotContact, dueFollowUps, outreachStats, forJob, removeUnsent,
+  markReplied, markDoNotContact, dueFollowUps, outreachStats, forJob, removeUnsent, markInvited, markConnected, acceptedUnsent,
+  retireContact, unretireContact, isOpen, outreachConnectQueue,
 } from './contacts.mjs';
 
 let pass = 0, fail = 0;
@@ -312,13 +313,14 @@ const c1 = saveContact({ job_id: 'j1', company: 'Applied Materials', name: 'Dana
 check('a draft is recorded as drafted', c1.status, 'drafted');
 check('…and is found for its job', forJob('j1', D).length, 1);
 
-// TWO PEOPLE PER COMPANY PER ROLE (was one; his call 2026-10-05 — Riley and
-// Devin each invited contact for the same team). The cap still stands.
+// NO CAP PER ROLE since 2026-10-26 ("remove all the damn caps"): a third,
+// fourth… person for the same role is allowed. A cap passed in still works.
 check('a second person for the same role is allowed', canContact(null, forJob('j1', D), { jobId: 'j1' }).ok, true);
 saveContact({ job_id: 'j1', company: 'Applied Materials', name: 'Sam Roe', persona: 'team', channel: 'email', draft: GOOD }, D);
-const third = canContact(null, forJob('j1', D), { jobId: 'j1' });
-check('a third person for the same role is refused', third.ok, false);
-ok('…and the refusal names who is already in flight', /Dana Lee/.test(third.why), third.why);
+check('a third person for the same role is allowed too', canContact(null, forJob('j1', D), { jobId: 'j1' }).ok, true);
+const capped = canContact(null, forJob('j1', D), { jobId: 'j1', perCompanyPerRole: 2 });
+check('a cap passed in still refuses', capped.ok, false);
+ok('…and the refusal names who is already in flight', /Dana Lee/.test(capped.why), capped.why);
 
 // A DIFFERENT role at the same company is fine — it is a different conversation.
 check('a different role at the same company is allowed', canContact(null, forJob('j1', D), { jobId: 'j2' }).ok, true);
@@ -360,6 +362,13 @@ saveContact({ id: 'zeta:samrivers', status: 'drafted', do_not_contact: 0 }, D);
 check('…AND A LATER WRITE CANNOT CLEAR IT', getContact('zeta:samrivers', D).do_not_contact, 1);
 check('…nor can a switch take them off the ledger', removeUnsent('zeta:samrivers', D), null);
 
+// THE SUBJECT TRAVELS WITH THE DRAFT (2026-10-23): a message waits here, not in a tab.
+saveContact({ job_id: 'j4', company: 'Queue', name: 'Ada Park', draft: GOOD, subject: 'Mechanical Engineer application' }, D);
+check('a saved subject is kept', getContact('queue:adapark', D).subject, 'Mechanical Engineer application');
+saveContact({ id: 'queue:adapark', note: 'later edit' }, D);
+check('…and survives a later write that does not name it', getContact('queue:adapark', D).subject, 'Mechanical Engineer application');
+removeUnsent('queue:adapark', D);
+
 const stats = outreachStats(D);
 check('the reply rate is a fraction, not a percentage', stats.rate, '1/1');
 check('…counted per persona for the learning loop', stats.byPersona.team, { sent: 1, replied: 1 });
@@ -384,6 +393,65 @@ check('a word/character count and a rule check before the note are dropped',
   'Mechanical engineering student at Lakeside. How does the team split subassembly ownership?');
 check('a count on its own trailing line is dropped', stripSelfTalk('Hi Sam, I built a cobot cell. How is the role split?\n(212 characters)'), 'Hi Sam, I built a cobot cell. How is the role split?');
 check('a clean note is left exactly as written', stripSelfTalk('Hi Morgan, I\'m Alex. I built a UR cobot cell. How is the role split?'), 'Hi Morgan, I\'m Alex. I built a UR cobot cell. How is the role split?');
+
+// WHO IS OWED A MESSAGE (F-951): accepted, unsent, still contactable.
+{
+  const base = { job_id: 'owed-1', company: 'Owed Robotics', channel: 'linkedin', draft: 'Hi' };
+  const names = ['Ana Owed', 'Ben Sent', 'Cy Pending', 'Di Blocked'];
+  for (const name of names) saveContact({ ...base, name, linkedin_url: `https://www.linkedin.com/in/${name.split(' ')[0].toLowerCase()}` }, D);
+  const id = (n) => contactId('Owed Robotics', n);
+  for (const n of names) markInvited(id(n), { ...D, at: '2026-11-01T10:00:00Z' });
+  for (const n of ['Ana Owed', 'Ben Sent', 'Di Blocked']) markConnected(id(n), { ...D, at: '2026-11-01T12:00:00Z' });
+  markSent(id('Ben Sent'), { ...D, at: '2026-11-01T13:00:00Z' });
+  markDoNotContact(id('Di Blocked'), D);
+  check('accepted and unsent: owed; sent, pending or blocked: not', acceptedUnsent(D).map((c) => c.name), ['Ana Owed']);
+  check('…with the accept time', acceptedUnsent(D)[0]?.at, '2026-11-01T12:00:00Z');
+}
+
+// RETIRED IS HIS CALL AND REVERSIBLE (F-977): off the open list with a reason,
+// not do-not-contact, the note and draft untouched, and --unretire puts it back.
+{
+  const base = { job_id: 'ret-1', company: 'Retire Co', channel: 'linkedin', draft: 'Hi Ret', note: 'met at SHPE', connect_note: 'Hi, I applied', linkedin_url: 'https://www.linkedin.com/in/rita' };
+  saveContact({ ...base, name: 'Rita Stale' }, D);
+  const rid = contactId('Retire Co', 'Rita Stale');
+  check('a drafted, unsent lead is open', isOpen(getContact(rid, D)), true);
+  check('…and waits in the connect queue', outreachConnectQueue([], D).people.some((p) => p.id === rid), true);
+  const r = retireContact(rid, { ...D, why: 'stale: exec, 09-15', at: '2026-11-03T12:00:00Z' });
+  check('retired with its reason and the status it had', [r.status, r.retired_reason, r.retired_from, r.retired_at], ['retired', 'stale: exec, 09-15', 'drafted', '2026-11-03T12:00:00Z']);
+  const row = getContact(rid, D);
+  check('…off the open list', isOpen(row), false);
+  check('…NOT do-not-contact, and the note and draft are kept', [row.do_not_contact, row.note, row.draft], [0, 'met at SHPE', 'Hi Ret']);
+  check('…out of the connect queue', outreachConnectQueue([], D).people.some((p) => p.id === rid), false);
+  check('…and refused with its reason, naming the undo', [canContact(row, []).ok, /stale: exec, 09-15.*--unretire/.test(canContact(row, []).why)], [false, true]);
+  check('retiring twice keeps the first reason', retireContact(rid, { ...D, why: 'other' }).retired_reason, 'stale: exec, 09-15');
+  saveContact({ id: rid, title: 'VP' }, D);
+  check('a later write that does not name the status leaves it retired', getContact(rid, D).status, 'retired');
+  const back = unretireContact(rid, D);
+  check('unretire restores the status and clears the reason', [back.status, back.retired_reason, back.retired_at, back.retired_from], ['drafted', '', null, '']);
+  check('…and it is open again', isOpen(getContact(rid, D)), true);
+  check('unretiring an open lead is a no-op', unretireContact(rid, D), null);
+  // A sent lead goes back to sent, not drafted.
+  saveContact({ ...base, name: 'Sam Sent' }, D);
+  const sid = contactId('Retire Co', 'Sam Sent');
+  markSent(sid, { ...D, at: '2026-10-01T12:00:00Z' });
+  retireContact(sid, { ...D, why: 'weak: wrong field' });
+  check('a sent lead is retired and kept out of follow-ups', dueFollowUps({ ...D, now: new Date('2026-11-03T12:00:00Z') }).some((c) => c.id === sid), false);
+  check('…and comes back as sent', unretireContact(sid, D).status, 'sent');
+  // A do-not-contact person is already closed for good; retire leaves it alone.
+  saveContact({ ...base, name: 'Dee Nope' }, D);
+  const did = contactId('Retire Co', 'Dee Nope');
+  markDoNotContact(did, { ...D, why: 'asked not to be contacted' });
+  check('do-not-contact is not retired over', retireContact(did, { ...D, why: 'x' }), null);
+  check('…and is still do-not-contact', getContact(did, D).status, 'closed');
+  check('an unknown id is not retired', retireContact('nobody:here', { ...D, why: 'x' }), null);
+  // Accepted-and-unsent skips a retired lead.
+  saveContact({ ...base, name: 'Ann Accept' }, D);
+  const aid = contactId('Retire Co', 'Ann Accept');
+  markInvited(aid, { ...D, at: '2026-11-01T10:00:00Z' }); markConnected(aid, { ...D, at: '2026-11-01T12:00:00Z' });
+  check('accepted and unsent is owed a message', acceptedUnsent(D).some((c) => c.id === aid), true);
+  retireContact(aid, { ...D, why: 'stale' });
+  check('…until it is retired', acceptedUnsent(D).some((c) => c.id === aid), false);
+}
 
 console.log(`\n📊 ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

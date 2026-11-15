@@ -159,7 +159,7 @@ ${auth}MAYBE (not KEEP): heavy travel (consulting at 50%+), a role that mixes an
 A POSTING THAT STATES NO REQUIREMENTS — no degree, no years, no qualifications — cannot be checked against bar 1: DROP, never MAYBE. Nothing goes on the list that the description does not prove ${name} qualifies for.
 
 ALREADY AT THIS COMPANY (applied, in their list, rejected or hidden): ${prior.length ? prior.join('; ') : 'nothing'}
-The same or nearly the same title already on that list: DROP, and say which. A title that differs only in the CITY or SITE it names is a separate opening at another site, not a duplicate: read it as usual.
+The same or nearly the same title already on that list: DROP, and say which. A title that differs only in the CITY or SITE it names is a separate opening at another site, not a duplicate: read it as usual. Each entry names its site: one marked OTHER SITE is a separate opening he would apply to, never a duplicate, and neither is an entry with the same title that was [rejected] at another site. Drop as a duplicate only the same title at the SAME SITE, the same requisition, or the same title he [hidden].
 
 POSTING: ${job.company} — ${job.title} — ${job.location || ''}
 ---
@@ -244,6 +244,10 @@ export default {
   disciplineTitle: /\b(analyst|analytics|accountant|associate|consultant)\b/,
   /** A primary-role word (5+ letters) that also answers for these. */
   disciplineAliases: { financial: ['finance', 'fp&a'], business: ['analytics'] },
+  /** A title word that is the discipline only when the posting is in that field (fit.mjs classifyField). None in this field. */
+  disciplineInField: {},
+  /** Titles that carry a discipline's word for another line of work. None in this field. */
+  disciplineNotTitle: null,
   roleFallbackWords: ['financial', 'finance', 'fp&a', 'accounting', 'accountant', 'audit', 'treasury',
     'investment', 'equity research', 'credit', 'valuation', 'pricing', 'data analyst',
     'business analyst', 'analytics', 'business intelligence', 'consulting'],
@@ -370,6 +374,10 @@ export default {
   /** No employer is capped for this user. */
   capped: null,
   curatePrompt,
+  /** Reader turn-downs this brief says are not drops (F-767): none beyond the generic licence and zero-year checks. */
+  readerDropExceptions: [],
+  /** Field words that make a hand turn-down employer-level (F-731); the generic ones suffice here. */
+  employerTurnDown: null,
 
   // ── skip-learn.mjs ────────────────────────────────────────────────
   employerLevel: [
@@ -383,4 +391,24 @@ export default {
   /** "Analyst" is in every title this preset wants, like "engineer" in the other. */
   skipStopWords: ['analyst', 'analysts'],
   skipProtect: ['finance', 'financial', 'analyst', 'analytics', 'data', 'accounting', 'investment', 'business', 'planning', 'reporting', 'risk', 'credit', 'treasury'],
+  // The employer-taste lists (curate.mjs employerVerdict, hardware preset
+  // 2026-10-26) are his own; this person has stated none. null = no list,
+  // which employerVerdict reads as "nothing decided by name".
+  starsOnly: false,
+  bigNames: null,
+  roleDecides: null,
+  backup: null,
+  notHisKind: null,
+  funded: null,
+  // Employers counted as funded by name; none chosen for this field.
+  fundedNames: null,
+  gradProgram: null,
+  gradProgramMaxYears: null,
+  roboticsEmployers: null,
+  stretchMaxYears: null,
+  subProcessTitle: null,
+  broadProcessTitle: null,
+  sponsorBar: null,
+  testRole: null,
+  notInterest: [],
 };

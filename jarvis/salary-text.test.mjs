@@ -105,6 +105,43 @@ check('Marble — "15-25% of plant revenue"',
   range('As a result, 15-25% of plant revenue (salary and equity offered)'), null);
 check('the travel share does not hide the real pay beside it',
   range('Travel Requirements 25-50% Relocation Provided. Base salary range: $95,000 - $120,000.'), [95000, 120000, 'USD']);
+check('Etched — a housing subsidy and a benefits credit are not pay (F-959)',
+  range('Benefits - $500 per month credit for waiving medical benefits - Housing subsidy of $2,500 per month for those living within walking distance of the office'), null);
+check('Etched — the real range still reads past the subsidy',
+  range('Housing subsidy of $2k per month for those living nearby - Daily lunch. Compensation Range: $250,000 - $350,000 with significant equity.'), [250000, 350000, 'USD']);
+check('CRH — an allowance a few words after the salary does not hide it',
+  range('Compensation Base salary of $80,000 - $95,000 Quarterly Bonuses Monthly Auto Allowance and Mileage pay'), [80000, 95000, 'USD']);
+check('Hyundai — "annual" beside the range beats "Monthly" further on (F-959)',
+  JSON.stringify((({ min, max, interval }) => [min, max, interval])(parseSalaryFromText('Compensation Range: $75,400 - $104,000 annual base salary Monthly Hyundai/Genesis vehicle lease allowance (including insurance and maintenance)') || {})), JSON.stringify([75400, 104000, 'year']));
+// F-959 review: each figure is judged by its own clause.
+check('a stipend before "plus $90,000 base" leaves the base',
+  range('$5,000 monthly stipend plus $90,000 base'), [90000, 90000, 'USD']);
+check('a per diem in the sentence before does not hide the salary range',
+  range('Per diem of $75. Salary range $90,000 - $110,000'), [90000, 110000, 'USD']);
+check('a stipend range named after its figures loses to the base range',
+  range('$5,000 - $6,000 monthly stipend; base $90,000 - $100,000'), [90000, 100000, 'USD']);
+check('"$90k - $110k Housing subsidy": the next list item does not void the range',
+  range('$90k - $110k Housing subsidy'), [90000, 110000, 'USD']);
+check('Cardinal Health — "Bonus eligible: No" after the range is the next item',
+  range('Anticipated salary range: $94,900 - $135,600 Bonus eligible: No'), [94900, 135600, 'USD']);
+check('Boeing — "Min: $40,000 – Max: $80,000" is a range',
+  range('Summary pay range: Min: $40,000 – Max: $80,000 Language Requirements'), [40000, 80000, 'USD']);
+check('Boston Scientific — labelled minimum and maximum are one range',
+  range('Requisition ID: 629964 Minimum Salary: $ 71500 Maximum Salary: $ 135800 The anticipated compensation'), [71500, 135800, 'USD']);
+check('CDM Smith — max written before min',
+  range('Pay Range Max USD $115,336.00 Pay Range Min USD $69,909.00 Seniority level'), [69909, 115336, 'USD']);
+check('Boehringer — bracketed bounds',
+  range('This position offers a base salary typically between ($75,000) and ($112,800).'), [75000, 112800, 'USD']);
+check('one stated base is one figure',
+  range('The base salary for this position is $80,000.00 USD.'), [80000, 80000, 'USD']);
+check('a clause that names the salary keeps its range past "subsidy"',
+  range('Base salary with housing subsidy: $90k - $110k'), [90000, 110000, 'USD']);
+check('…but a subsidy after the base keeps the base, not the subsidy',
+  range('Base salary $120,000 plus housing subsidy of $2,500 per month'), [120000, 120000, 'USD']);
+check('…and "Housing subsidy $90k - $110k" with no pay word stays out',
+  range('Housing subsidy $90k - $110k'), null);
+check('an hourly rate still annualises', range('The position pays $25/hr'), [52000, 52000, 'USD']);
+check('a bonus alone is not pay', range('Annual bonus of $9,000 based on performance.'), null);
 check('CrowdStrike — a posting date is not pay',
   range('Salary will vary. The Date of Job Posting is:09-22-2026'), null);
 check('Baker Hughes — "8–10-hour shift"',

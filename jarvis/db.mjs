@@ -95,6 +95,14 @@ export function buildDictionary(samples, maxBytes = 110_000) {
 
 // ── schema ──────────────────────────────────────────────────────────
 
+/**
+ * Below this many characters a stored body is presumed to be a list teaser
+ * until something has read the posting in full (F-761). Measured: the Workday
+ * and Phenom teasers that hid 145 curation survivors ran 314–373 characters;
+ * the curator cannot judge anything under 400.
+ */
+export const THIN_BODY = 500;
+
 /** Job fields stored verbatim in their own column. */
 const PLAIN_COLUMNS = {
   id: 'id', url: 'url', title: 'title', company: 'company', team: 'team',
@@ -117,6 +125,12 @@ const PLAIN_COLUMNS = {
   // Retiring the old row would be the expensive error, so it is pointed at the
   // new one instead, and lists show the survivor.
   supersededBy: 'superseded_by',
+  // WHEN THE POSTING ITSELF WAS LAST READ IN FULL (F-761). An observation, so
+  // a plain column: it is what tells a ~300-character list teaser (never read)
+  // from a posting whose real body is short (read, and short). It lived only in
+  // the detail blob, where the enrichment query cannot see it — so a teaser
+  // either counted as read forever, or (Phenom, F-673) was re-read forever.
+  enrichedAt: 'enriched_at',
 };
 
 /**
@@ -282,6 +296,17 @@ CREATE INDEX IF NOT EXISTS jobs_blockkey   ON jobs(block_key);
 -- use the fit_score suffix for ordering.
 CREATE INDEX IF NOT EXISTS jobs_status_score ON jobs(status, fit_score DESC);
 
+-- THE READER'S PER-POSTING CHECKS SCANNED THE WHOLE STORE (2026-11-04).
+--
+-- curate.mjs asks, for every posting it reads, what he already did at that
+-- employer (priorRows), what was turned down there (turnedDownAt) and whether
+-- the same requisition sits under another name — each on lower(company) or
+-- lower(title), which jobs_company cannot serve. On 1,059,595 rows each was a
+-- full SCAN, 0.9 s, and the 4:10 PM run read 340 GB doing it. Indexes on the
+-- same expressions, so the queries stay word for word and SQLite SEARCHes.
+CREATE INDEX IF NOT EXISTS jobs_company_lower ON jobs(lower(company));
+CREATE INDEX IF NOT EXISTS jobs_title_lower   ON jobs(lower(title));
+
 -- Search has to stay instant. The old dashboard searched an array it had
 -- already downloaded; a LIKE scan over a million rows would be a downgrade, so
 -- the searchable text is indexed. Only the short fields — the UI does not
@@ -343,6 +368,18 @@ function addMissingColumns(db) {
     // own form, no tailored resume — he does not apply that way, 2026-10-02)
     // or 'offsite' (the employer's site). NULL: never asked. linkedin-route.mjs.
     ['apply_route', 'TEXT'],
+    // When the posting was last read in full by enrichment (F-761). NULL on
+    // rows read before the column existed: their next write fills it from the
+    // detail blob, and a short body with no date is read once more.
+    ['enriched_at', 'TEXT'],
+    // WHICH of his rules blocked it (2026-11-03), as a JSON list, beside the
+    // fit_blocked flag. The screen re-ran his preferences on every pass just
+    // to say why; rows written before this fill on their next write.
+    ['fit_blockers', 'TEXT'],
+    // WHERE THE BODY CAME FROM when it is not the row's own board (F-978):
+    // 'copy:<id>' for a description borrowed from a copy of the same posting
+    // (LinkedIn, Simplify, Handshake). Cleared by any later write of a body.
+    ['body_from', 'TEXT'],
   ];
   for (const [name, decl] of ADDED) {
     if (have.has(name)) continue;
@@ -461,12 +498,58 @@ export function openDb(dbPath) {
   } catch (err) {
     if (!/lock|busy/i.test(String(err?.message || ''))) throw err;
   }
+  // INDEXES ON ADDED COLUMNS go after them (an old store gets the column first).
+  //
+  // F-1028: the pointers between copies of one posting. The dedupe recheck reads
+  // every pointer (5,260 of 1.1 M rows) several times inside one write lock at
+  // the end of every scan; without this each read was a pass over the whole
+  // 2.8 GB table while his apply clicks waited on the lock. Partial, so it holds
+  // only the pointed rows.
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_superseded ON jobs(superseded_by) WHERE superseded_by IS NOT NULL');
+  } catch (err) {
+    if (!/lock|busy/i.test(String(err?.message || ''))) throw err;
+  }
   const v = db.prepare('SELECT v FROM meta WHERE k = ?').get('schema_version');
   if (!v) db.prepare('INSERT INTO meta (k, v) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
   return db;
 }
 
 // ── dictionaries ────────────────────────────────────────────────────
+
+// WAIT FOR ANOTHER PROCESS'S WRITE LOCK WITHOUT STOPPING THIS ONE (F-1052).
+//
+// A write statement on a connection with busy_timeout 30000 waits for another
+// process's lock INSIDE the call, and node:sqlite is synchronous, so in the
+// dashboard that wait stops every request (serve.err.log 2026-11-13: "server
+// blocked for 17.1s" during the first mail check after a restart). This asks
+// for the lock with busy_timeout 0 and lets it go at once; while it is taken,
+// it waits between tries with awaits, so the server keeps serving. True when
+// the lock was free, false when it stayed taken through every back-off. It is
+// a check, not a hold: the caller's own writes should still wait only briefly.
+export const LOCK_FREE_BACKOFF_MS = [50, 150, 400, 1_000, 2_000, 4_000, 8_000, 15_000];
+export async function writeLockFree(handle, backoffMs = LOCK_FREE_BACKOFF_MS) {
+  let prev = 30000;
+  try { prev = Number(handle.prepare('PRAGMA busy_timeout').get()?.timeout) || 0; } catch { /* keep the default */ }
+  for (let attempt = 0; ; attempt++) {
+    let free = false;
+    try {
+      handle.exec('PRAGMA busy_timeout = 0');
+      handle.exec('BEGIN IMMEDIATE');
+      handle.exec('ROLLBACK');
+      free = true;
+    } catch (err) {
+      // SQLITE_BUSY (5) / SQLITE_LOCKED (6): someone else is writing. Anything else is real.
+      const code = (err?.errcode ?? 0) & 0xff;   // extended codes too: 517 is BUSY_SNAPSHOT
+      if (code !== 5 && code !== 6) throw err;
+    } finally {
+      try { handle.exec(`PRAGMA busy_timeout = ${prev}`); } catch { /* connection closing */ }
+    }
+    if (free) return true;
+    if (attempt >= backoffMs.length) return false;
+    await new Promise((r) => setTimeout(r, backoffMs[attempt]));
+  }
+}
 
 // THE DICTIONARY WAS RE-READ FROM SQLITE ONCE PER ROW.
 //
@@ -615,6 +698,10 @@ export function derived(job) {
     fit_confidence: f.confidence ?? null,
     field: f.field ?? null,
     fit_blocked: bool(f.blockers && f.blockers.length > 0),
+    fit_blockers: f.blockers?.length ? JSON.stringify(f.blockers.slice(0, 6).map((b) => String(b).slice(0, 240))) : null,
+    // Only while the body is still the borrowed one: a later write of the
+    // board's own text changes its length and the marker drops by itself.
+    body_from: job.bodyFrom?.id && job.bodyFrom.chars === desc.length ? `copy:${job.bodyFrom.id}` : null,
     location_bucket: t.locationBucket ?? null,
     relevance: Math.round(t.relevance?.score ?? 0),
     level: t.experience?.level ?? null,
@@ -786,6 +873,9 @@ export function rowToListItem(row) {
     blocked: row.fit_blocked === 1,
     field: row.field || 'other',
   };
+  if (job.fit && row.fit_blockers) {
+    try { job.fit.blockers = JSON.parse(row.fit_blockers); } catch { /* a row written before the column */ }
+  }
   job.triage = {
     locationBucket: row.location_bucket,
     relevance: { score: row.relevance },
@@ -829,6 +919,38 @@ export function rowToListItem(row) {
 
 // ── writes ──────────────────────────────────────────────────────────
 
+// A DEGREE FLAG ONLY rescreen-degrees.mjs KNOWS ABOUT SURVIVES A RE-WRITE (F-769).
+//
+// That pass writes eligibility.mjs's refusals ("wants a Master's or PhD", "the
+// title is another discipline's work", "names degree subjects and … is not
+// one") straight into the columns. Triage does not compute them, and every
+// write re-derives the columns from triage — so each re-read, re-scan update or
+// retriage silently cleared them and the row came back into the deck (about
+// 1,945 rows were exposed; `retriage --dry-run` never counted them).
+//
+// Triage is NOT taught to compute them: run on the deck, eligibility would add
+// 254 flags and many are wrong ("an advanced degree is a plus", "EE
+// preferred", "or a relevant technical field" — F-771). So the write keeps a
+// flag that was already there, exactly as rescreen-degrees only adds; clearing
+// one stays its `--reconcile` pass.
+const ELIGIBILITY_REASON = /\bwants a master|\bnames degree subjects\b|\banother discipline/i;
+export function keepEligibilityFlag(job, prior) {
+  const t = job?.triage;
+  if (!t || t.flags?.degreeMismatch || !prior || prior.f_degree_mismatch !== 1 || !prior.degree_note) return job;
+  let note;
+  try { note = JSON.parse(prior.degree_note); } catch { return job; }
+  const wanted = Array.isArray(note?.wanted) ? note.wanted : [];
+  if (!wanted.some((w) => ELIGIBILITY_REASON.test(String(w)))) return job;
+  return {
+    ...job,
+    triage: {
+      ...t,
+      degree: { ...(t.degree || {}), mismatch: true, wanted, quote: note.quote || '', source: 'eligibility' },
+      flags: { ...(t.flags || {}), degreeMismatch: true },
+    },
+  };
+}
+
 export function makeWriters(db) {
   const insertJob = db.prepare(INSERT_SQL);
   const insertDetail = db.prepare(
@@ -846,6 +968,7 @@ export function makeWriters(db) {
       desc_len = COALESCE((SELECT len      FROM descriptions WHERE id = jobs.id), 0)
     WHERE id = ?`);
   const touch = db.prepare('UPDATE jobs SET last_seen = ?, status = ? WHERE id = ?');
+  const priorDegree = db.prepare('SELECT f_degree_mismatch, degree_note FROM jobs WHERE id = ?');
 
   let detailDict = getDictionary(db, 'detail');
   let descDict = getDictionary(db, 'description');
@@ -865,6 +988,7 @@ export function makeWriters(db) {
      * same shape as the bug where re-scans reset enriched work-auth verdicts.
      */
     putJob(job, opts = {}) {
+      job = keepEligibilityFlag(job, priorDegree.get(job.id));
       insertJob.run(...jobToRow(job));
       const detail = jobToDetail(job);
       const { codec, blob } = compress(JSON.stringify(detail), detailDict);
@@ -900,6 +1024,12 @@ export function makeWriters(db) {
     },
     /** Drop a body while keeping the job, its verdict and its quotes. */
     dropDescription(id) { dropDesc.run(id); clearDescCols.run(id); markPruned.run(id); },
+    /**
+     * Remove a body that was never a description — a translated copy whose
+     * every requirement section is empty (F-760) — without marking the row
+     * pruned: it is live, and a real body may still arrive for it.
+     */
+    clearDescription(id) { dropDesc.run(id); clearDescCols.run(id); },
   };
 }
 
@@ -922,6 +1052,8 @@ export function fullJob(db, row, dicts = {}) {
   const job = rowToJob(row);
   if (!job) return null;
   Object.assign(job, readDetail(db, job.id, dicts.detail));
+  // The column wins over a copy left in a blob written before it existed.
+  if (row.enriched_at) job.enrichedAt = row.enriched_at;
   return job;
 }
 
@@ -997,6 +1129,7 @@ export const FILTER_KEYS = new Set([
   'hasResume',
   'hasTeam',
   'intern',
+  'live',
   'level',
   'locationBucket',
   'maxScore',
@@ -1020,6 +1153,7 @@ export const FILTER_KEYS = new Set([
   'tier',
   'unseen',
   'includeSuperseded',
+  'readable',
 ]);
 
 function warnUnknownFilters(f) {
@@ -1076,6 +1210,8 @@ export function buildWhere(rawFilters = {}) {
   if (f.tier) inList('tier', f.tier);
   if (f.adapter) inList('adapter', f.adapter);
   if (f.hasAdapter === true) where.push(`${c('adapter')} IS NOT NULL`);
+  // Still open: the ATS has not said it is gone (F-786).
+  if (f.live === true) where.push(`${c('gone_at')} IS NULL`);
   if (f.hasTeam === true) where.push(`${c('team')} != ''`);
   if (f.excludeCompany?.length) {
     where.push(`${c('company')} NOT IN (${f.excludeCompany.map(() => '?').join(', ')})`);
@@ -1091,13 +1227,28 @@ export function buildWhere(rawFilters = {}) {
   // detail API). Three failures and it is left alone — the auto worker ran
   // every three minutes and would otherwise burn the budget on the same
   // permanently broken postings forever.
+  //
+  // A LIST TEASER IS NOT A READ (F-761). Workday and Phenom list APIs hand back
+  // a ~300-character summary, which set has_desc and so took the row out of
+  // this filter for good: 145 of 190 screen survivors in one curation run were
+  // teasers the curator could not judge. A body under THIN_BODY that nothing
+  // has read in full (`enriched_at` empty) still needs reading. Once read, it
+  // is left alone even if the real posting is that short — which is also what
+  // stops the two older rules here from re-reading the same row forever (a
+  // Greenhouse posting with no departments; a Phenom teaser, F-673, now
+  // covered by the general rule).
   if (f.needsRead === true) {
     where.push(`(${c('enrich_fails')} < 3 AND ${c('body_pruned')} = 0
-      AND (${c('has_desc')} = 0 OR (${c('source')} = 'greenhouse' AND ${c('team')} = '')
-        OR (${c('source')} = 'phenom' AND ${c('desc_len')} < 400 AND ${c('url')} LIKE '%myworkday%')))`);
-    // ↑ A Phenom teaser is not a description (F-673): the full posting is on
-    // the employer's Workday tenant, which enrich reads through `phenom`.
+      AND (${c('has_desc')} = 0
+        OR (${c('desc_len')} < ${THIN_BODY} AND ${c('enriched_at')} IS NULL)
+        OR (${c('source')} = 'greenhouse' AND ${c('team')} = '' AND ${c('enriched_at')} IS NULL)))`);
   }
+  // CAN A READ SAY ANYTHING ABOUT THIS ROW (the liveness sweep). Three
+  // structural failures — no JobPosting on the page, an empty body, no detail
+  // URL — mean the next fetch will fail the same way, and a fetch that cannot
+  // produce a body cannot show the posting is live either. Without this the
+  // sweep re-fetched 89 such rows every hour, up to 878 times each.
+  if (f.readable === true) where.push(`${c('enrich_fails')} < 3`);
   flag('body_pruned', f.pruned);
   cmp('fit_score', '>=', f.minScore);
   cmp('fit_score', '<=', f.maxScore);
@@ -1188,7 +1339,11 @@ function ftsQuery(search) {
  */
 export function queryJobs(db, filters = {}, opts = {}) {
   const { sql: whereSql, args } = buildWhere(filters);
-  const order = SORTS[opts.sort] || SORTS.fit;
+  // `stable`: the id as the last key, for a caller that pages a filter to its
+  // end (the mail matcher, week-fixes J4). Rows tied on the sort otherwise
+  // have no order between one page and the next, and one can fall in the gap.
+  // Opt-in, so the dashboard's views keep their index-served order.
+  const order = (SORTS[opts.sort] || SORTS.fit) + (opts.stable ? ', jobs.id' : '');
   const limit = Math.max(1, Math.min(opts.limit ?? 200, 5000));
   const offset = Math.max(0, opts.offset ?? 0);
   const shape = opts.full ? (row) => fullJob(db, row) : rowToListItem;

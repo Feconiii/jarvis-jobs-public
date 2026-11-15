@@ -28,6 +28,7 @@
  * that cannot find Chrome must still work.
  */
 import { readFileSync, existsSync, readdirSync } from 'fs';
+import { createHash } from 'crypto';
 import path from 'path';
 
 /** Chrome stores time as microseconds since 1601-01-01. */
@@ -109,4 +110,23 @@ export function loadedExtension(extensionDir) {
     }
   }
   return null;
+}
+
+/**
+ * The ids an unpacked copy of the extension at `extensionDir` can have, in any
+ * Chromium browser (Chrome, Opera GX): Chromium derives an unpacked
+ * extension's id from the SHA-256 of its folder path (UTF-16), so the same
+ * folder is the same id everywhere. The path spelling matters, so both cases of
+ * the drive letter are included; the id Chrome actually registered is added.
+ * Used to pin which extension may call the dashboard (review, 2026-11-03).
+ */
+export function extensionIds(extensionDir) {
+  const ids = new Set();
+  const p = path.resolve(extensionDir);
+  const map = (h) => [...h.slice(0, 32)].map((ch) => String.fromCharCode(97 + parseInt(ch, 16))).join('');
+  for (const v of new Set([p, p.replace(/^[a-z]:/, (d) => d.toUpperCase()), p.replace(/^[A-Z]:/, (d) => d.toLowerCase())])) {
+    ids.add(map(createHash('sha256').update(Buffer.from(v, 'utf16le')).digest('hex')));
+  }
+  try { const loaded = loadedExtension(extensionDir)?.id; if (loaded) ids.add(loaded); } catch { /* no Chrome profile */ }
+  return ids;
 }

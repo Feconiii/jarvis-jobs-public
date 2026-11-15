@@ -172,6 +172,25 @@ test('A DISPLAY:NONE FILE INPUT IS STILL FOUND — the resume bug', async () => 
   assert.match(file.label, /Resume/i);
 });
 
+test('F-836: an iCIMS resume slot that already holds a file counts it, though its file box is empty', async () => {
+  // iCIMS posts the page when a file is chosen; it comes back with the file
+  // named beside an empty input (Spirit AeroSystems, 2026-10-02).
+  const slot = (name, shown) => `
+    <form><div class="iCIMS_ResumeContentDiv">
+      <label id="label_PortalProfileFields.Resume_File">Please upload your resume (Max size: 5 MB)</label>
+      <input id="PortalProfileFields.Resume_FileName" type="hidden" value="${name}">
+      <div id="PortalProfileFields.Resume_FileNameLabel" class="iCIMS_CurrentFile${shown ? '' : ' iCIMS_NoDisplay'}"><span>${shown}</span></div>
+      <input type="file" id="PortalProfileFields.Resume_File" name="PortalProfileFields.Resume_File" aria-labelledby="label_PortalProfileFields.Resume_File">
+    </div></form>`;
+  const read = async (html) => {
+    await page.setContent(html);
+    await page.addScriptTag({ content: DISCOVER });
+    return page.evaluate(() => globalThis.__jarvis.discover().find((f) => f.type === 'file')?.attached);
+  };
+  assert.equal(await read(slot('Alex Rivera Resume.pdf', 'Alex Rivera Resume.pdf')), 1, 'the file iCIMS holds is counted');
+  assert.equal(await read(slot('', '')), 0, 'an empty slot is still empty');
+});
+
 test('a file input labelled about MECHANICS is named by its section', async () => {
   // Workday's label is "Upload a file (5MB max)" — it matches no resume pattern,
   // so the planner called it "a file upload that is not the resume" and refused
@@ -493,6 +512,33 @@ test('iCIMS wording for Apply is recognised', async () => {
   await page.addScriptTag({ content: DISCOVER });
   const found = await page.evaluate(() => globalThis.__jarvis.applyControl()?.textContent.replace(/\s+/g, ' ').trim());
   assert.match(found, /Apply for this job online/);
+});
+
+test('F-1013 #22: a consent notice that says the application will be SENT gets no Confirm / OK / Accept & Apply', async () => {
+  const gate = async (html) => { await page.setContent(html); await page.addScriptTag({ content: DISCOVER }); return page.evaluate(() => globalThis.__jarvis.startGate()?.textContent?.trim() ?? null); };
+  assert.equal(await gate('<div role="dialog"><p>By confirming you agree to our privacy notice and your application will be sent to the hiring team.</p><button>Confirm</button></div>'), null);
+  assert.equal(await gate('<div role="dialog"><p>Privacy notice. Clicking below will submit your application.</p><button>Accept & Apply</button></div>'), null);
+  assert.equal(await gate('<div role="dialog"><p>Privacy Policy. We process your data under this notice.</p><button>Consent & Continue</button><button>Decline & Close</button></div>'), 'Consent & Continue', 'a plain privacy notice is still accepted (F-692)');
+});
+
+test('F-1013 #21: a localized last step\'s Submit in the Next slot is never pressed; Back beside Next is skipped', async () => {
+  const next = async (html) => { await page.setContent(html); await page.addScriptTag({ content: DISCOVER }); return page.evaluate(() => globalThis.__jarvis.nextControl()?.textContent?.trim() ?? null); };
+  for (const word of ['Soumettre', 'Envoyer ma candidature', 'Absenden', 'Enviar', 'Invia candidatura', 'Submit']) {
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal(await next(`<button data-automation-id="pageFooterNextButton">${word}</button>`), null, `"${word}" sends the application`);
+  }
+  assert.equal(await next('<button data-automation-id="pageFooterNextButton">Retour</button><button data-automation-id="pageFooterNextButton">Suivant</button>'), 'Suivant');
+  assert.equal(await next('<button data-automation-id="pageFooterNextButton">Next</button>'), 'Next', 'an English Next is still pressed');
+});
+
+test('F-1013 #16: "Apply with LinkedIn" and a quick-apply form\'s own Apply button are never followed', async () => {
+  const found = async (html) => { await page.setContent(html); await page.addScriptTag({ content: DISCOVER }); return page.evaluate(() => globalThis.__jarvis.applyControl()?.textContent.replace(/\s+/g, ' ').trim() || null); };
+  assert.equal(await found('<h1>Robotics Engineer</h1><p>Advert.</p><button type="button">Apply with LinkedIn</button><button type="button">Apply with Indeed</button>'), null,
+    'applying through another site\'s profile is his to choose');
+  assert.equal(await found('<h1>Robotics Engineer</h1><p>Advert.</p><button type="button">Apply with LinkedIn</button><a href="/jobs/1/apply">Apply</a>'), 'Apply',
+    'the posting\'s own Apply is still found beside it');
+  assert.equal(await found(`<h1>Robotics Engineer</h1><form><label for="e">Email</label><input id="e" type="email">
+    <button type="button" onclick="window.__SENT = true">Apply</button></form>`), null, 'a type="button" Apply in the same form as the boxes is the send');
 });
 
 test('the loose match does not grab things that merely start with "apply"', async () => {
@@ -1352,6 +1398,35 @@ test('the longest description block wins over a one-line teaser', async () => {
   assert.match(got.description, /The real body/);
 });
 
+test('F-1012: THE SITE\'S HEADER IS NEVER THE JOB TITLE (Tesla: logo, "Careers" and the skip link in the first <h1>)', async () => {
+  const body = `<main id="main"><h1>Manufacturing Engineer, Process &amp; Equipment Development</h1>
+    <div class="job-description"><p>${'Own prototype processes into high-volume production. '.repeat(12)}</p></div>
+    <a href="/careers/search/job/apply/271234">Apply</a></main>`;
+  // Tesla's shape: the header <h1> holds the logo link and the skip link.
+  const tesla = await readIn(`<header class="tds-site-header"><h1><a href="/">Tesla homepage</a><a href="/careers">Careers</a><a href="#main">Skip to main content</a></h1></header>${body}`);
+  assert.equal(tesla?.title, 'Manufacturing Engineer, Process & Equipment Development');
+  // The same header with no <header> around it: its words alone rule it out.
+  const bare = await readIn(`<h1><a href="/">Tesla homepage</a><a href="/careers">Careers</a><a href="#main">Skip to main content</a></h1>${body}`);
+  assert.equal(bare?.title, 'Manufacturing Engineer, Process & Equipment Development');
+  // A posting's own <header> inside <main> is the posting, and is kept.
+  const own = await readIn(`<main><header class="job-header"><h1>Process Engineer</h1></header>
+    <div class="job-description"><p>${'Run the line. '.repeat(30)}</p></div><button>Apply</button></main>`);
+  assert.equal(own?.title, 'Process Engineer');
+  // Nothing but furniture: no posting, rather than a junk one.
+  const none = await readIn('<h1>Skip to main content</h1><div class="job-description"><p>x</p></div><button>Apply</button>');
+  assert.equal(none, null);
+});
+
+test('F-1013 #2: "IF YOU HAVE ALREADY APPLIED…" IS BOILERPLATE, NOT HIS STATUS', async () => {
+  const said = async (html) => { await page.setContent(html); await page.addScriptTag({ content: DISCOVER }); return page.evaluate(() => globalThis.__jarvis.alreadyApplied()); };
+  assert.equal(await said('<h1>Process Engineer</h1><p>If you have already applied for this position, please do not reapply.</p><button>Apply</button>'), null);
+  assert.equal(await said('<p>Candidates who have already applied to this role will be contacted.</p><button>Apply</button>'), null);
+  assert.equal(await said('<p>Please note: whether or not you\'ve already applied, sign in to continue.</p>'), null);
+  assert.match(String(await said('<h1>Process Engineer</h1><p>You have already applied for this position.</p><a>View application</a>')), /already applied/i, 'his own status still counts');
+  // A conditional sentence first does not hide a real statement after it.
+  assert.match(String(await said('<p>If you have already applied, do not reapply.</p><p>You have already applied for this job.</p>')), /already applied/i);
+});
+
 test('WORKDAY MY EXPERIENCE SECTIONS ARE READ BY HEADING, AND ENTRY FIELDS STAY OUT OF THE FIELD LIST', async () => {
   await page.setContent(`
     <h2>My Experience</h2>
@@ -1375,6 +1450,26 @@ test('WORKDAY MY EXPERIENCE SECTIONS ARE READ BY HEADING, AND ENTRY FIELDS STAY 
   assert.equal(edu.filled, true, 'an entry with a value is already his');
   const fields = await page.evaluate(() => globalThis.__jarvis.discover().map((f) => f.label));
   assert.deepEqual(fields, ['Phone'], 'Job Title, School and Field of Study belong to their entries, not the generic list');
+});
+
+test('F-889: Oracle sections are read by their Add\'s number and report their saved tiles, the Add hidden or not (TI)', async () => {
+  await page.setContent(`
+    <div class="apply-flow-block"><h3>Education</h3><div class="profile-item-container">
+      <div class="profile-item-list"><article data-qa="profileItem106">Mechanical Engineering</article><article data-qa="profileItem106">Unnamed Major</article></div>
+      <div class="profile-add-item" style="display:none"><button type="button" data-qa="add106">Add Education</button></div>
+      <div class="profile-item-footer"><button class="save-btn" data-qa="profileItemInlineSaveButton">Add Education</button></div></div></div>
+    <div class="apply-flow-block"><h3>Experience</h3><div class="profile-item-container">
+      <div class="profile-item-list"></div>
+      <div class="profile-add-item"><button type="button" data-qa="add129">Add Experience</button></div></div></div>
+    <label for="p">Phone</label><input id="p">`);
+  await page.addScriptTag({ content: DISCOVER });
+  const sections = await page.evaluate(() => globalThis.__jarvis.experienceSections());
+  const edu = sections.find((s) => s.kind === 'education');
+  const work = sections.find((s) => s.kind === 'work');
+  assert.equal(edu.saved, 2, JSON.stringify(sections));
+  assert.equal(edu.filled, false, 'the planner still sends his entries; content.js skips the ones a tile shows');
+  assert.equal(work.saved, 0);
+  assert.equal(sections.filter((s) => s.kind === 'education').length, 1, 'the inline save is not read as a second section');
 });
 
 test('"THANK YOU FOR APPLYING" IS RECOGNISED, AND ONLY WITHOUT A FORM', async () => {
@@ -1414,6 +1509,46 @@ test('"THANK YOU FOR APPLYING" IS RECOGNISED, AND ONLY WITHOUT A FORM', async ()
   await page.addScriptTag({ content: DISCOVER });
   assert.equal(await page.evaluate(() => globalThis.__jarvis.applicationDone()), null, 'a dashboard\'s status column is not this application\'s confirmation');
   await page.unroute('https://careers-acme.icims.com/**');
+});
+
+// R3 (2026-11-07): his Warren CAT application on UKG was logged "sent" from a
+// confirmation-shaped URL; he had not sent it (his answer, relayed 12:06).
+test('R3: UKG — its own Submit button keeps a page unsent, and its URL needs the page to agree', async () => {
+  const at = async (url, body) => {
+    await page.route(url, (route) => route.fulfill({ contentType: 'text/html', body }));
+    await page.goto(url);
+    await page.addScriptTag({ content: ATSJS });
+    await page.addScriptTag({ content: DISCOVER });
+    const r = await page.evaluate(() => globalThis.__jarvis.applicationDone());
+    await page.unroute(url);
+    return r;
+  };
+  const ukg = 'https://recruiting2.ultipro.com/WAR1007/JobBoard/c797a398/OpportunityApply/Confirmation';
+  // A step with UKG's custom-element Submit: never sent, whatever the URL says.
+  assert.equal(await at(ukg, '<h2>Review and submit</h2><ukg-button data-automation="btn-submit" style="display:inline-block;width:120px;height:30px">Submit</ukg-button>'), null,
+    'a <ukg-button> Submit on screen means not sent');
+  // …drawn by its text alone (display: contents, no box of its own): still on screen (review).
+  assert.equal(await at(ukg, '<h2>Review and submit</h2><ukg-button data-automation="btn-submit" style="display:contents">Submit</ukg-button>'), null,
+    'a display:contents <ukg-button> Submit means not sent');
+  // The URL alone: not proof on UKG — and the miss is recorded as the path and why, no page text.
+  assert.equal(await at(ukg, '<h2>Review</h2><p>Check your details, Warren.</p>'), null, 'a UKG confirmation-shaped URL without the page saying so');
+  const miss = await page.evaluate(() => globalThis.__jarvisDoneMiss);
+  assert.equal(miss?.path, '/WAR1007/JobBoard/c797a398/OpportunityApply/Confirmation');
+  assert.match(miss?.why || '', /^ukg: confirmation-shaped URL/);
+  assert.doesNotMatch(JSON.stringify(miss), /Warren|Check your details/, 'no page text in the record');
+  // The URL and the page agree: sent.
+  assert.match(await at(ukg, '<h1>Thank you for applying!</h1><p>We will review your application.</p>') || '', /confirmation page .*thank you for applying/i);
+  // …with UKG's own buttons still in the markup but hidden: sent (review).
+  assert.match(await at(ukg, '<h1>Thank you for applying!</h1><ukg-button data-automation="btn-submit" style="display:none">Submit</ukg-button><ukg-button data-automation="btn-next" hidden>Next</ukg-button>') || '', /confirmation page .*thank you for applying/i,
+    'hidden UKG buttons on the real confirmation do not block it');
+  // Another platform keeps the URL rule as it was.
+  assert.match(await at('https://boards.greenhouse.io/acme/jobs/123/confirmation', '<div>Done.</div>') || '', /^confirmation page/,
+    'Greenhouse\'s /confirmation URL is still enough');
+  // PLATFORMS THAT DID NOT OPT IN: a visible button[type=submit] (a header search) never blocks their confirmation (review).
+  assert.match(await at('https://boards.greenhouse.io/acme/jobs/123/confirmation', '<form><button type="submit">Search jobs</button></form><h1>Thank you for applying</h1>') || '', /^confirmation page/,
+    'Greenhouse confirmation with a search button');
+  assert.match(await at('https://careers-acme.icims.com/jobs/123/thank-you', '<form><button type="submit">Search</button></form><h1>Thank you for applying!</h1>') || '', /^confirmation page/,
+    'iCIMS confirmation with its header search (selector button[type="submit"]) still counts');
 });
 
 test('A VERIFICATION-CODE PAGE IS A WALL', async () => {
@@ -1827,6 +1962,19 @@ test('A WORKDAY REQUISITION LIKE "26-798" IS A REQUISITION, on the posting and i
   assert.equal(t[2], null, 'two digits alone are still not a requisition');
 });
 
+test('ORACLE ON THE EMPLOYER\'S OWN DOMAIN carries its requisition too (Texas Instruments, F-793)', async () => {
+  const t = await page.evaluate((urls) => urls.map((u) => globalThis.__jarvisAts.reqToken(u)), [
+    'https://careers.ti.com/en/sites/CX/job/25017157/apply/section/1',
+    'https://careers.ti.com/en/sites/CX_1/job/25017157',
+    'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/25017157',
+    'https://www.example.org/sites/default/files/job/12',
+  ]);
+  assert.equal(t[0], 'oracle:25017157', 'the form names the requisition');
+  assert.equal(t[1], t[0], 'the stored posting, on another site name, is the same one');
+  assert.equal(t[2], t[0], 'and the oraclecloud host still reads the same way');
+  assert.equal(t[3], null, 'a site path with a short number is not an Oracle posting');
+});
+
 test('SMARTRECRUITERS NAMES ONE JOB TWO WAYS, and the two never read as two jobs (F-338)', async () => {
   const t = await page.evaluate((urls) => urls.map((u) => globalThis.__jarvisAts.reqToken(u)), [
     'https://jobs.smartrecruiters.com/BectonDickinson2/743999797968244-advanced-manufacturing-engineer-i',
@@ -2219,6 +2367,22 @@ test('A LONG OPTION IN A GROUP IS NOT THE QUESTION (Capstan Medical Lever, 2026-
   assert.match(fields[1].label, /privacy notice/, 'a lone box still carries its own sentence');
 });
 
+test('F-840: ADP\'s accommodation notice and SmartRecruiters\' required-fields line are not errors; a real message beside them still is', async () => {
+  await page.setContent(`<form>
+      <div role="alert" style="color:rgb(38,35,33)">If you are unable to complete this application due to a disability, contact this employer to ask for an accommodation or an alternative application process.</div>
+      <div role="alert" style="color:rgb(56,60,56)">Fields marked with * are required.<label>I currently work here</label><button type="button">Cancel</button><button type="button">Save</button></div>
+      <div role="alert">Correct the information in highlighted fields. If you are unable to complete this application due to a disability, contact this employer.</div>
+      <div role="alert">Fields marked with * are required. Please enter a valid email address.</div>
+    </form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const errs = await page.evaluate(() => globalThis.__jarvis.errorsOnPage());
+  const texts = errs.map((e) => e.text);
+  assert.ok(!texts.some((t) => /^If you are unable to complete/.test(t)), `the notice alone is not an error: ${JSON.stringify(texts)}`);
+  assert.ok(!texts.some((t) => /^Fields marked with \* are required\.I currently/.test(t)), 'the dialog instruction is not an error');
+  assert.ok(texts.some((t) => /^Correct the information in highlighted fields/.test(t)), 'a real refusal sharing a banner with the notice still counts');
+  assert.ok(texts.some((t) => /valid email address/.test(t)), 'a real message after the instruction still counts');
+});
+
 test('WHAT THE PAGE SAYS IN RED IS READ, WITH ITS FIELD (his ask, 2026-10-02)', async () => {
   await page.setContent(`<style>.err{color:#d32f2f}.brand{color:rgb(200,16,46)}.req{color:red}</style>
     <h2 class="brand">Spirit AeroSystems Careers</h2>
@@ -2368,4 +2532,176 @@ test('"COMPLETE YOUR APPLICATION" ON A STARTED POSTING IS ITS APPLY (ADP Pending
   await page.setContent(`<h1>Mechanical Engineer I/II – Thermal Systems</h1><p>Pending Submission</p><button type="button">Back</button><button type="button">Complete Your Application</button>`);
   await page.addScriptTag({ content: DISCOVER });
   assert.equal(await page.evaluate(() => globalThis.__jarvis.buttonName(globalThis.__jarvis.applyControl())), 'Complete Your Application');
+});
+
+test('ADP\'S <sdf-select-simple> IS A QUESTION: shadow trigger, label from the block above (Therm-X, 2026-10-17)', async () => {
+  await page.setContent(`<div class="qMainDiv">
+      <div>4. How many years have you worked as a mechanical design engineer (internships count at half)?*</div>
+      <div class="itemPadLeft"><div id="drop_down_type_3"><sdf-select-simple id="question_3" placeholder="Choose an option"></sdf-select-simple></div></div>
+    </div>
+    <script>
+      customElements.define('sdf-select-simple', class extends HTMLElement {
+        connectedCallback() {
+          const r = this.attachShadow({ mode: 'open' });
+          r.innerHTML = '<div class="combo"><div role="button" class="trigger-button" aria-expanded="false" tabindex="0"><span class="selected-label-placeholder">Choose an option</span></div></div>';
+        }
+      });
+    </script>
+    <input class="filter sc-sdf-select-simple" role="combobox" aria-label="Enter text to filter your options">`);
+  await page.addScriptTag({ content: DISCOVER });
+  const fields = await page.evaluate(() => globalThis.__jarvis.discover().map((f) => ({ label: f.label, type: f.type, kind: f.promptKind, el: f.elements[0]?.className })));
+  assert.deepEqual(fields.map((f) => f.label), ['How many years have you worked as a mechanical design engineer (internships count at half)?'], JSON.stringify(fields));
+  assert.equal(fields[0].el, 'trigger-button', 'the shadow trigger is the control');
+});
+
+test('A STYLED CHECKBOX PARKED OFFSCREEN WITH A LABEL ON SCREEN IS A QUESTION; A TRAP IS NOT (ADP e-sign, 2026-10-17)', async () => {
+  await page.setContent(`<form>
+      <div class="vdl-checkbox"><input id="cb1" type="checkbox" name="self_att_agree_chk" tabindex="0" style="position:absolute;left:-9999px;opacity:0"><label for="cb1">Yes, I agree to sign electronically.</label></div>
+      <input name="hp_7f2b" tabindex="-1" aria-hidden="true" style="position:absolute;left:-9999px">
+      <input id="trap" type="checkbox" tabindex="-1" style="position:absolute;left:-9999px">
+    </form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const labels = await page.evaluate(() => globalThis.__jarvis.discover().map((f) => f.label));
+  assert.deepEqual(labels, ['Yes, I agree to sign electronically.'], JSON.stringify(labels));
+});
+
+test('F-873: a plain box reports what it already holds; an empty one and a password do not', async () => {
+  await page.setContent(`
+    <form>
+      <label for="co">Company Name</label><input id="co" value="Lakeside University – Makerspace Manufacturing Tech">
+      <label for="ti">Job Title</label><input id="ti">
+      <label for="pw">Password</label><input id="pw" type="password" value="secret">
+    </form>`);
+  await page.addScriptTag({ content: DISCOVER });
+  const got = await page.evaluate(() => globalThis.__jarvis.discover().map((f) => [f.label, f.held ?? null]));
+  const by = Object.fromEntries(got);
+  assert.equal(by['Company Name'], 'Lakeside University – Makerspace Manufacturing Tech');
+  assert.equal(by['Job Title'], null);
+  assert.ok(!Object.values(by).includes('secret'), `a password is never read: ${JSON.stringify(got)}`);
+});
+
+test('F-884: a chat widget (Paradox <apply-widget>) is not the page — its reply box and video upload are no fields', async () => {
+  const fields = await discoverIn(`
+    <h1>Manufacturing Engineer</h1>
+    <form><label for="f">First Name</label><input id="f"></form>
+    <apply-widget id="eli"></apply-widget>
+    <div id="intercom-container"></div>
+    <script>
+      document.getElementById('eli').attachShadow({ mode: 'open' }).innerHTML = '<textarea placeholder="Write a reply..."></textarea><label>Upload Video<input type="file" accept="video/*"></label>';
+      document.getElementById('intercom-container').attachShadow({ mode: 'open' }).innerHTML = '<input placeholder="Type a message">';
+    <\/script>`);
+  assert.deepEqual(fields.map((f) => f.label), ['First Name'], JSON.stringify(fields.map((f) => [f.label, f.type])));
+});
+
+// ── R1 (2026-11-07): the posting's JSON-LD, chosen and checked ──────────
+
+const ld = (o) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', description: 'x', ...o })}</script>`;
+
+test('R1: SEVERAL JobPostings — the one with this page\'s requisition is the job', async () => {
+  const got = await readIn(`${ld({ title: 'Old Job', url: 'https://acme.wd5.myworkdayjobs.com/en-US/Careers/job/Boise/Old-Job_R111111' })}
+    ${ld({ title: 'New Job', url: 'https://acme.wd5.myworkdayjobs.com/en-US/Careers/job/Boise/New-Job_R222222' })}
+    <a data-automation-id="adventureButton" role="button">Apply</a>`,
+  { ats: true, url: 'https://acme.wd5.myworkdayjobs.com/en-US/Careers/job/Boise/New-Job_R222222' });
+  assert.equal(got?.title, 'New Job');
+  assert.equal(got?.source, 'jsonld');
+});
+
+test('R1: several JobPostings and no requisition — the one titled like the page\'s own heading', async () => {
+  const got = await readIn(`${ld({ title: 'Process Engineer' })}${ld({ title: 'Test Engineer' })}
+    <h1>Test Engineer</h1><button>Apply</button>`);
+  assert.equal(got?.title, 'Test Engineer');
+  assert.equal(got?.source, 'jsonld');
+});
+
+test('R1: several JobPostings the page cannot tell apart — still none from the markup', async () => {
+  const got = await readIn(`${ld({ title: 'Test Engineer', hiringOrganization: 'A' })}${ld({ title: 'Test Engineer', hiringOrganization: 'B' })}
+    <h1>Test Engineer</h1><button>Apply</button>`);
+  assert.ok(!got || got.source !== 'jsonld', JSON.stringify(got));
+});
+
+test('R1: THE SAME BLOB AT ANOTHER ADDRESS is the previous job (a single-page site that kept it); its apply page is not', async () => {
+  const blob = `${ld({ title: 'Widget Engineer', hiringOrganization: 'Acme' })}<h1>Widget Engineer</h1><button>Apply</button>`;
+  const first = await readIn(blob, { url: 'https://careers.acme-widgets.test/jobs?job=17&utm_source=x' });
+  assert.equal(first?.source, 'jsonld', 'read first here');
+  const again = await readIn(blob, { url: 'https://careers.acme-widgets.test/jobs?job=17' });
+  assert.equal(again?.source, 'jsonld', 'the same page without its tracking parameter is the same page');
+  const apply = await readIn(blob.replace('<button>Apply</button>', '<a href="#">Apply</a>'), { url: 'https://careers.acme-widgets.test/jobs?job=17' });
+  assert.equal(apply?.source, 'jsonld');
+  const otherLanguage = await readIn(blob, { url: 'https://careers.acme-widgets.test/en-US/jobs?job=17' });
+  assert.equal(otherLanguage?.source, 'jsonld', 'the same page under a locale segment is the same page (review)');
+  const moved = await readIn(blob, { url: 'https://careers.acme-widgets.test/jobs?job=18' });
+  assert.ok(!moved || moved.source !== 'jsonld', `the markup first read at job 17 is not job 18's: ${JSON.stringify(moved)}`);
+});
+
+test('R1: what the posting says beyond its title — pay, remote, where applicants may live, closing date, the employer\'s site', async () => {
+  const got = await readIn(`${ld({
+    title: 'Controls Engineer', hiringOrganization: { '@type': 'Organization', name: 'Acme', sameAs: 'https://www.acme.com' },
+    employmentType: ['FULL_TIME'], jobLocationType: 'TELECOMMUTE',
+    applicantLocationRequirements: [{ '@type': 'Country', name: 'United States' }],
+    baseSalary: { '@type': 'MonetaryAmount', currency: 'USD', value: { '@type': 'QuantitativeValue', minValue: 85000, maxValue: 105000, unitText: 'YEAR' } },
+    validThrough: '2026-12-31T23:59:59Z',
+  })}<h1>Controls Engineer</h1><button>Apply</button>`);
+  assert.equal(got.employmentType, 'FULL_TIME');
+  assert.deepEqual(got.salary, { min: 85000, max: 105000, currency: 'USD', unit: 'YEAR' });
+  assert.equal(got.remote, true);
+  assert.deepEqual(got.applicantLocations, ['United States']);
+  assert.equal(got.validThrough, '2026-12-31T23:59:59.000Z');
+  assert.equal(got.employerSite, 'https://www.acme.com');
+  const bare = await readIn(`${ld({ title: 'Controls Engineer' })}<h1>Controls Engineer</h1><button>Apply</button>`);
+  for (const k of ['salary', 'remote', 'applicantLocations', 'validThrough', 'employerSite', 'employmentType']) assert.ok(!(k in bare), `${k} absent when the markup says nothing`);
+});
+
+test('R1: THE SITE\'S NAME AS AN EMPLOYER loses only its careers words', async () => {
+  const company = async (site) => (await readIn(`<meta property="og:site_name" content="${site}"><h1>Mechanical Engineer</h1><button>Apply</button>`))?.company;
+  assert.equal(await company('Acme Careers'), 'Acme');
+  assert.equal(await company('Careers at Acme Robotics'), 'Acme Robotics');
+  assert.equal(await company('Careers | Acme'), 'Acme');
+  assert.equal(await company('Acme Careers Home'), 'Acme');
+  assert.equal(await company('Acme Jobs | Home'), 'Acme');
+  assert.equal(await company('Smart Home'), 'Smart Home', '"Home" goes only with a careers word (review)');
+  assert.equal(await company('Jobs'), '', 'nothing but the careers word: no name');
+  assert.equal(await company('Job Corps'), 'Job Corps', 'a name that merely starts with a careers word is left alone');
+});
+
+// ── R1 item 5: employer career sites, as read off their live public pages (2026-11-07) ──
+
+test('R1: TESLA — the job is the <h1> in #job-details-container, not the logo or the "Build your Career at Tesla" hero', async () => {
+  const got = await readIn(`
+    <header id="tds-site-header-wrapper"><div id="tds-global-menu"><header id="tds-site-header"><h1 class="tds-site-logo">Tesla homepage Careers Skip to main content</h1></header></div></header>
+    <section class="legacy-hero careers-width-constraint"><h1>Build your Career at Tesla</h1></section>
+    <div id="app"><div id="job-details-container" class="careers-width-constraint"><div class="tds-content_container tds-content_container--large">
+      <h1 class="tds-text--h1-alt">Engineering Technician, Low Voltage Test</h1></div>
+      <a href="/careers/search/job/apply/284928">Apply</a></div></div>
+    <meta property="og:site_name" content="Build your Career at Tesla">`, { url: 'https://www.tesla.com/careers/search/job/284928' });
+  assert.equal(got?.title, 'Engineering Technician, Low Voltage Test');
+  assert.equal(got?.company, 'Tesla', 'the site name loses "Build your Career at"');
+});
+
+test('R1: GOOGLE — an <h1> that says "Job Details" is not the title; og:title is', async () => {
+  const got = await readIn(`
+    <c-wiz class="zQTmif SSPGKf"><div class="T4LgNb"><div class="RRYLgd"><div><h1 class="g9adte">Job Details</h1></div></div></div></c-wiz>
+    <span><div class="DkhPwc"><div class="sPeqm"><h2 class="p1N2lc">Silicon Engineer, PhD, University Graduate, 2027 Start</h2></div></div></span>
+    <a href="#apply">Apply</a>
+    <meta property="og:title" content="Silicon Engineer, PhD, University Graduate, 2027 Start">`, { url: 'https://www.google.com/about/careers/applications/jobs/results/127950560631366342' });
+  assert.equal(got?.title, 'Silicon Engineer, PhD, University Graduate, 2027 Start');
+});
+
+test('R1: AMAZON and APPLE — their own title spots; "Amazon.jobs" names Amazon', async () => {
+  const amazon = await readIn(`
+    <div class="container"><div class="row"><div class="info-wrapper col-12 col-md-7"><div class="info"><h1 class="title">Senior Financial Analyst, Engineering Capex Analytics &amp; Planning</h1></div></div>
+    <div class="apply-wrapper col-12 col-md-5"><div class="apply"><a id="apply-button" class="btn btn-primary" href="#">Apply now</a></div></div></div></div>
+    <meta property="og:site_name" content="Amazon.jobs">`, { url: 'https://www.amazon.jobs/en/jobs/10371179/senior-financial-analyst-engineering-capex-analytics-planning' });
+  assert.equal(amazon?.title, 'Senior Financial Analyst, Engineering Capex Analytics & Planning');
+  assert.equal(amazon?.company, 'Amazon');
+  const apple = await readIn(`
+    <div><div id="jobdetails-wrapper"><div><main class="text-center mt-30"><h1 id="jobdetails-postingtitle" class="t-headline fw-medium">Industrial Designer</h1></main></div></div></div>
+    <a href="#">Submit Resume</a><button>Apply</button>`, { url: 'https://jobs.apple.com/en-us/details/200007574-0836/industrial-designer' });
+  assert.equal(apple?.title, 'Industrial Designer');
+});
+
+test('R1: the new not-a-title words never swallow a real title', async () => {
+  const got = await readIn('<h1>Work at Height Safety Technician</h1><button>Apply</button>');
+  assert.equal(got?.title, 'Work at Height Safety Technician');
+  const careersLead = await readIn('<h1>Careers at Acme</h1><h2>x</h2><meta property="og:title" content="Robotics Engineer"><button>Apply</button>');
+  assert.equal(careersLead?.title, 'Robotics Engineer', '"Careers at Acme" is the site, not the job');
 });

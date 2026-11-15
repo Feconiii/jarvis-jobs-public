@@ -68,3 +68,33 @@ test('VIAVI (2026-09-26): authorization that excludes practical training is No f
   const plain = planForm([{ label: 'Are you legally authorized to work in the United States?', type: 'select', options: ['Select', 'Yes', 'No'] }], { ...HIM, answers: { ...HIM.answers } });
   assert.equal(plain.actions[0].value, 'Yes');
 });
+
+test('NOW IS NOT THE FUTURE (2026-10-23 rule, unblocked 2026-10-26): present-only questions are not contradictions', () => {
+  // Zipline's "…without sponsorship now?" Yes and Terex's "currently require
+  // sponsorship?" No were both left for him by this check.
+  assert.equal(contradicts('Are you authorized to work for Zipline in the United States without sponsorship now?', 'Yes', HIM), null);
+  assert.equal(contradicts('Do you currently require sponsorship to work in the country for which you are applying?', 'No', HIM), null);
+  // The future still holds him to the profile.
+  assert.ok(contradicts('Are you authorized to work in the United States without sponsorship in the future?', 'Yes', HIM));
+  assert.ok(contradicts('Will you now or in the future require visa sponsorship?', 'No', HIM));
+  assert.ok(contradicts('Do you require sponsorship?', 'No', HIM));
+  const plan = planForm([{ label: 'Do you currently require sponsorship to work in the country for which you are applying?', type: 'select', options: ['Select One', 'Yes', 'No'] }], { ...HIM, education: {} });
+  assert.equal(plan.actions[0].action, 'select');
+  assert.equal(plan.actions[0].value, 'No');
+});
+
+test('the check reads "now" with the SAME rule as the answer writer (F-953): "currently, or do you anticipate" is the future', () => {
+  // F-951 widened the writer's list (anticipate, expect, will, remain...) but
+  // this check kept its own short copy, so it wanted "No" while the writer
+  // rightly said "Yes", and left the question for him.
+  for (const q of ['Do you currently, or do you anticipate, requiring sponsorship?',
+    'Do you currently require sponsorship or expect to in order to remain employed?',
+    'Do you currently require visa sponsorship, or will you need it to extend your work authorization?']) {
+    assert.equal(contradicts(q, 'Yes', HIM), null, `his true Yes passes: ${q}`);
+    assert.ok(contradicts(q, 'No', HIM), `a No is caught: ${q}`);
+  }
+  const q = 'Do you currently, or do you anticipate, requiring sponsorship?';
+  const plan = planForm([{ label: q, type: 'select', options: ['Select One', 'Yes', 'No'] }], { ...HIM, education: {} });
+  assert.equal(plan.actions[0].action, 'select', JSON.stringify(plan.actions[0]));
+  assert.equal(plan.actions[0].value, 'Yes');
+});

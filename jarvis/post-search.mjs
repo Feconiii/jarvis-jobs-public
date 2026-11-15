@@ -28,12 +28,37 @@ import { guardArgs } from './cli.mjs';
 const LEVEL = /\b(?:I{1,3}|IV|[1-4]|Sr\.?|Senior|Jr\.?|Junior|Staff|Principal|Lead|Entry[- ]Level|New Grad(?:uate)?|Early Career)\b/gi;
 const tidy = (s) => String(s || '').replace(/\s+/g, ' ').replace(/\s+([,)])/g, '$1').replace(/^[\s,–—-]+|[\s,–—-]+$/g, '').trim();
 
+// Words about the OPENING, not the work (2026-10-24): GlobalFoundries' "Fab
+// Automation Engineer 2027 New College Graduate Essex Junction Vermont United
+// States Of America" was searched as one quoted phrase, which no post holds.
+const NOISE = /\b(?:20\d\d|New (?:College )?Grad(?:uate)?s?|NCG|College Graduate|Graduate|Early Careers?|Bachelor'?s?(?: S)?|Bachelors|Masters?|Bs Or Ms|Ms Or Bs|BS\/MS|United States(?: Of America)?|USA|Remote|Hybrid|Onsite|On-site)\b/gi;
+const STATES = new Set('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split(' '));
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The posting's location words (city, state) taken out of its title. */
+function dropPlace(t, location) {
+  let out = t;
+  for (const part of String(location || '').split(/[,;/]|\s+-\s+/).map((s) => s.trim()).filter((s) => s.length >= 3 && !/^united states/i.test(s))) {
+    out = out.replace(new RegExp(`\\b${esc(part)}\\b`, 'gi'), ' ');
+  }
+  // A trailing state code ("… Engineer NY", "… Austin Tx").
+  return out.replace(/\s([A-Za-z]{2})\s*$/, (m, st) => (STATES.has(st.toUpperCase()) ? ' ' : m));
+}
+
 /** "Robotics Systems Engineer I, Tech Deployment" → { role, team, acronyms }. */
-export function titleParts(title) {
-  const t = String(title || '').replace(/\(\s*20\d\d\s*\)/g, ' ');
-  const at = t.indexOf(',');
+export function titleParts(title, location = '') {
+  let t = String(title || '').replace(/\(\s*20\d\d\s*\)/g, ' ');
+  // Parentheses: an acronym stays ("(RDPI)"), anything else is a place or a
+  // note ("(Miami, FL)", "(Wayne (EPCO), NJ, US)") and goes, innermost first.
+  for (let i = 0; i < 4 && /\([^()]*\)/.test(t); i++) t = t.replace(/\(([^()]*)\)/g, (m, inner) => (/^[A-Z][A-Z0-9&]{1,7}$/.test(inner.trim()) ? `⟨${inner.trim()}⟩` : ' '));
+  t = t.replace(/⟨/g, '(').replace(/⟩/g, ')');
+  t = dropPlace(t.replace(NOISE, ' '), location);
+  // The team follows the first comma, or the first spaced dash or bar
+  // ("Mechanical Engineer - Optical Systems").
+  const seps = [t.indexOf(','), t.search(/\s[-–—|]\s/)].filter((i) => i >= 0);
+  const at = seps.length ? Math.min(...seps) : -1;
   const role = tidy((at >= 0 ? t.slice(0, at) : t).replace(LEVEL, ' '));
-  let team = at >= 0 ? t.slice(at + 1) : '';
+  let team = at >= 0 ? t.slice(at + 1).replace(/^\s*[-–—|]\s*/, '') : '';
   const acronyms = [...team.matchAll(/\(([A-Z][A-Z0-9&]{1,7})\)/g)].map((m) => m[1]);
   team = tidy(team.replace(/\([^)]*\)/g, ' ').replace(LEVEL, ' ').replace(/^[A-Z]{2,5}\s*[-–—]\s*/, ''));
   // A bare division ("AWS") is the employer, not a team: search the role.
@@ -41,8 +66,10 @@ export function titleParts(title) {
   // A long name is never quoted whole in a post; its last two words are
   // ("Robotics Delivery & Packaging Innovations Technology Deployment" →
   // "Technology Deployment").
-  const words = team.split(' ');
-  const short = words.length > 4 ? words.slice(-2).join(' ') : team;
+  // "Robotics, Real-World Test Lab": the last part names the team.
+  const named = team.includes(',') ? tidy(team.split(',').pop()) : team;
+  const words = named.split(' ');
+  const short = words.length > 4 ? words.slice(-2).join(' ') : named;
   return { role, team, short, acronyms };
 }
 
@@ -50,7 +77,7 @@ export function titleParts(title) {
 export function clusters(jobs) {
   const out = new Map();
   for (const j of jobs) {
-    const p = titleParts(j.title);
+    const p = titleParts(j.title, j.location);
     const key = (p.team || p.role).toLowerCase();
     const c = out.get(key) || { key, team: p.team, short: p.short, role: p.role, acronyms: new Set(), jobs: [] };
     p.acronyms.forEach((a) => c.acronyms.add(a));
@@ -67,11 +94,26 @@ export function searches(company, c) {
   const team = c.short || c.team;
   if (team) {
     q.push(`site:linkedin.com/posts "${company}" "${team}" hiring`);
-    q.push(`site:linkedin.com/posts "${team}" "my team"`);
+    // A one-word team ("Robot") is no name without the company beside it.
+    q.push(team.includes(' ') ? `site:linkedin.com/posts "${team}" "my team"` : `site:linkedin.com/posts "${company}" "${team}" "my team"`);
   }
   q.push(`site:linkedin.com/posts "${company}" "${c.role}" hiring`);
-  q.push(`site:linkedin.com/posts "${c.role}" "my team"`);
+  // Never "<role>" "my team" alone: every company has a Mechanical Engineer.
+  q.push(`site:linkedin.com/posts "${company}" "${c.role}" ("my team" OR "join us")`);
   return [...new Set(q)].slice(0, 3);
+}
+
+/**
+ * Once per company, not per team: a new hire announcing the team they just
+ * joined. Chris Moreno's OpenAI post ("I recently joined OpenAI Robotics …
+ * we should talk. Open roles below.") named seven of the roles he applied to
+ * and no team search found it (F-783).
+ */
+export function companySearches(company) {
+  return [
+    `site:linkedin.com/posts "joined ${company}" "open roles"`,
+    `site:linkedin.com/posts "joined ${company}" hiring`,
+  ];
 }
 
 export const googleUrl = (q) => `https://www.google.com/search?hl=en&num=20&tbs=qdr:y&q=${encodeURIComponent(q)}`;
@@ -134,7 +176,7 @@ async function main() {
       .flatMap((status) => query({ companyLike: company, status }, { limit: 200 }).rows).filter((j) => !j.goneAt);
     if (!rows.length) { console.log(`No open applications at ${company}.`); return; }
     const cs = clusters(rows);
-    const plan = cs.map((c) => ({ key: c.key, queries: searches(company, c) }));
+    const plan = [{ key: '_joined', queries: companySearches(company) }, ...cs.map((c) => ({ key: c.key, queries: searches(company, c) }))];
     const { connect } = await import('./opera-fill.mjs');
     const cdp = await connect().catch((e) => { console.log(e.message); return null; });
     if (!cdp) { process.exitCode = 1; return; }
@@ -143,7 +185,7 @@ async function main() {
     const { found, stopped } = await runSearches(cdp, plan, { pauseMs: pause });
     cdp.close();
     const { spawnSync } = await import('node:child_process');
-    for (const c of cs) {
+    for (const c of [{ key: '_joined', role: `new hires announcing ${company} teams`, jobs: [rows[0]] }, ...cs]) {
       const slugs = found[c.key] || [];
       console.log(`\n## ${c.team || c.role}: ${slugs.length} post${slugs.length === 1 ? '' : 's'}`);
       if (!slugs.length) continue;
@@ -161,6 +203,8 @@ async function main() {
     .flatMap((status) => query({ companyLike: company, status }, { limit: 200 }).rows)
     .filter((j) => !j.goneAt);
   if (!rows.length) { console.log(`No open applications at ${company}.`); return; }
+  console.log(`\n## Anyone who just joined ${company} and is hiring (once for the company)`);
+  for (const q of companySearches(company)) console.log(`   search: ${q}\n     google: ${googleUrl(q)}`);
   for (const c of clusters(rows)) {
     console.log(`\n## ${c.team || c.role}  (${c.jobs.length} application${c.jobs.length > 1 ? 's' : ''})`);
     for (const j of c.jobs) console.log(`   ${j.id}  ${j.title} | ${j.location || ''}`);

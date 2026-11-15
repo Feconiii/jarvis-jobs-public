@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { vendorOf, faultStatuses } from './ats-report.mjs';
+import { vendorOf, faultStatuses, applicationRates } from './ats-report.mjs';
 
 test('postings are classified by the page they are applied on', () => {
   const cases = [
@@ -37,6 +37,25 @@ test('a fault is open or closed by its own heading, the last one with that id wi
   assert.equal(s.get('F-1').open, true);
   assert.equal(s.get('F-2').open, false);
   assert.equal(s.get('F-3').open, false, 'the later heading supersedes');
+});
+
+test('F-841: rates per application, not per run — one upload and a clean last run make an application whole', () => {
+  const r = applicationRates([
+    // SmartRecruiters-shaped: the press uploads on step 1; the follow-along runs fill later steps.
+    { jobId: 'a', at: '1', filled: 20, uploaded: true, left: [], stoppedBecause: 'the form stayed on this step — something required is still empty' },
+    { jobId: 'a', at: '2', filled: 10, uploaded: false, left: [], stoppedBecause: 'reached the last step before Submit' },
+    // ADP-shaped: sign-in retries, then the form.
+    { jobId: 'b', at: '1', filled: 0, stoppedBecause: 'pressed Sign in with Google — the form fills by itself once you are back' },
+    { jobId: 'b', at: '2', filled: 0, stoppedBecause: 'pressed Sign in with Google — the form fills by itself once you are back' },
+    { jobId: 'b', at: '3', filled: 8, uploaded: true, left: ['step 1: years'], stoppedBecause: 'the form would not move on' },
+    // Never past the sign-in.
+    { jobId: 'c', at: '1', filled: 0, stoppedBecause: 'sign in here — the form fills by itself once you are in' },
+  ]);
+  assert.equal(r.applications, 3);
+  assert.equal(r.seen, 2, 'two applications met the form');
+  assert.equal(r.uploadPct, 100, 'both had the resume, though only 2 of 5 form runs attached it');
+  assert.equal(r.cleanPct, 50, 'a ends clean at Submit; b still has a question left');
+  assert.equal(r.walledPct, 33, 'only c never got past the sign-in');
 });
 
 test('every fault the registry cites exists in FAULTS.md', () => {
