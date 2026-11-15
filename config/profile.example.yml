@@ -150,3 +150,30 @@ cover_letter:
 #     cross_role_bucket: "all_EM_roles"
 #     applied_to: ["Senior Software Engineer"]
 #     last_apply_date: "2026-01-01"
+
+# ── Setup interview (jarvis/setup.mjs writes these) ────────────────────────
+
+# Your assistant and its plan. The plan sets `usage` (light | standard), which
+# sizes the daily search, and for Claude the writers' model ladder
+# (jarvis/targeting.mjs AI_PLANS and USAGE).
+targeting:
+  preset: "hardware-engineering"   # or finance-data
+  llm: "claude"                     # or codex
+  plan: "claude-pro"                # claude-pro | claude-max | claude-api | chatgpt-plus | chatgpt-pro | chatgpt-business | other
+  usage: "light"
+  # models: "sonnet,haiku"          # Claude only; never Opus
+
+# The job you want, past the title.
+goals:
+  seniority: "new_grad"             # internship | new_grad | entry | experienced
+  work_mode: "any"                  # onsite | hybrid | remote | any
+  start_date: "June 2027"
+  target_companies: []
+  avoid_companies: []
+  dealbreakers: ""
+
+# How you want to work. The assistant reads this at the start of a session.
+working_style:
+  check_in: "daily"                 # daily | few_times_a_week | weekly
+  applications_per_week: null
+  help_level: "fill_and_write"      # fill_only: you write every open-ended answer

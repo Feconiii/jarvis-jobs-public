@@ -878,7 +878,9 @@ export async function tailorWithClaude({ spec, job, jd, familyLabel, pool = null
  * 2026-09-16, his rule: the resume, answer, letter and research writers run on
  * Sonnet or something cheaper — never Opus. A spent Sonnet falls to Haiku.
  */
-export const CLI_MODELS = String(process.env.JARVIS_CLI_MODEL || 'sonnet,haiku')
+// A profile's AI plan can set the ladder (targeting.mjs AI_PLANS: an API key
+// tries Haiku first); without one it is Sonnet then Haiku.
+export const CLI_MODELS = String(process.env.JARVIS_CLI_MODEL || person.models || 'sonnet,haiku')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
 /**

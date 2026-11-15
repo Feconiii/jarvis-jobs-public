@@ -48,12 +48,30 @@ function check() {
     check: (t) => ((t.match(/^\s*-\s*name:/gm) || []).length < 5 ? 'fewer than 5 companies tracked' : null),
   });
   file('preferences', 'jarvis/preferences.md', 'your plain-English rules', 'npm run jarvis:setup writes starter rules; go through them with the user');
-  file('profile', 'config/profile.yml', 'who you are, your field, target roles and pay floor', 'npm run jarvis:setup (or the assistant-led setup in AGENTS.md)');
+  file('profile', 'config/profile.yml', 'who you are, your field, target roles and pay floor', 'npm run jarvis:setup (or the assistant-led setup in AGENTS.md)', {
+    // A profile from before the plan and goals questions: re-run the interview's new parts with --update.
+    check: (t) => (!/^\s*plan:/m.test(t) ? 'no AI plan recorded' : !/^goals:/m.test(t) ? 'no job goals recorded' : null),
+  });
   file('resume-pool', 'jarvis/resume-pool.json', 'the resume bullet pool (verbatim from cv.md)', 'build it from cv.md by following jarvis/RESUME-POOL.md');
 
   const db = fs.existsSync(at('data/jarvis/jobs.db'));
   add('store', db, 'a job store with at least one scan', 'npm run jarvis:scan');
   return items;
+}
+
+// --hook: Claude Code's SessionStart hook (.claude/settings.json). What it
+// prints goes into the assistant's context at the start of every session, so
+// a folder with no profile starts the interview without anyone asking.
+if (process.argv.includes('--hook')) {
+  if (!fs.existsSync(at('config/profile.yml'))) {
+    console.log('JARVIS FIRST RUN: config/profile.yml does not exist, so the person in this session has not been set up. '
+      + 'Before anything else, greet them, say in two sentences what Jarvis Jobs does, and start the setup interview: '
+      + 'follow .claude/skills/jarvis-setup/SKILL.md (the /jarvis-setup skill) from its first section. Ask one topic at a time.');
+  } else {
+    const left = check().filter((i) => !i.ok);
+    if (left.length) console.log(`Jarvis setup check: ${left.length} thing(s) left: ${left.map((i) => i.what).join('; ')}. Offer to finish them (/jarvis-setup picks up where it stopped).`);
+  }
+  process.exit(0);
 }
 
 const items = check();

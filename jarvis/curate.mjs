@@ -45,7 +45,7 @@ export const STRETCH_LABEL = 'Stretch: asks 1-2 yrs.';
 /** Roles he turned down whatever the years (one list, prescreen.mjs stretchTitle). */
 const NOT_A_STRETCH_TITLE = { test: (t) => !stretchTitle(t) };
 import { htmlToText } from './text.mjs';
-import { person, screen } from './targeting.mjs';
+import { person, screen, USAGE } from './targeting.mjs';
 import { normCo, sameFiler } from './employer-names.mjs';
 import { dolPetitions } from './sponsor-prior.mjs';
 import { samePath } from './same-file.mjs';
@@ -1402,8 +1402,10 @@ async function main() {
       let lines = [];
       try { lines = fs.readFileSync(DAILY_LOG, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }); } catch { /* no log yet */ }
       const topUpDay = topUpToday(lines, { cap: 2 * perRun });
-      r = await daily({ want: Number(arg('want', 20)), target: Number(arg('target', 50)), topUp, topUpDay, maxRead: Number(arg('max-read', 300)), log: outcome,
-        ...(trigger ? { trigger, maxFile: Math.max(0, Number(arg('max-file', 10)) || 10), days: Math.max(1, Number(arg('days', 3)) || 3) } : {}) });
+      // Unless a flag says otherwise, the person's usage level sizes the run (targeting.mjs USAGE).
+      const pace = USAGE[person.usage] || USAGE.standard;
+      r = await daily({ want: Number(arg('want', pace.want)), target: Number(arg('target', pace.target)), topUp, topUpDay, maxRead: Number(arg('max-read', pace.maxRead)), log: outcome,
+        ...(trigger ? { trigger, maxFile: Math.max(0, Number(arg('max-file', pace.triggerMaxFile)) || pace.triggerMaxFile), days: Math.max(1, Number(arg('days', 3)) || 3) } : {}) });
     } catch (e) {
       failed(`the run crashed: ${e?.message || e}`, 1);
       console.error(e?.stack || e);

@@ -53,7 +53,41 @@ export const DEFAULT_PERSON = Object.freeze({
   salaryFloor: 80000,
   preset: DEFAULT_PRESET,
   llm: 'claude',
+  plan: '',
+  usage: 'standard',
+  models: '',
+  helpLevel: 'fill_and_write',
   isDefault: true,
+});
+
+/**
+ * THE AI PLAN SETS HOW MUCH THE AI RUNS (2026-11-14). Setup asks which plan
+ * the person has for their assistant and records it as `targeting.plan`. The
+ * plan sets two things: the usage level (`targeting.usage`), which sizes the
+ * daily search's reading, and for Claude the model ladder the writers try in
+ * order (a spent model falls to the next). `JARVIS_CLI_MODEL` still overrides
+ * the ladder for one run. A profile with no plan reads as `standard`, which is
+ * what the code did before plans existed.
+ */
+export const AI_PLANS = Object.freeze({
+  'claude-pro': { llm: 'claude', usage: 'light', models: 'sonnet,haiku', label: 'Claude Pro' },
+  'claude-max': { llm: 'claude', usage: 'standard', models: 'sonnet,haiku', label: 'Claude Max (5x or 20x)' },
+  'claude-api': { llm: 'claude', usage: 'light', models: 'haiku,sonnet', label: 'Claude Code on an API key (billed per use)' },
+  'chatgpt-plus': { llm: 'codex', usage: 'light', models: '', label: 'ChatGPT Plus' },
+  'chatgpt-pro': { llm: 'codex', usage: 'standard', models: '', label: 'ChatGPT Pro' },
+  'chatgpt-business': { llm: 'codex', usage: 'standard', models: '', label: 'ChatGPT Business, Enterprise or Edu' },
+  other: { llm: '', usage: 'light', models: '', label: 'another plan, or not sure' },
+});
+
+/**
+ * What a usage level lets the daily search spend: `want` picks filed per run,
+ * `target` open picks it tops up to, `maxRead` postings read at most per run,
+ * `triggerMaxFile` picks a new-postings read files. `standard` is the values
+ * the dashboard and the scheduled search used before levels existed.
+ */
+export const USAGE = Object.freeze({
+  light: Object.freeze({ want: 10, target: 25, maxRead: 100, triggerMaxFile: 5 }),
+  standard: Object.freeze({ want: 20, target: 50, maxRead: 300, triggerMaxFile: 10 }),
 });
 
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
@@ -122,6 +156,11 @@ export function personFrom(cfg) {
   const auth = WORK_AUTH[workAuth];
   const preset = PRESETS[t.preset] ? t.preset : d.preset;
   const llm = /^codex$/i.test(String(process.env.JARVIS_LLM || t.llm || '')) ? 'codex' : 'claude';
+  const plan = AI_PLANS[t.plan] ? t.plan : '';
+  const usage = USAGE[t.usage] ? t.usage : (AI_PLANS[plan]?.usage || 'standard');
+  // Only Claude model names: the Codex runner ignores the ladder.
+  const models = String(t.models || AI_PLANS[plan]?.models || '').split(',')
+    .map((s) => s.trim().toLowerCase()).filter((s) => /^(sonnet|haiku)$/.test(s)).join(',');
 
   return Object.freeze({
     fullName,
@@ -137,6 +176,11 @@ export function personFrom(cfg) {
     salaryFloor: parseMoney(cfg.compensation?.minimum) ?? d.salaryFloor,
     preset,
     llm,
+    plan,
+    usage,
+    models,
+    // fill_only: they write every open-ended answer themselves (serve.mjs /api/answer refuses).
+    helpLevel: cfg.working_style?.help_level === 'fill_only' ? 'fill_only' : 'fill_and_write',
     isDefault: false,
   });
 }

@@ -3,14 +3,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 
-import { person, DEFAULT_PERSON, personFrom, parseGradDate, PRESETS, screen, discovery, writing, meta } from './targeting.mjs';
-import { QUESTIONS, validate, withDefaults, profileYaml, applyProfileYaml, preferencesMd } from './setup.mjs';
+import { person, DEFAULT_PERSON, personFrom, parseGradDate, PRESETS, screen, discovery, writing, meta, AI_PLANS, USAGE } from './targeting.mjs';
+import { QUESTIONS, validate, withDefaults, profileYaml, applyProfileYaml, preferencesMd, summary, updateAll } from './setup.mjs';
+import { parseRules } from './prefs.mjs';
 import { excluded, secrets, sharedTestScript, PERSONAL_TESTS, scrubText, forbiddenIn, SHARE_FILES } from './share-export.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -114,6 +115,107 @@ test('the starter preferences are the preset’s', () => {
   assert.match(md, /^# Test's job preferences/);
   assert.match(md, /prefer in location Seattle, New York/);
   for (const r of PRESETS['finance-data'].meta.starterPreferences) assert.ok(md.includes(r));
+});
+
+// The interview's plan, goals and working style (2026-11-14).
+const FULL = {
+  ...ANSWERS, llm: 'claude', ai_plan: 'claude-api', seniority: 'entry', work_mode: 'remote',
+  start_date: 'June 2026', target_companies: 'Acme Capital, Beta Bank', avoid_companies: 'Gamma Corp',
+  dealbreakers: 'no night shifts', check_in: 'weekly', applications_per_week: '8', help_level: 'fill_only',
+};
+
+test('THE AI PLAN SETS HOW MUCH THE AI RUNS: usage, the model ladder, and never Opus', () => {
+  const p = personFrom(yaml.load(profileYaml(withDefaults(FULL))));
+  assert.equal(p.plan, 'claude-api');
+  assert.equal(p.usage, 'light');
+  assert.equal(p.models, 'haiku,sonnet', 'pay-per-use tries the cheaper model first');
+  assert.equal(p.helpLevel, 'fill_only');
+  assert.equal(personFrom(yaml.load(profileYaml(withDefaults({ ...FULL, ai_plan: 'claude-max' })))).usage, 'standard');
+  assert.equal(personFrom({ targeting: { plan: 'claude-max', models: 'opus,sonnet' } }).models, 'sonnet', 'a hand-written Opus is dropped');
+  // A profile from before plans existed runs exactly as before.
+  const old = personFrom({ targeting: { preset: 'finance-data' } });
+  assert.equal(old.usage, 'standard');
+  assert.equal(old.models, '');
+  assert.equal(old.helpLevel, 'fill_and_write');
+  assert.deepEqual({ ...USAGE.standard }, { want: 20, target: 50, maxRead: 300, triggerMaxFile: 10 }, 'standard is the old fixed numbers');
+  assert.ok(USAGE.light.want < USAGE.standard.want && USAGE.light.maxRead < USAGE.standard.maxRead);
+  for (const [k, v] of Object.entries(AI_PLANS)) assert.ok(USAGE[v.usage], `${k} has a usage level`);
+});
+
+test('a plan for the other assistant is refused; a codex user defaults to a ChatGPT plan', () => {
+  assert.ok(validate(withDefaults({ ...FULL, llm: 'codex', ai_plan: 'claude-max' })).some((e) => e.startsWith('ai_plan')));
+  assert.equal(withDefaults(ANSWERS).ai_plan, 'chatgpt-plus');
+  assert.deepEqual(validate(withDefaults(FULL)), []);
+  assert.ok(validate(withDefaults({ ...FULL, applications_per_week: 'lots' })).some((e) => e.startsWith('applications_per_week')));
+});
+
+test('the goals and working style are written, and the companies and remote become rules the scorer reads', () => {
+  const doc = yaml.load(profileYaml(withDefaults(FULL)));
+  assert.deepEqual(doc.goals, { seniority: 'entry', work_mode: 'remote', start_date: 'June 2026',
+    target_companies: ['Acme Capital', 'Beta Bank'], avoid_companies: ['Gamma Corp'], dealbreakers: 'no night shifts' });
+  assert.deepEqual(doc.working_style, { check_in: 'weekly', applications_per_week: 8, help_level: 'fill_only' });
+  const md = preferencesMd(withDefaults(FULL));
+  assert.match(md, /^want Acme Capital, Beta Bank in company$/m);
+  assert.match(md, /^avoid Gamma Corp in company$/m, 'a company to skip is ranked down, never hidden');
+  assert.match(md, /^prefer in location remote$/m);
+  assert.match(md, /^# Dealbreakers in their words.*no night shifts/m, 'their words wait for a rule they agree to');
+  const rules = parseRules(md);
+  const company = rules.filter((r) => /company/.test(JSON.stringify(r)));
+  assert.ok(company.length >= 2, `the company rules parse: ${JSON.stringify(rules.slice(-4))}`);
+  assert.doesNotMatch(JSON.stringify(rules), /night shifts/, 'the comment is not a rule');
+});
+
+test('the summary they confirm says what the plan will do', () => {
+  const s = summary(withDefaults(FULL));
+  assert.match(s, /Claude Code on an API key/);
+  assert.match(s, new RegExp(`up to ${USAGE.light.want} picks a run and keeps ${USAGE.light.target} open`));
+  assert.match(s, /Acme Capital, Beta Bank/);
+  assert.match(s, /8 applications a week/);
+});
+
+test('A RE-RUN WITH --update KEEPS WHAT WAS ADDED SINCE and backs up what it changes', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'jarvis-update-'));
+  const paths = { profile: path.join(dir, 'profile.yml'), apply: path.join(dir, 'apply.yml'), prefs: path.join(dir, 'prefs.md'),
+    portals: path.join(dir, 'portals.yml'), applyExample: path.join(ROOT, 'config', 'apply-profile.example.yml') };
+  const first = withDefaults(ANSWERS);
+  const prof = yaml.load(profileYaml(first));
+  prof.narrative.headline = 'Analyst who reconciles';
+  writeFileSync(paths.profile, yaml.dump(prof));
+  const ap = yaml.load(applyProfileYaml(first, readFileSync(paths.applyExample, 'utf8')));
+  ap.work_experience = [{ title: 'Intern', company: 'Somewhere' }];
+  writeFileSync(paths.apply, yaml.dump(ap));
+  writeFileSync(paths.prefs, `${preferencesMd(first)}never commission only\n`);
+  updateAll(withDefaults({ ...FULL, city: 'Boston', state: 'MA' }), { paths, log: () => {} });
+  const p2 = yaml.load(readFileSync(paths.profile, 'utf8'));
+  assert.equal(p2.narrative.headline, 'Analyst who reconciles', 'narrative kept');
+  assert.equal(p2.targeting.plan, 'claude-api', 'new answers in');
+  assert.equal(p2.candidate.location, 'Boston, MA');
+  const a2 = yaml.load(readFileSync(paths.apply, 'utf8'));
+  assert.deepEqual(a2.work_experience, [{ title: 'Intern', company: 'Somewhere' }], 'work history kept');
+  assert.equal(a2.identity.city, 'Boston');
+  const md = readFileSync(paths.prefs, 'utf8');
+  assert.match(md, /^never commission only$/m, 'a hand-added rule stays');
+  assert.match(md, /^want Acme Capital, Beta Bank in company$/m);
+  assert.equal(md.split('want Acme Capital').length, 2, 'a rule is never added twice');
+  updateAll(withDefaults(FULL), { paths, log: () => {} });
+  assert.equal(readFileSync(paths.prefs, 'utf8').split('want Acme Capital').length, 2);
+  assert.ok(readdirSync(dir).some((f) => /^profile\.yml\.bak-/.test(f)) && readdirSync(dir).some((f) => /^apply\.yml\.bak-/.test(f)));
+});
+
+test('WITH NO PROFILE, A SESSION IS TOLD TO START THE INTERVIEW (the SessionStart hook)', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'jarvis-hook-'));
+  mkdirSync(path.join(dir, 'jarvis'));
+  copyFileSync(path.join(HERE, 'setup-check.mjs'), path.join(dir, 'jarvis', 'setup-check.mjs'));
+  const out = execFileSync(process.execPath, [path.join(dir, 'jarvis', 'setup-check.mjs'), '--hook'], { encoding: 'utf8' });
+  assert.match(out, /JARVIS FIRST RUN/);
+  assert.match(out, /jarvis-setup\/SKILL\.md/);
+  mkdirSync(path.join(dir, 'config'));
+  writeFileSync(path.join(dir, 'config', 'profile.yml'), 'candidate:\n  full_name: Someone\n');
+  const later = execFileSync(process.execPath, [path.join(dir, 'jarvis', 'setup-check.mjs'), '--hook'], { encoding: 'utf8' });
+  assert.doesNotMatch(later, /FIRST RUN/);
+  assert.match(later, /no AI plan recorded/, 'an older profile is asked for its plan');
+  const settings = JSON.parse(readFileSync(path.join(ROOT, 'share', 'claude-settings.json'), 'utf8'));
+  assert.match(JSON.stringify(settings.hooks.SessionStart), /setup-check\.mjs\\" --hook/, 'the shipped settings run it');
 });
 
 test('THE SHARE EXPORT LEAVES OUT HIS OWN MATERIAL', () => {

@@ -19,7 +19,9 @@
  *                                                interviewed them and wrote the file
  *
  * It never overwrites a file that exists unless --force is given, and then it
- * keeps the old one beside it as <name>.bak-<date>.
+ * keeps the old one beside it as <name>.bak-<date>. `--update` re-runs on an
+ * existing setup and keeps what was added since (updateAll). `--dry-run` prints
+ * the summary of the answers and writes nothing, so they can confirm it first.
  *
  * After writing, `--find-boards` (or answering yes) runs the board finder on the
  * preset's starter companies so the first scan has something to read.
@@ -31,7 +33,7 @@ import { spawnSync } from 'node:child_process';
 import readline from 'node:readline/promises';
 import yaml from 'js-yaml';
 
-import { PRESETS, WORK_AUTH, parseGradDate, personFrom } from './targeting.mjs';
+import { PRESETS, WORK_AUTH, AI_PLANS, USAGE, parseGradDate, personFrom } from './targeting.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -43,6 +45,7 @@ const P = {
   prefs: path.join(HERE, 'preferences.md'),
   cv: path.join(ROOT, 'cv.md'),
 };
+const DEFAULT_PATHS = P;
 
 const STATES = {
   AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado',
@@ -60,6 +63,11 @@ const fullState = (s) => STATES[String(s || '').trim().toUpperCase()] || String(
 
 const list = (v) => (Array.isArray(v) ? v : String(v || '').split(','))
   .map((s) => String(s).trim()).filter(Boolean);
+
+const SENIORITY = ['internship', 'new_grad', 'entry', 'experienced'];
+const WORK_MODES = ['onsite', 'hybrid', 'remote', 'any'];
+const CHECK_INS = ['daily', 'few_times_a_week', 'weekly'];
+const HELP_LEVELS = ['fill_only', 'fill_and_write'];
 
 /** The questions, in order. `key` is the answers-file field. */
 export const QUESTIONS = [
@@ -87,7 +95,22 @@ export const QUESTIONS = [
   { key: 'salary_target', ask: 'Salary you are aiming for', def: (a) => a.salary_minimum },
   { key: 'preferred_cities', ask: 'Cities you would most like, comma separated (blank = anywhere in the US)' },
   { key: 'relocate', ask: 'Willing to relocate? yes/no', def: () => 'yes', choices: ['yes', 'no'] },
+  // The job they want, past the title (stored under `goals:` in config/profile.yml).
+  { key: 'seniority', ask: 'Level you are applying at: internship, new_grad, entry or experienced', def: () => 'new_grad', choices: SENIORITY },
+  { key: 'work_mode', ask: 'On-site, hybrid or remote: onsite, hybrid, remote or any', def: () => 'any', choices: WORK_MODES },
+  { key: 'start_date', ask: 'When you want to start (e.g. June 2027, as soon as possible)' },
+  { key: 'target_companies', ask: 'Companies you most want, comma separated (blank = none in particular)' },
+  { key: 'avoid_companies', ask: 'Companies to stay away from, comma separated' },
+  { key: 'dealbreakers', ask: 'Dealbreakers in your words (e.g. no night shifts, nothing in sales)' },
+  // The assistant and its plan: the plan sets how much the AI runs (targeting.mjs AI_PLANS).
   { key: 'llm', ask: 'Which AI does this machine have: claude or codex', def: () => 'codex', choices: ['claude', 'codex'] },
+  { key: 'ai_plan', ask: `Which plan you have for it: ${Object.keys(AI_PLANS).join(', ')}`,
+    def: (a) => (a.llm === 'claude' ? 'claude-pro' : 'chatgpt-plus'), choices: Object.keys(AI_PLANS),
+    check: (v, a) => { const p = AI_PLANS[String(v).toLowerCase()]; return !p || !p.llm || !a.llm || p.llm === a.llm || `${v} is a ${p.llm} plan, and the AI is ${a.llm}`; } },
+  // How they want to work (stored under `working_style:`; the assistant reads it each session).
+  { key: 'check_in', ask: 'How often you will look at new picks: daily, few_times_a_week or weekly', def: () => 'daily', choices: CHECK_INS },
+  { key: 'applications_per_week', ask: 'Applications a week you are aiming for (blank = no goal)', check: (v) => /^\d{1,3}$/.test(String(v).trim()) || 'a number, like 10' },
+  { key: 'help_level', ask: 'How much it writes for you: fill_only (fields and resume; you write the open questions) or fill_and_write (it drafts those too, for you to read)', def: () => 'fill_and_write', choices: HELP_LEVELS },
   { key: 'cv_path', ask: 'Path to your resume as text or Markdown (blank to add cv.md yourself later)' },
 ];
 
@@ -97,7 +120,7 @@ export function validate(a) {
     const v = a[q.key];
     if (q.required && !String(v ?? '').trim()) errors.push(`${q.key} is required`);
     if (v && q.choices && !q.choices.includes(String(v).toLowerCase())) errors.push(`${q.key} must be one of ${q.choices.join(', ')}`);
-    if (v && q.check) { const r = q.check(v); if (r !== true) errors.push(`${q.key}: ${r}`); }
+    if (v && q.check) { const r = q.check(v, a); if (r !== true) errors.push(`${q.key}: ${r}`); }
   }
   return errors;
 }
@@ -133,8 +156,26 @@ export function profileYaml(a) {
       graduation: a.graduation,
       gpa: a.gpa || '',
     },
-    targeting: { preset: a.preset, llm: a.llm },
+    // plan → usage (how much the daily search reads) and the writers' model ladder
+    targeting: {
+      preset: a.preset, llm: a.llm, plan: a.ai_plan || 'other',
+      usage: AI_PLANS[a.ai_plan]?.usage || 'light',
+      ...(AI_PLANS[a.ai_plan]?.models ? { models: AI_PLANS[a.ai_plan].models } : {}),
+    },
     target_roles: { primary: list(a.target_roles), secondary: [] },
+    goals: {
+      seniority: a.seniority || '',
+      work_mode: a.work_mode || 'any',
+      start_date: a.start_date || '',
+      target_companies: list(a.target_companies),
+      avoid_companies: list(a.avoid_companies),
+      dealbreakers: a.dealbreakers || '',
+    },
+    working_style: {
+      check_in: a.check_in || 'daily',
+      applications_per_week: a.applications_per_week ? Number(a.applications_per_week) : null,
+      help_level: a.help_level || 'fill_and_write',
+    },
     narrative: { headline: '', exit_story: '', superpowers: [], proof_points: [] },
     compensation: { target_range: a.salary_target || a.salary_minimum, currency: 'USD', minimum: a.salary_minimum },
     location: {
@@ -222,8 +263,39 @@ export function preferencesMd(a) {
     '---',
     '',
     ...m.starterPreferences,
-    ...(list(a.preferred_cities).length ? [`prefer in location ${list(a.preferred_cities).join(', ')}`] : []),
+    ...goalRules(a),
     '',
+  ].join('\n');
+}
+
+/** The rules the setup answers make, past the preset's starters. */
+export function goalRules(a) {
+  const out = [];
+  if (list(a.preferred_cities).length) out.push(`prefer in location ${list(a.preferred_cities).join(', ')}`);
+  if (a.work_mode === 'remote') out.push('prefer in location remote');
+  if (list(a.target_companies).length) out.push(`want ${list(a.target_companies).join(', ')} in company`);
+  // `avoid`, not `never`: a company they would rather skip is a taste, and stays visible.
+  if (list(a.avoid_companies).length) out.push(`avoid ${list(a.avoid_companies).join(', ')} in company`);
+  // Their own words are not rules yet: the assistant turns each into one with them.
+  if (String(a.dealbreakers || '').trim()) out.push(`# Dealbreakers in their words (turn each into a never/avoid rule with them): ${String(a.dealbreakers).trim()}`);
+  return out;
+}
+
+/** The answers in a few plain lines, for them to confirm before anything is written. */
+export function summary(a) {
+  const plan = AI_PLANS[a.ai_plan] || AI_PLANS.other;
+  const pace = USAGE[plan.usage];
+  const auth = WORK_AUTH[a.work_authorization];
+  return [
+    `${a.full_name} <${a.email}>, ${[a.city, a.state].filter(Boolean).join(', ') || 'no city given'}`,
+    `${a.degree} in ${a.major}, ${a.school}, graduating ${a.graduation}${a.gpa ? `, GPA ${a.gpa}` : ''}`,
+    `Field: ${PRESETS[a.preset]?.meta.label || a.preset}; roles: ${list(a.target_roles).join(', ') || 'the preset\'s defaults'}; level: ${a.seniority || 'not given'}`,
+    `Work authorization: ${auth?.label || a.work_authorization}${auth?.needsSponsorship ? ' (needs sponsorship)' : ''}`,
+    `Pay: at least ${a.salary_minimum}, aiming for ${a.salary_target || a.salary_minimum}; cities: ${list(a.preferred_cities).join(', ') || 'anywhere in the US'}; ${a.work_mode || 'any'}; relocate: ${a.relocate || 'yes'}`,
+    `Start: ${a.start_date || 'not given'}; want: ${list(a.target_companies).join(', ') || 'none named'}; avoid: ${list(a.avoid_companies).join(', ') || 'none named'}`,
+    `Dealbreakers: ${a.dealbreakers || 'none given'}`,
+    `AI: ${a.llm} on ${plan.label}: the daily search files up to ${pace.want} picks a run and keeps ${pace.target} open${plan.models ? `; writers try ${plan.models.replace(',', ', then ')}` : ''}`,
+    `Working: looks at picks ${String(a.check_in || 'daily').replace(/_/g, ' ')}; ${a.applications_per_week ? `${a.applications_per_week} applications a week` : 'no weekly goal'}; ${a.help_level === 'fill_only' ? 'it fills fields, they write the open questions' : 'it fills fields and drafts the open questions for them to read'}`,
   ].join('\n');
 }
 
@@ -238,6 +310,42 @@ function writeGuarded(file, text, { force, log }) {
   writeFileSync(file, text);
   log(`  wrote    ${path.relative(ROOT, file)}`);
   return true;
+}
+
+/**
+ * A RE-RUN UPDATES, IT DOES NOT START OVER (--update). The profile takes the
+ * new answers and keeps what was written into it since (narrative, cover-letter
+ * settings); the form answers are re-filled on top of the existing file, so
+ * work history and everything else added by hand stays; the preferences keep
+ * every rule and gain only the new answers' lines they do not have yet. Each
+ * file changed is kept beside itself as <name>.bak-<date> first.
+ */
+export function updateAll(a, { log = console.log, paths = {} } = {}) {
+  const P = { ...DEFAULT_PATHS, ...paths };
+  const backup = (file) => { if (existsSync(file)) copyFileSync(file, `${file}.bak-${stamp()}`); };
+  const fresh = yaml.load(profileYaml(a));
+  const old = existsSync(P.profile) ? (yaml.load(readFileSync(P.profile, 'utf8')) || {}) : {};
+  backup(P.profile);
+  mkdirSync(path.dirname(P.profile), { recursive: true });
+  writeFileSync(P.profile, `# Updated by jarvis/setup.mjs --update on ${stamp()}. Edit freely.\n`
+    + yaml.dump({ ...old, ...fresh, narrative: old.narrative || fresh.narrative, cover_letter: old.cover_letter || fresh.cover_letter }, { lineWidth: 100 }));
+  log(`  updated  ${path.relative(ROOT, P.profile)}`);
+  const base = existsSync(P.apply) ? readFileSync(P.apply, 'utf8') : readFileSync(P.applyExample, 'utf8');
+  backup(P.apply);
+  mkdirSync(path.dirname(P.apply), { recursive: true });
+  writeFileSync(P.apply, applyProfileYaml(a, base));
+  log(`  updated  ${path.relative(ROOT, P.apply)}`);
+  if (!existsSync(P.prefs)) { writeFileSync(P.prefs, preferencesMd(a)); log(`  wrote    ${path.relative(ROOT, P.prefs)}`); }
+  else {
+    const have = readFileSync(P.prefs, 'utf8');
+    const add = goalRules(a).filter((r) => !have.includes(r));
+    if (add.length) {
+      backup(P.prefs);
+      writeFileSync(P.prefs, `${have.replace(/\s*$/, '\n')}${add.join('\n')}\n`);
+      log(`  added    ${add.length} rule(s) to ${path.relative(ROOT, P.prefs)}`);
+    } else log(`  kept     ${path.relative(ROOT, P.prefs)} (no new rules)`);
+  }
+  if (!existsSync(P.portals)) { writeFileSync(P.portals, portalsYaml()); log(`  wrote    ${path.relative(ROOT, P.portals)}`); }
 }
 
 export function writeAll(a, { force = false, log = console.log } = {}) {
@@ -257,8 +365,10 @@ export function writeAll(a, { force = false, log = console.log } = {}) {
 
 export function findBoards(a, { log = console.log } = {}) {
   const m = PRESETS[a.preset].meta;
-  log(`\nLooking for the job boards of ${m.starterCompanies.length} starter companies (a few minutes)...`);
-  const r = spawnSync(process.execPath, [path.join(HERE, 'discover-ats.mjs'), '--names', m.starterCompanies.join(','), '--write'], { stdio: 'inherit', cwd: ROOT });
+  // The companies they named come first, then the field's starters.
+  const names = [...new Set([...list(a.target_companies), ...m.starterCompanies])];
+  log(`\nLooking for the job boards of ${names.length} companies (a few minutes)...`);
+  const r = spawnSync(process.execPath, [path.join(HERE, 'discover-ats.mjs'), '--names', names.join(','), '--write'], { stdio: 'inherit', cwd: ROOT });
   return r.status === 0;
 }
 
@@ -284,6 +394,7 @@ async function interview() {
 async function main() {
   const argv = process.argv.slice(2);
   const force = argv.includes('--force');
+  const update = argv.includes('--update');
   const ai = argv.indexOf('--answers');
   let a; let boards = argv.includes('--find-boards');
   if (ai >= 0) {
@@ -293,8 +404,17 @@ async function main() {
   } else {
     ({ a, boards } = await interview());
   }
+  console.log(`\n${summary(a)}`);
+  // --dry-run: the summary only, for them to confirm before anything is written.
+  if (argv.includes('--dry-run')) { console.log('\n(dry run: nothing written)'); return; }
   console.log('');
-  writeAll(a, { force });
+  if (ai < 0) {
+    // Kept so the next run (or the assistant) can change one answer and re-run with --update.
+    const saved = path.join(ROOT, 'data', 'jarvis', 'setup-answers.json');
+    mkdirSync(path.dirname(saved), { recursive: true });
+    writeFileSync(saved, `${JSON.stringify(a, null, 2)}\n`);
+  }
+  if (update) updateAll(a); else writeAll(a, { force });
   const p = personFrom(yaml.load(profileYaml(a)));
   console.log(`\nSet up for ${p.fullName}: ${PRESETS[p.preset].meta.label}; graduating ${p.gradLabel}; `
     + `${p.needsSponsorship ? 'needs sponsorship' : 'no sponsorship needed'}; writers run on ${p.llm}.`);

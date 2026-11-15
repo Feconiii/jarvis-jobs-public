@@ -96,12 +96,23 @@ you open.
 ## Getting started
 
 **The easy way:** run `npm install`, then open this folder in
-[Claude Code](https://claude.com/claude-code) or Codex and say *"set me up"*
-(in Claude Code, `/jarvis-setup` does the same). The assistant interviews you:
-your field, work authorization, school and graduation, pay floor, cities, your
-resume. It writes your files with `npm run jarvis:setup`, finds the job boards
-of your field's starter companies, turns your resume into `cv.md`, and ends
-with the first scan and the browser extension. `AGENTS.md` holds the steps.
+[Claude Code](https://claude.com/claude-code) or Codex and say hello. With no
+profile yet, the assistant starts the setup interview by itself (in Claude
+Code, `/jarvis-setup` starts it any time). It asks one topic at a time:
+which AI and plan you use (a smaller plan makes the daily search read less,
+so it stays inside your usage limit), your background and resume, your job
+goals (field, titles, level, cities or remote, pay, start date, companies to
+aim at or avoid, dealbreakers) and how you want to work (how often, how many
+applications, how much it writes for you). It shows you a summary to
+confirm, writes your own files (never committed), finds the job boards of
+the companies you named and your field's starters, turns your resume into
+`cv.md`, and ends with the first scan and the browser extension. Run it
+again any time to change an answer.
+
+The assistant's instructions are in [AGENTS.md](AGENTS.md) (Codex and most
+other assistants read it) and [CLAUDE.md](CLAUDE.md) (the same text, for
+Claude Code): what each part does, a normal day, the commands and the rules
+it keeps.
 
 **By hand:** see **[SETUP.md](SETUP.md)**. About 20 minutes to a working
 dashboard, longer to write your CV and preferences well (which is the part

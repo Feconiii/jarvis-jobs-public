@@ -86,7 +86,7 @@ import { makeTravelLookup } from './travel-lookup.mjs';
 import { loadedExtension, extensionIds } from './chrome-extension-state.mjs';
 // The resume variants, so /api/resumes knows which folders to look in.
 import { ALL_FAMILIES, resumeFileName } from './resume-family.mjs';
-import { person, screen } from './targeting.mjs';
+import { person, screen, USAGE } from './targeting.mjs';
 import { openInChrome, findChrome } from './open-in-chrome.mjs';
 import { listSchedules, addSchedule, cancelSchedule, takeDue, sendableSchedule, recordResult, parseWindow, whenLabel, daysLabel, afterAcceptWindow, touchSchedule, scheduleAccepted, catchUpOwed } from './outreach-schedule.mjs';
 // Refuses to tailor a resume for a posting that answers 404 — see /api/apply.
@@ -621,11 +621,13 @@ function kickRetire(picks) {
  */
 const CURATE_EVERY_MS = 6 * 60 * 60 * 1000;
 let curateChild = null;
-// The new-postings read (C): at most this many filed, postings of the last 3 days only.
-const TRIGGER_MAX_FILE = 10;
+// How much each run reads and files is the person's usage level (targeting.mjs
+// USAGE, set by their AI plan): `standard` is 20 wanted, 50 open, and a
+// new-postings read (C) filing at most 10, postings of the last 3 days only.
+const PACE = USAGE[person.usage] || USAGE.standard;
 function startCurate({ trigger = false, reason = '' } = {}) {
-  const args = ['--daily', '--want', trigger ? String(TRIGGER_MAX_FILE) : '20', '--target', '50',
-    ...(trigger ? ['--trigger', reason || 'new postings read', '--max-file', String(TRIGGER_MAX_FILE), '--days', '3'] : [])];
+  const args = ['--daily', '--want', String(trigger ? PACE.triggerMaxFile : PACE.want), '--target', String(PACE.target), '--max-read', String(PACE.maxRead),
+    ...(trigger ? ['--trigger', reason || 'new postings read', '--max-file', String(PACE.triggerMaxFile), '--days', '3'] : [])];
   curateChild = spawn(process.execPath, [path.join(HERE, 'curate.mjs'), ...args],
     { cwd: ROOT, stdio: 'ignore', windowsHide: true });
   background(curateChild);
@@ -5398,6 +5400,10 @@ const server = http.createServer(async (req, res) => {
         // arrives — not only where the planner would have caught it.
         if (offLimits(question)) {
           return json(res, 403, { error: 'that question is yours to answer — self-identification, pay, references and background questions are never written for you' });
+        }
+        // Their setup said they write the open-ended answers (working_style.help_level).
+        if (person.helpLevel === 'fill_only') {
+          return json(res, 403, { error: 'your setup says you write open-ended answers yourself, so nothing was written (change it with /jarvis-setup)' });
         }
         // WHICH JOB, CHECKED (2026-09-17). An answer written with no job
         // ("no-job") or with a stale tab id is written against the wrong

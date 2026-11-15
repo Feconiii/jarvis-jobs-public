@@ -7,30 +7,49 @@ and fills application forms in your browser while stopping at the Submit button.
 This copy is set up for **one person: whoever ran setup on this machine.**
 Everything about them lives in files git never sees (listed below). The code
 is shared and updated with `git pull`. A pull never touches those files.
+The person you are talking to may never have used a coding assistant: talk
+plainly, run the commands yourself, and explain what you did in a sentence.
 
 ## First run: setup (do this before anything else)
 
-At the start of a session run `node jarvis/setup-check.mjs` (built-ins only;
-works before `npm install`). If `config/profile.yml` does not exist, the person
-has not been set up yet; if the check lists anything else missing, offer to
-finish it. Do not scan, build resumes or fill forms for someone whose `cv.md`
-and `data/jarvis/apply-profile.yml` are not theirs yet. Do this, in order
-(Claude Code also has the same interview as `/jarvis-setup`,
-`.claude/skills/jarvis-setup/SKILL.md`, with more detail per section):
+At the start of every session run `node jarvis/setup-check.mjs` (built-ins
+only; works before `npm install`). In Claude Code a SessionStart hook in
+`.claude/settings.json` runs it for you and puts the result in front of you.
+
+**If `config/profile.yml` does not exist, this person has not been set up.
+Start the setup interview yourself, before anything else and without waiting
+to be asked:** greet them, say in two sentences what Jarvis does, and begin.
+If the check lists anything else missing, offer to finish it. Do not scan,
+build resumes or fill forms for someone whose `cv.md` and
+`data/jarvis/apply-profile.yml` are not theirs yet.
+
+The interview is `.claude/skills/jarvis-setup/SKILL.md` (`/jarvis-setup` in
+Claude Code; in any other assistant, read that file and follow it). It asks
+**one topic at a time**, in this order:
+
+1. **Their AI and plan**: Claude Code or Codex, and which subscription or
+   plan (Claude Pro, Max, an API key; ChatGPT Plus, Pro, Business). The plan
+   sets how much the daily search reads (`USAGE` in `jarvis/targeting.mjs`)
+   and, for Claude, which model the writers try first.
+2. **Their background**: contact details, education, work authorization,
+   location, and their resume with the experience, projects and skills it
+   leaves out.
+3. **Their job goals**: field, target titles, level, cities or remote, pay
+   floor and target, start date, companies to aim at or avoid, dealbreakers.
+4. **How they want to work**: how often they check, applications a week, and
+   whether it drafts open-ended answers or only fills fields.
+
+Then, in order:
 
 0. If `node_modules` is missing, `npm install`.
-1. **Interview them.** Ask, in plain conversation, for every field listed in
-   `QUESTIONS` in `jarvis/setup.mjs`: name, legal name, email, phone, city,
-   state, ZIP, LinkedIn, portfolio, school, degree, degree level, major,
-   graduation, GPA, field (`finance-data` or `hardware-engineering`), target
-   job titles, work authorization (`citizen`, `permanent_resident`, `f1`,
-   `visa`, `no_sponsorship_needed`), citizenship country, salary floor and
-   target, preferred cities, relocation, which AI this machine has (`codex`
-   or `claude`). Ask where their resume file is.
-2. **Write their answers** to `data/jarvis/setup-answers.json` (keys exactly as
-   in `QUESTIONS`) and run:
+1. **Write their answers** to `data/jarvis/setup-answers.json` (keys exactly
+   as in `QUESTIONS` in `jarvis/setup.mjs`), show them the summary
+   (`node jarvis/setup.mjs --answers data/jarvis/setup-answers.json --dry-run`),
+   and when they confirm it run:
    `node jarvis/setup.mjs --answers data/jarvis/setup-answers.json --find-boards`
    (`npm run jarvis:setup` asks the same questions in the terminal instead.)
+2. **Turn their dealbreakers into rules** in `jarvis/preferences.md` with
+   them (setup leaves them there as a comment in their words).
 3. **Write `cv.md`** from their resume. Convert it faithfully to Markdown:
    every role, date, bullet, number and skill exactly as they wrote it.
    Invent nothing, add nothing, improve nothing. If something is unclear, ask.
@@ -56,11 +75,54 @@ and `data/jarvis/apply-profile.yml` are not theirs yet. Do this, in order
    **Load unpacked** → `jarvis/extension`. On an application page **Jarvis
    Apply** fills the form, attaches the tailored resume and stops at Submit.
 
+**Changing answers later** (a new plan, city, goal): edit
+`data/jarvis/setup-answers.json` with them, show the `--dry-run` summary, then
+run setup with `--update` instead of `--find-boards`. It keeps everything
+added since and backs up each file it changes.
+
+## How the pieces fit
+
+- **Scanner** (`jarvis/scan.mjs`, `providers/`): reads the job boards of every
+  company in `portals.yml` straight from their applicant-tracking systems
+  into the store, `data/jarvis/jobs.db`.
+- **Triage and fit** (`jarvis/triage.mjs`, `jarvis/visa.mjs`, `jarvis/fit.mjs`):
+  flags seniority, visa, clearance, degree, pay and location on every posting
+  and scores it against `jarvis/preferences.md`. It flags; it never drops.
+- **Curator** (`jarvis/curate.mjs`): the daily search. The AI reads new
+  postings in full against their rules and files the keepers to the Inbox
+  with a reason. How much it reads is their plan's usage level.
+- **Dashboard** (`npm run jarvis:serve`, http://localhost:4300): Inbox,
+  library, Applications board, Outreach. While it is open it scans and runs
+  the daily search every 6 hours.
+- **Resumes** (`jarvis/build-resumes.mjs`, `jarvis/resume-pool.json`): one
+  tailored PDF per posting, built only from bullets copied from `cv.md`.
+- **Browser extension** (`jarvis/extension`): on an application page it fills
+  every field from `data/jarvis/apply-profile.yml`, attaches the resume,
+  drafts open-ended answers from `cv.md` (when their working style says to),
+  and stops at Submit.
+
+## A normal day
+
+1. The dashboard (or the scheduled search on Windows) has scanned and filed
+   new picks to the Inbox.
+2. They read the picks; a heart moves one to the Applications board's
+   Tracking column; hiding one asks why, and that reason trains the ranking.
+3. They open a pick's application page and press **Jarvis Apply** in the
+   extension. It fills the form; they read it, fix what they want, and press
+   Submit themselves.
+4. Replies (with Gmail connected) move the card along the board.
+
+Read `working_style` in `config/profile.yml` at the start of a session and
+work that way: bring up new picks as often as `check_in` says, keep
+`applications_per_week` in view (`node jarvis/application-pace.mjs`), and
+draft open-ended answers only when `help_level` is `fill_and_write`.
+
 ## Their files (never commit, never print in full, never copy elsewhere)
 
 | File | What it is |
 |------|------------|
-| `config/profile.yml` | who they are and what they want (setup writes it) |
+| `config/profile.yml` | who they are, their goals, AI plan and working style (setup writes it) |
+| `data/jarvis/setup-answers.json` | their interview answers, for re-running setup with `--update` |
 | `data/jarvis/apply-profile.yml` | form answers |
 | `data/jarvis/` | the job store and everything the dashboard saves |
 | `cv.md`, `cv-short.md` | their resume, the source of every claim |

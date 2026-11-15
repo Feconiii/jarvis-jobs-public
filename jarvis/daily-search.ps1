@@ -18,8 +18,10 @@ $outcomes = Join-Path $repo 'data\jarvis\curate-daily.jsonl'
 $before = 0
 if (Test-Path $outcomes) { $before = @([IO.File]::ReadAllLines($outcomes)).Count }
 # --topup: up to his dashboard setting (default 10) more fits each scheduled run,
-# even with a full inbox (approved 2026-11-03).
-$p = Start-Process -FilePath $node -ArgumentList 'jarvis/curate.mjs', '--daily', '--want', '20', '--target', '50', '--topup' `
+# even with a full inbox (approved 2026-11-03). How many it wants and the open
+# picks it tops up to come from the profile's usage level (targeting.mjs USAGE;
+# standard = 20 and 50, the numbers this line used to carry).
+$p = Start-Process -FilePath $node -ArgumentList 'jarvis/curate.mjs', '--daily', '--topup' `
   -WorkingDirectory $repo -NoNewWindow -PassThru `
   -RedirectStandardOutput "$log.out" -RedirectStandardError "$log.err"
 $null = $p.Handle   # held now, or ExitCode reads empty after the exit

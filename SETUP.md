@@ -42,12 +42,21 @@ npm run jarvis:setup -- --find-boards
 It asks who you are and what you want: name, contact details, school, degree,
 major, graduation, **field** (`hardware-engineering` or `finance-data`), target
 titles, **work authorization** (`citizen`, `permanent_resident`, `f1`, `visa`,
-`no_sponsorship_needed`), pay floor, cities, and which assistant you have
-(`claude` or `codex`). Then it writes:
+`no_sponsorship_needed`), pay floor, cities, your level, on-site or remote,
+start date, companies to aim at or avoid, dealbreakers, which assistant you
+have (`claude` or `codex`) and **its plan**, and how you want to work (how
+often you check, applications a week, whether it drafts open-ended answers).
+It prints a summary, then writes:
 
 | File | What it holds |
 |------|---------------|
-| `config/profile.yml` | who you are, your field (`targeting.preset`), your assistant (`targeting.llm`), target roles, pay floor |
+| `config/profile.yml` | who you are, your field (`targeting.preset`), your assistant and plan (`targeting.llm`, `targeting.plan`, `targeting.usage`), target roles, pay floor, `goals`, `working_style` |
+
+The plan sets `targeting.usage`. On `light` (Claude Pro, an API key, ChatGPT
+Plus, or "other") the daily search files up to 10 picks a run and keeps 25
+open; on `standard` (Claude Max, ChatGPT Pro or Business) it files up to 20
+and keeps 50. On an API key the writers try Haiku before Sonnet. You can
+change any of these in `config/profile.yml` by hand.
 | `data/jarvis/apply-profile.yml` | the answers forms are filled with: identity, education, work authorization |
 | `jarvis/preferences.md` | starter rules for your field, in plain English |
 | `portals.yml` | the companies you track (empty, then filled by `--find-boards`) |
@@ -55,7 +64,11 @@ titles, **work authorization** (`citizen`, `permanent_resident`, `f1`, `visa`,
 `--find-boards` looks up the job boards of your field's starter companies and
 tracks the ones it can verify. `--force` rewrites existing files (each is kept
 as a `.bak-<date>` first). An assistant runs the same thing non-interactively:
-`node jarvis/setup.mjs --answers <answers.json> --find-boards`.
+`node jarvis/setup.mjs --answers <answers.json> --find-boards`. Your answers are
+kept in `data/jarvis/setup-answers.json`; to change one later, edit it and run
+`node jarvis/setup.mjs --answers data/jarvis/setup-answers.json --update`,
+which keeps what you added since. `--dry-run` prints the summary and writes
+nothing.
 
 Work authorization decides the visa screen: a citizen is never hidden from a
 "U.S. citizens only" or "no sponsorship" posting; someone who needs
